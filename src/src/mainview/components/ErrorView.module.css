@@ -1,0 +1,57 @@
+.root {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	background: var(--bg);
+}
+
+.titlebar {
+	flex-shrink: 0;
+	height: var(--titlebar-height);
+}
+
+.center {
+	flex: 1;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+}
+
+.card {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+	gap: 12px;
+	max-width: 380px;
+}
+
+.title {
+	font-size: 17px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.message {
+	font-size: 13.5px;
+	line-height: 1.6;
+	color: var(--text-muted);
+}
+
+.retry {
+	margin-top: 4px;
+	padding: 8px 18px;
+	border-radius: var(--radius-sm);
+	background: var(--accent);
+	color: #fff;
+	font-size: 13px;
+	font-weight: 500;
+}
+.retry:hover {
+	filter: brightness(1.08);
+}
+.retry:disabled {
+	opacity: 0.6;
+	cursor: progress;
+}

@@ -1,0 +1,25 @@
+.shell {
+	display: grid;
+	grid-template-columns: var(--sidebar-width) 1fr;
+	height: 100%;
+	width: 100%;
+}
+
+.main {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	background: var(--bg);
+	overflow: hidden;
+}
+
+/* Draggable strip aligned with the native titlebar; matches the main bg. */
+.titlebar {
+	flex-shrink: 0;
+	height: var(--titlebar-height);
+}
+
+.scroll {
+	flex: 1;
+	overflow-y: auto;
+}

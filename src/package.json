@@ -1,0 +1,28 @@
+{
+	"name": "forest-ranger",
+	"version": "1.0.0",
+	"description": "Manage your worktrees",
+	"scripts": {
+		"start": "vite build && electrobun dev",
+		"dev": "electrobun dev --watch",
+		"dev:hmr": "concurrently \"bun run hmr\" \"bun run start\"",
+		"hmr": "vite --port 5178",
+		"build:canary": "vite build && electrobun build --env=canary"
+	},
+	"dependencies": {
+		"@base-ui-components/react": "1.0.0-rc.0",
+		"@tanstack/react-router": "^1.170.16",
+		"electrobun": "1.18.1",
+		"react": "^19.2.7",
+		"react-dom": "^19.2.7"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"@types/react": "^19.2.17",
+		"@types/react-dom": "^19.2.3",
+		"@vitejs/plugin-react": "^6.0.2",
+		"concurrently": "^10.0.3",
+		"typescript": "^6.0.3",
+		"vite": "^8.0.16"
+	}
+}

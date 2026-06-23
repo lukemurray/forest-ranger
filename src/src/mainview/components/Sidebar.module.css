@@ -1,0 +1,204 @@
+.sidebar {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	background: var(--bg-sidebar);
+	border-right: 1px solid var(--border);
+	padding: 0 8px 10px;
+	gap: 2px;
+	user-select: none;
+}
+
+/* Reserves the native titlebar height so the traffic lights don't overlap the
+   brand. Full-bleed (cancels the sidebar's horizontal padding) so the whole
+   strip is draggable. */
+.dragSpacer {
+	flex-shrink: 0;
+	height: var(--titlebar-height);
+	margin: 0 -8px;
+}
+
+.header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px 6px 10px;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-weight: 600;
+	font-size: 13px;
+	letter-spacing: 0.2px;
+	color: var(--green);
+}
+
+.iconButton {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+}
+.iconButton:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.iconButton:disabled {
+	opacity: 0.5;
+	cursor: progress;
+}
+
+.recentLink {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 7px 8px;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	font-size: 13px;
+}
+.recentLink:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.recentLinkActive {
+	background: var(--accent-soft);
+	color: var(--text);
+}
+
+.notice {
+	margin: 4px 6px 2px;
+	padding: 8px 10px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--amber);
+	background: rgba(226, 179, 65, 0.1);
+	border: 1px solid rgba(226, 179, 65, 0.25);
+	border-radius: var(--radius-sm);
+}
+
+.sectionLabel {
+	padding: 12px 8px 4px;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.6px;
+	color: var(--text-faint);
+}
+
+.projects {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	overflow-y: auto;
+	flex: 1;
+}
+
+.empty {
+	padding: 8px;
+	color: var(--text-faint);
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.node {
+	display: flex;
+	flex-direction: column;
+}
+
+.projectRow {
+	display: flex;
+	align-items: center;
+	border-radius: var(--radius-sm);
+	gap: 2px;
+}
+.projectRow:hover {
+	background: var(--bg-hover);
+}
+.projectRow[data-active] {
+	background: var(--bg-active);
+}
+
+.chevron {
+	display: grid;
+	place-items: center;
+	width: 22px;
+	height: 28px;
+	color: var(--text-faint);
+	transition: transform 0.15s ease;
+}
+.chevron[data-panel-open] {
+	transform: rotate(90deg);
+	color: var(--text-muted);
+}
+
+.projectName {
+	flex: 1;
+	text-align: left;
+	padding: 6px 6px 6px 0;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.panel {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	margin-left: 11px;
+	padding-left: 8px;
+	border-left: 1px solid var(--border);
+}
+
+.loading {
+	padding: 6px 8px;
+	font-size: 12px;
+	color: var(--text-faint);
+}
+
+.worktree {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: var(--radius-sm);
+	font-size: 12.5px;
+	color: var(--text-muted);
+}
+.worktree:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
+.worktreeBranch {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+
+.primaryDot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--green);
+	flex-shrink: 0;
+}
+
+.worktreeTime {
+	flex-shrink: 0;
+	font-size: 11px;
+	color: var(--text-faint);
+}

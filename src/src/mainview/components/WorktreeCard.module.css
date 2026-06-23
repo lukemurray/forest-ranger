@@ -1,0 +1,107 @@
+.card {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	text-align: left;
+	padding: 14px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	transition: border-color 0.12s ease, background 0.12s ease;
+}
+.card:hover {
+	border-color: var(--border-strong);
+	background: var(--bg-hover);
+}
+
+.top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.branch {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-family: var(--font-mono);
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.branch svg {
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+
+.badges {
+	display: flex;
+	gap: 5px;
+	flex-shrink: 0;
+}
+.badges span {
+	font-size: 10.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+	padding: 2px 6px;
+	border-radius: 4px;
+}
+.primary {
+	color: var(--green);
+	background: rgba(78, 201, 165, 0.14);
+}
+.detached {
+	color: var(--amber);
+	background: rgba(226, 179, 65, 0.14);
+}
+.locked {
+	color: var(--text-muted);
+	background: var(--bg-active);
+}
+
+.path {
+	font-size: 12px;
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.project {
+	color: var(--accent);
+	font-weight: 500;
+	margin-right: 8px;
+}
+
+.meta {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 12px;
+	color: var(--text-faint);
+}
+.hash {
+	font-family: var(--font-mono);
+}
+.dot {
+	opacity: 0.5;
+}
+.spacer {
+	flex: 1;
+}
+.reveal {
+	display: grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	border-radius: var(--radius-sm);
+	color: var(--text-faint);
+}
+.reveal:hover {
+	background: var(--bg-active);
+	color: var(--text);
+}
