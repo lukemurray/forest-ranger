@@ -6,9 +6,16 @@ import {
 	setDockOpen,
 	useTerminals,
 } from "../lib/terminalStore";
+import { bus } from "../rpc";
 import { TerminalPane } from "./TerminalPane";
 import { ChevronIcon, TerminalIcon } from "./icons";
 import styles from "./TerminalDock.module.css";
+
+/** Close a tab: kill the PTY (explicit) and drop the session. */
+function endSession(id: string) {
+	bus.termKill({ sessionId: id });
+	closeSession(id);
+}
 
 export function TerminalDock() {
 	const { sessions, activeId, dock, open } = useTerminals();
@@ -77,7 +84,7 @@ export function TerminalDock() {
 								className={styles.tabClose}
 								onClick={(e) => {
 									e.stopPropagation();
-									closeSession(s.id);
+									endSession(s.id);
 								}}
 							>
 								×

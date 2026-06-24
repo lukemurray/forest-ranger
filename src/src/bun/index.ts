@@ -1,4 +1,4 @@
-import { BrowserView, BrowserWindow, Updater, Utils } from "electrobun/bun";
+import Electrobun, { BrowserView, BrowserWindow, Updater, Utils } from "electrobun/bun";
 import { basename, join } from "node:path";
 import type {
 	AppRPC,
@@ -12,6 +12,7 @@ import type {
 import { detectApps, openWorktree, runInTerminal } from "./apps";
 import {
 	kill as termKill,
+	killAll as termKillAll,
 	resize as termResize,
 	setTerminalCallbacks,
 	startSession as termStart,
@@ -28,11 +29,12 @@ import {
 	fileDiff as gitFileDiff,
 	gitVersion,
 	listWorktrees as gitListWorktrees,
+	localBranches,
+	resolveBaseBranch,
 	resolveRepoToplevel,
 	worktreeActivity,
-	worktreeStatus,
-	type GitStatus,
-	type GitStatusFile,
+	worktreeChanges,
+	type BaseChange,
 } from "./git";
 
 const DEV_SERVER_PORT = 5178;
@@ -118,13 +120,8 @@ function recencyDesc(a: Worktree, b: Worktree): number {
 	return b.lastActivityAt - a.lastActivityAt;
 }
 
-const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
-
-function changeKind(x: string, y: string): ChangeKind {
-	if (x === "?" || y === "?") return "untracked";
-	if (x === "U" || y === "U" || CONFLICT_CODES.has(x + y)) return "conflicted";
-	const code = y !== " " ? y : x;
-	switch (code) {
+function letterKind(letter: string): ChangeKind {
+	switch (letter) {
 		case "A":
 		case "C":
 			return "added";
@@ -134,19 +131,21 @@ function changeKind(x: string, y: string): ChangeKind {
 			return "renamed";
 		case "T":
 			return "typechange";
+		case "U":
+			return "conflicted";
+		case "?":
+			return "untracked";
 		default:
 			return "modified";
 	}
 }
 
-function toChangedFile(f: GitStatusFile, status: GitStatus): ChangedFile {
-	const ns = status.numstat.get(f.path);
+function toChangedFile(c: BaseChange): ChangedFile {
 	return {
-		path: f.path,
-		kind: changeKind(f.x, f.y),
-		staged: f.x !== " " && f.x !== "?",
-		insertions: ns?.insertions ?? null,
-		deletions: ns?.deletions ?? null,
+		path: c.path,
+		kind: letterKind(c.letter),
+		insertions: c.insertions,
+		deletions: c.deletions,
 	};
 }
 
@@ -241,7 +240,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 
 			openWorktree: ({ path, app }) => openWorktree(path, app),
 
-			worktreeDetail: async ({ id }) => {
+			worktreeDetail: async ({ id, base }) => {
 				const row = worktreesRepo.get(id);
 				if (!row) return null;
 				const project = projectsRepo.get(row.project_id);
@@ -251,20 +250,19 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				const entry = entries.find((e) => e.path === row.path);
 				if (!entry) return null; // worktree no longer exists
 
-				const [activity, status] = await Promise.all([
+				// Don't compare a branch against itself.
+				const preferred = base && base !== entry.branch ? base : null;
+				const resolvedBase = await resolveBaseBranch(project.path, preferred);
+				const usableBase = resolvedBase === entry.branch ? null : resolvedBase;
+
+				const [activity, branches, changes] = await Promise.all([
 					worktreeActivity(row.path),
-					worktreeStatus(row.path),
+					localBranches(project.path),
+					worktreeChanges(row.path, usableBase),
 				]);
 
-				const files = status.files.map((f) => toChangedFile(f, status));
-				const totals = files.reduce(
-					(acc, f) => ({
-						files: acc.files + 1,
-						insertions: acc.insertions + (f.insertions ?? 0),
-						deletions: acc.deletions + (f.deletions ?? 0),
-					}),
-					{ files: 0, insertions: 0, deletions: 0 },
-				);
+				const committed = changes.committed.map(toChangedFile);
+				const uncommitted = changes.uncommitted.map(toChangedFile);
 
 				const worktree: Worktree = {
 					id,
@@ -283,20 +281,21 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 					worktree,
 					projectId: project.id,
 					projectName: project.name,
-					branch: status.branch ?? entry.branch,
-					upstream: status.upstream,
-					ahead: status.ahead,
-					behind: status.behind,
-					files,
-					totals,
+					branch: entry.branch,
+					base: changes.base,
+					branches,
+					ahead: changes.ahead,
+					behind: changes.behind,
+					committed,
+					uncommitted,
 					commands: commandsRepo.forProject(project.id).map(toCommand),
 				};
 			},
 
-			fileDiff: async ({ id, path }) => {
+			fileDiff: async ({ id, path, base }) => {
 				const row = worktreesRepo.get(id);
 				if (!row) return { path, binary: false, diff: "" };
-				const { binary, text } = await gitFileDiff(row.path, path);
+				const { binary, text } = await gitFileDiff(row.path, path, base);
 				return { path, binary, diff: text };
 			},
 
@@ -362,6 +361,16 @@ setTerminalCallbacks({
 	onData: (sessionId, data) => rpc.send.termData({ sessionId, data }),
 	onExit: (sessionId, exitCode) => rpc.send.termExit({ sessionId, exitCode }),
 });
+
+// Don't leave PTYs (dev servers, etc.) orphaned when the app quits.
+Electrobun.events.on("before-quit", () => termKillAll());
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+	process.on(sig, () => {
+		termKillAll();
+		process.exit(0);
+	});
+}
+process.on("exit", () => termKillAll());
 
 async function getMainViewUrl(): Promise<string> {
 	const channel = await Updater.localInfo.channel();

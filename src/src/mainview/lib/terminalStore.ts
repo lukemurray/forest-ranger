@@ -3,8 +3,11 @@ import { useSyncExternalStore } from "react";
 export type TermSession = {
 	id: string;
 	worktreeId: string;
+	projectId: string;
 	title: string;
 	commandId: string | null;
+	/** True while the PTY process is alive (cleared on exit). */
+	running: boolean;
 };
 
 export type DockPosition = "bottom" | "side";
@@ -31,14 +34,23 @@ function set(patch: Partial<State>) {
 }
 
 /** Open a new terminal session (in-app) and focus it. Returns the session id. */
-export function openSession(s: Omit<TermSession, "id">): string {
+export function openSession(s: Omit<TermSession, "id" | "running">): string {
 	const id = crypto.randomUUID();
 	set({
-		sessions: [...state.sessions, { ...s, id }],
+		sessions: [...state.sessions, { ...s, id, running: true }],
 		activeId: id,
 		open: true,
 	});
 	return id;
+}
+
+/** Mark a session's process as exited (keeps the tab; clears the running dot). */
+export function markExited(id: string) {
+	set({
+		sessions: state.sessions.map((s) =>
+			s.id === id ? { ...s, running: false } : s,
+		),
+	});
 }
 
 export function closeSession(id: string) {

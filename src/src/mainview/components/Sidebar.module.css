@@ -206,6 +206,28 @@
 	flex-shrink: 0;
 }
 
+/* pulsing indicator for a worktree/project with a running in-app task */
+.runningDot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--accent);
+	flex-shrink: 0;
+	margin-left: auto;
+	animation: runningPulse 1.4s ease-in-out infinite;
+}
+@keyframes runningPulse {
+	0%,
+	100% {
+		opacity: 1;
+		box-shadow: 0 0 0 0 var(--accent-soft);
+	}
+	50% {
+		opacity: 0.55;
+		box-shadow: 0 0 0 4px transparent;
+	}
+}
+
 .worktreeTime {
 	flex-shrink: 0;
 	font-size: 11px;

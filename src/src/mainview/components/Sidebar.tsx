@@ -15,6 +15,7 @@ import {
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SettingsMenu } from "./SettingsMenu";
+import { useTerminals } from "../lib/terminalStore";
 import styles from "./Sidebar.module.css";
 
 export function Sidebar({ projects }: { projects: Project[] }) {
@@ -22,6 +23,14 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 	const navigate = useNavigate();
 	const [adding, setAdding] = useState(false);
 	const [notice, setNotice] = useState<string | null>(null);
+
+	const { sessions } = useTerminals();
+	const runningWorktrees = new Set(
+		sessions.filter((s) => s.running).map((s) => s.worktreeId),
+	);
+	const runningProjects = new Set(
+		sessions.filter((s) => s.running).map((s) => s.projectId),
+	);
 
 	async function addProject() {
 		setAdding(true);
@@ -87,7 +96,14 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 				{projects.length === 0 ? (
 					<p className={styles.empty}>No projects yet. Add a git repo to begin.</p>
 				) : (
-					projects.map((p) => <ProjectNode key={p.id} project={p} />)
+					projects.map((p) => (
+						<ProjectNode
+							key={p.id}
+							project={p}
+							runningProjects={runningProjects}
+							runningWorktrees={runningWorktrees}
+						/>
+					))
 				)}
 			</nav>
 
@@ -96,7 +112,15 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 	);
 }
 
-function ProjectNode({ project }: { project: Project }) {
+function ProjectNode({
+	project,
+	runningProjects,
+	runningWorktrees,
+}: {
+	project: Project;
+	runningProjects: Set<string>;
+	runningWorktrees: Set<string>;
+}) {
 	const navigate = useNavigate();
 	const router = useRouter();
 	const params = useParams({ strict: false });
@@ -154,6 +178,9 @@ function ProjectNode({ project }: { project: Project }) {
 						>
 							{project.name}
 						</button>
+						{runningProjects.has(project.id) && (
+							<span className={styles.runningDot} title="task running" />
+						)}
 					</div>
 				}
 			>
@@ -196,9 +223,13 @@ function ProjectNode({ project }: { project: Project }) {
 										{wt.branch ?? "detached"}
 										{wt.isPrimary && <span className={styles.primaryDot} title="primary worktree" />}
 									</span>
-									<span className={styles.worktreeTime}>
-										{relativeTime(wt.lastActivityAt)}
-									</span>
+									{runningWorktrees.has(wt.id) ? (
+										<span className={styles.runningDot} title="task running" />
+									) : (
+										<span className={styles.worktreeTime}>
+											{relativeTime(wt.lastActivityAt)}
+										</span>
+									)}
 								</button>
 							}
 						>

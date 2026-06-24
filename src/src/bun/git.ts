@@ -182,6 +182,125 @@ export async function worktreeStatus(worktreePath: string): Promise<GitStatus> {
 	return { branch, upstream, ahead, behind, files, numstat };
 }
 
+/** Local branch names (short form). */
+export async function localBranches(repoPath: string): Promise<string[]> {
+	const res = await git(repoPath, [
+		"branch",
+		"--format=%(refname:short)",
+	]);
+	if (!res.ok) return [];
+	return res.stdout
+		.split("\n")
+		.map((b) => b.trim())
+		.filter((b) => b !== "");
+}
+
+/** Pick a base branch: the preferred one if it exists, else main/master. */
+export async function resolveBaseBranch(
+	repoPath: string,
+	preferred?: string | null,
+): Promise<string | null> {
+	const branches = await localBranches(repoPath);
+	if (preferred && branches.includes(preferred)) return preferred;
+	for (const cand of ["main", "master"]) {
+		if (branches.includes(cand)) return cand;
+	}
+	return null;
+}
+
+export type BaseChange = {
+	path: string;
+	letter: string; // name-status letter: A/M/D/R/C/T or ? (untracked)
+	insertions: number | null;
+	deletions: number | null;
+};
+
+export type WorktreeChanges = {
+	base: string | null;
+	ahead: number;
+	behind: number;
+	/** Committed branch work: HEAD vs the merge-base with `base`. */
+	committed: BaseChange[];
+	/** Working-tree edits vs HEAD, plus untracked files. */
+	uncommitted: BaseChange[];
+};
+
+function parseChanges(nameStatus: string, numstat: string): BaseChange[] {
+	const num = new Map<string, { ins: number | null; del: number | null }>();
+	for (const line of numstat.split("\n")) {
+		if (line.trim() === "") continue;
+		const [a, d, ...rest] = line.split("\t");
+		num.set(rest.join("\t"), {
+			ins: a === "-" ? null : Number(a),
+			del: d === "-" ? null : Number(d),
+		});
+	}
+	const files: BaseChange[] = [];
+	for (const line of nameStatus.split("\n")) {
+		if (line.trim() === "") continue;
+		const parts = line.split("\t");
+		const letter = parts[0]?.[0] ?? "M";
+		const path = parts[parts.length - 1] ?? "";
+		files.push({
+			path,
+			letter,
+			insertions: num.get(path)?.ins ?? null,
+			deletions: num.get(path)?.del ?? null,
+		});
+	}
+	return files;
+}
+
+/**
+ * Two views of a worktree's changes: `uncommitted` (working tree vs HEAD, incl.
+ * untracked) and `committed` (HEAD vs the merge-base with `base`). base is null
+ * when no comparison branch is available (then `committed` is empty).
+ */
+export async function worktreeChanges(
+	worktreePath: string,
+	base: string | null,
+): Promise<WorktreeChanges> {
+	const [uncNS, uncNum, untracked] = await Promise.all([
+		git(worktreePath, ["diff", "--name-status", "-M", "HEAD"]),
+		git(worktreePath, ["diff", "--numstat", "-M", "HEAD"]),
+		git(worktreePath, ["ls-files", "--others", "--exclude-standard"]),
+	]);
+
+	const uncommitted = parseChanges(uncNS.stdout, uncNum.stdout);
+	const seen = new Set(uncommitted.map((f) => f.path));
+	for (const p of untracked.stdout.split("\n")) {
+		const path = p.trim();
+		if (path === "" || seen.has(path)) continue;
+		uncommitted.push({ path, letter: "?", insertions: null, deletions: null });
+	}
+
+	let resolvedBase: string | null = null;
+	let ahead = 0;
+	let behind = 0;
+	let committed: BaseChange[] = [];
+
+	if (base) {
+		const mb = await git(worktreePath, ["merge-base", base, "HEAD"]);
+		if (mb.ok && mb.stdout.trim() !== "") {
+			const mergeBase = mb.stdout.trim();
+			resolvedBase = base;
+			const [cNS, cNum, counts] = await Promise.all([
+				git(worktreePath, ["diff", "--name-status", "-M", mergeBase, "HEAD"]),
+				git(worktreePath, ["diff", "--numstat", "-M", mergeBase, "HEAD"]),
+				git(worktreePath, ["rev-list", "--count", "--left-right", `${base}...HEAD`]),
+			]);
+			committed = parseChanges(cNS.stdout, cNum.stdout);
+			if (counts.ok) {
+				const [b, a] = counts.stdout.trim().split(/\s+/);
+				behind = Number(b) || 0;
+				ahead = Number(a) || 0;
+			}
+		}
+	}
+
+	return { base: resolvedBase, ahead, behind, committed, uncommitted };
+}
+
 export type RawFileDiff = { binary: boolean; text: string };
 
 function isBinaryDiff(text: string): boolean {
@@ -196,8 +315,27 @@ function isBinaryDiff(text: string): boolean {
 export async function fileDiff(
 	worktreePath: string,
 	relPath: string,
+	base?: string | null,
 ): Promise<RawFileDiff> {
-	const tracked = await git(worktreePath, ["diff", "HEAD", "--", relPath]);
+	// Committed view (base given): HEAD vs the merge-base — committed branch work.
+	if (base) {
+		const mb = await git(worktreePath, ["merge-base", base, "HEAD"]);
+		if (mb.ok && mb.stdout.trim() !== "") {
+			const d = await git(worktreePath, [
+				"diff",
+				"-M",
+				mb.stdout.trim(),
+				"HEAD",
+				"--",
+				relPath,
+			]);
+			return { binary: isBinaryDiff(d.stdout), text: d.stdout };
+		}
+		return { binary: false, text: "" };
+	}
+
+	// Uncommitted view: working tree vs HEAD.
+	const tracked = await git(worktreePath, ["diff", "-M", "HEAD", "--", relPath]);
 	if (tracked.ok && tracked.stdout.trim() !== "") {
 		return { binary: isBinaryDiff(tracked.stdout), text: tracked.stdout };
 	}

@@ -32,7 +32,12 @@ export const projectRoute = createRoute({
 export const worktreeRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/project/$projectId/worktree/$worktreeId",
-	loader: ({ params }) => api.worktreeDetail({ id: params.worktreeId }),
+	validateSearch: (s: Record<string, unknown>): { base?: string } => ({
+		base: typeof s.base === "string" ? s.base : undefined,
+	}),
+	loaderDeps: ({ search }) => ({ base: search.base ?? null }),
+	loader: ({ params, deps }) =>
+		api.worktreeDetail({ id: params.worktreeId, base: deps.base }),
 	component: WorktreeView,
 });
 

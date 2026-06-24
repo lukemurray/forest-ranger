@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
+import { Combobox } from "@base-ui-components/react/combobox";
 import {
 	Diff as DiffViewer,
 	Hunk,
@@ -23,6 +24,7 @@ import { CommandDialog } from "../components/CommandDialog";
 import { MenuItem, RowMenu, Separator } from "../components/RowMenu";
 import {
 	ChevronIcon,
+	ChevronUpDownIcon,
 	FolderIcon,
 	GitBranchIcon,
 	PencilIcon,
@@ -97,9 +99,16 @@ export function WorktreeView() {
 		);
 	}
 
-	const { worktree, projectName, branch, ahead, behind, files, totals, commands } =
+	const { worktree, projectName, branch, base, branches, ahead, behind, committed, uncommitted, commands } =
 		detail;
-	const clean = files.length === 0;
+
+	function selectBase(next: string) {
+		navigate({
+			to: "/project/$projectId/worktree/$worktreeId",
+			params: { projectId, worktreeId: worktree.id },
+			search: { base: next || undefined },
+		});
+	}
 
 	function run(cmd: ProjectCommand) {
 		if (cmd.runTarget === "external") {
@@ -107,6 +116,7 @@ export function WorktreeView() {
 		} else {
 			openSession({
 				worktreeId: worktree.id,
+				projectId,
 				commandId: cmd.id,
 				title: `${branch ?? "detached"} · ${cmd.label}`,
 			});
@@ -198,10 +208,10 @@ export function WorktreeView() {
 							<span className={styles.statValue}>{relativeTime(worktree.lastActivityAt)}</span>
 							<span className={styles.statLabel}>last change</span>
 						</div>
-						{(ahead > 0 || behind > 0) && (
+						{base && (ahead > 0 || behind > 0) && (
 							<div className={styles.stat}>
 								<span className={styles.statValue}>↑{ahead} ↓{behind}</span>
-								<span className={styles.statLabel}>vs upstream</span>
+								<span className={styles.statLabel}>vs {base}</span>
 							</div>
 						)}
 						<div className={styles.badges}>
@@ -211,32 +221,36 @@ export function WorktreeView() {
 						</div>
 					</section>
 
-					<section>
-						<div className={styles.sectionHead}>
-							<h2>Changes</h2>
-							{!clean && (
-								<span className={styles.diffStat}>
-									{totals.files} file{totals.files === 1 ? "" : "s"}
-									{totals.insertions > 0 && (
-										<span className={styles.add}> +{totals.insertions}</span>
-									)}
-									{totals.deletions > 0 && (
-										<span className={styles.del}> −{totals.deletions}</span>
-									)}
-								</span>
-							)}
-						</div>
+					{uncommitted.length > 0 && (
+						<ChangeSection
+							title="Uncommitted"
+							files={uncommitted}
+							base={null}
+							worktreeId={worktree.id}
+						/>
+					)}
 
-						{clean ? (
-							<p className={styles.empty}>Working tree clean — no uncommitted changes.</p>
-						) : (
-							<div className={styles.files}>
-								{files.map((f) => (
-									<FileRow key={f.path} worktreeId={worktree.id} file={f} />
-								))}
-							</div>
-						)}
-					</section>
+					<ChangeSection
+						title="Changes"
+						files={committed}
+						base={base}
+						worktreeId={worktree.id}
+						emptyText={
+							base
+								? `No commits on this branch vs ${base}.`
+								: "Pick a base branch to compare against."
+						}
+						right={
+							<label className={styles.baseSelect}>
+								vs
+								<BranchCombobox
+									value={base}
+									branches={branches.filter((b) => b !== branch)}
+									onSelect={selectBase}
+								/>
+							</label>
+						}
+					/>
 				</div>
 			</div>
 
@@ -254,7 +268,118 @@ export function WorktreeView() {
 	);
 }
 
-function FileRow({ worktreeId, file }: { worktreeId: string; file: ChangedFile }) {
+function ChangeSection({
+	title,
+	files,
+	base,
+	worktreeId,
+	right,
+	emptyText,
+}: {
+	title: string;
+	files: ChangedFile[];
+	base: string | null;
+	worktreeId: string;
+	right?: ReactNode;
+	emptyText?: string;
+}) {
+	const ins = files.reduce((n, f) => n + (f.insertions ?? 0), 0);
+	const del = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
+
+	return (
+		<Collapsible.Root defaultOpen className={styles.changeSection}>
+			<div className={styles.sectionHead}>
+				<div className={styles.changesTitle}>
+					<Collapsible.Trigger className={styles.sectionToggle}>
+						<ChevronIcon size={14} />
+						<h2>{title}</h2>
+					</Collapsible.Trigger>
+					{right}
+				</div>
+				{files.length > 0 && (
+					<span className={styles.diffStat}>
+						{files.length} file{files.length === 1 ? "" : "s"}
+						{ins > 0 && <span className={styles.add}> +{ins}</span>}
+						{del > 0 && <span className={styles.del}> −{del}</span>}
+					</span>
+				)}
+			</div>
+			<Collapsible.Panel className={styles.sectionPanel}>
+				{files.length === 0 ? (
+					emptyText ? <p className={styles.empty}>{emptyText}</p> : null
+				) : (
+					<div className={styles.files}>
+						{files.map((f) => (
+							<FileRow key={f.path} worktreeId={worktreeId} file={f} base={base} />
+						))}
+					</div>
+				)}
+			</Collapsible.Panel>
+		</Collapsible.Root>
+	);
+}
+
+function BranchCombobox({
+	value,
+	branches,
+	onSelect,
+}: {
+	value: string | null;
+	branches: string[];
+	onSelect: (branch: string) => void;
+}) {
+	return (
+		<Combobox.Root
+			items={branches}
+			value={value ?? ""}
+			onValueChange={(v) => {
+				if (typeof v === "string" && v) onSelect(v);
+			}}
+		>
+			<div className={styles.combo}>
+				<Combobox.Input
+					className={styles.comboInput}
+					placeholder="branch…"
+					// Defer so the selection wins over the component's own focus handling,
+					// letting you type to replace the current branch right away.
+					onFocus={(e) => {
+						const el = e.currentTarget;
+						setTimeout(() => el.select(), 0);
+					}}
+				/>
+				<Combobox.Icon className={styles.comboIcon}>
+					<ChevronUpDownIcon size={13} />
+				</Combobox.Icon>
+			</div>
+			<Combobox.Portal>
+				<Combobox.Positioner className={styles.comboPositioner} sideOffset={4}>
+					<Combobox.Popup className={styles.comboPopup}>
+						<Combobox.Empty className={styles.comboEmpty}>
+							No matching branch
+						</Combobox.Empty>
+						<Combobox.List>
+							{(item: string) => (
+								<Combobox.Item key={item} value={item} className={styles.comboItem}>
+									{item}
+								</Combobox.Item>
+							)}
+						</Combobox.List>
+					</Combobox.Popup>
+				</Combobox.Positioner>
+			</Combobox.Portal>
+		</Combobox.Root>
+	);
+}
+
+function FileRow({
+	worktreeId,
+	file,
+	base,
+}: {
+	worktreeId: string;
+	file: ChangedFile;
+	base: string | null;
+}) {
 	const [open, setOpen] = useState(false);
 	const [diff, setDiff] = useState<FileDiff | null>(null);
 	const fetching = useRef(false);
@@ -264,13 +389,13 @@ function FileRow({ worktreeId, file }: { worktreeId: string; file: ChangedFile }
 		if (open && diff === null && !fetching.current) {
 			fetching.current = true;
 			api
-				.fileDiff({ id: worktreeId, path: file.path })
+				.fileDiff({ id: worktreeId, path: file.path, base })
 				.then(setDiff)
 				.finally(() => {
 					fetching.current = false;
 				});
 		}
-	}, [open, diff, worktreeId, file.path]);
+	}, [open, diff, worktreeId, file.path, base]);
 
 	return (
 		<Collapsible.Root
@@ -288,9 +413,6 @@ function FileRow({ worktreeId, file }: { worktreeId: string; file: ChangedFile }
 					{dir && <span className={styles.dir}>{dir}</span>}
 					{name}
 				</span>
-				{!file.staged && file.kind !== "untracked" && (
-					<span className={styles.unstaged}>unstaged</span>
-				)}
 				<span className={styles.lines}>
 					{file.insertions != null && file.insertions > 0 && (
 						<span className={styles.add}>+{file.insertions}</span>

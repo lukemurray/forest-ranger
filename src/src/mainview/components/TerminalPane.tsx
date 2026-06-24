@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, bus, subscribeTerminal } from "../rpc";
+import { markExited } from "../lib/terminalStore";
 import { useThemeMode, type ThemeMode } from "../lib/theme";
 import styles from "./TerminalPane.module.css";
 
@@ -69,8 +70,10 @@ export function TerminalPane({
 
 		const unsub = subscribeTerminal(sessionId, {
 			onData: (b64) => term.write(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))),
-			onExit: (code) =>
-				term.write(`\r\n\x1b[2m[process exited: ${code}]\x1b[0m\r\n`),
+			onExit: (code) => {
+				term.write(`\r\n\x1b[2m[process exited: ${code}]\x1b[0m\r\n`);
+				markExited(sessionId);
+			},
 		});
 
 		term.onData((data) => bus.termInput({ sessionId, data }));
@@ -98,9 +101,10 @@ export function TerminalPane({
 		ro.observe(host);
 
 		return () => {
+			// Detach only — leave the PTY alive in Bun so it survives HMR/remounts
+			// (and reattaches with replayed scrollback). Killing is explicit (close).
 			ro.disconnect();
 			unsub();
-			bus.termKill({ sessionId });
 			term.dispose();
 			termRef.current = null;
 		};

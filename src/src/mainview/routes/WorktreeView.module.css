@@ -125,6 +125,10 @@
 
 /* --- changes --- */
 
+.changeSection {
+	margin-bottom: 24px;
+}
+
 .sectionHead {
 	display: flex;
 	align-items: baseline;
@@ -134,6 +138,100 @@
 .sectionHead h2 {
 	font-size: 14px;
 	font-weight: 600;
+}
+
+.changesTitle {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.sectionToggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	color: var(--text);
+}
+.sectionToggle svg {
+	color: var(--text-faint);
+	transition: transform 0.15s ease;
+}
+.sectionToggle[data-panel-open] svg {
+	transform: rotate(90deg);
+}
+
+.sectionPanel {
+	overflow: hidden;
+}
+
+.baseSelect {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--text-faint);
+}
+
+/* --- branch combobox --- */
+
+.combo {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+}
+.comboInput {
+	font-family: var(--font-mono);
+	font-size: 12px;
+	color: var(--text);
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	padding: 3px 22px 3px 8px;
+	width: 160px;
+}
+.comboInput:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+.comboIcon {
+	position: absolute;
+	right: 6px;
+	display: grid;
+	place-items: center;
+	color: var(--text-faint);
+	pointer-events: none;
+}
+
+.comboPositioner {
+	z-index: 60;
+}
+.comboPopup {
+	max-height: 280px;
+	overflow-y: auto;
+	min-width: 180px;
+	padding: 4px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+	outline: none;
+}
+.comboItem {
+	padding: 6px 9px;
+	border-radius: var(--radius-sm);
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+	color: var(--text);
+	cursor: pointer;
+	outline: none;
+}
+.comboItem[data-highlighted] {
+	background: var(--bg-hover);
+}
+.comboEmpty {
+	padding: 8px 9px;
+	font-size: 12.5px;
+	color: var(--text-faint);
 }
 .diffStat {
 	font-size: 12.5px;

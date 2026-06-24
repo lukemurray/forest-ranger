@@ -50,8 +50,6 @@ export type ChangeKind =
 export type ChangedFile = {
 	path: string;
 	kind: ChangeKind;
-	/** Whether the change is staged in the index. */
-	staged: boolean;
 	insertions: number | null;
 	deletions: number | null;
 };
@@ -76,11 +74,17 @@ export type WorktreeDetail = {
 	projectId: string;
 	projectName: string;
 	branch: string | null;
-	upstream: string | null;
+	/** The base branch changes are computed against (null if none available). */
+	base: string | null;
+	/** Local branches selectable as the base. */
+	branches: string[];
+	/** Commits ahead / behind the base. */
 	ahead: number;
 	behind: number;
-	files: ChangedFile[];
-	totals: { files: number; insertions: number; deletions: number };
+	/** Committed branch work vs the base. */
+	committed: ChangedFile[];
+	/** Uncommitted working-tree edits (incl. untracked). */
+	uncommitted: ChangedFile[];
 	commands: ProjectCommand[];
 };
 
@@ -149,12 +153,12 @@ export type AppRPC = {
 			};
 			/** Full detail (changes summary + files) for one worktree. */
 			worktreeDetail: {
-				params: { id: string };
+				params: { id: string; base: string | null };
 				response: WorktreeDetail | null;
 			};
-			/** Unified diff for one changed file in a worktree. */
+			/** Unified diff for one changed file in a worktree (vs base if given). */
 			fileDiff: {
-				params: { id: string; path: string };
+				params: { id: string; path: string; base: string | null };
 				response: FileDiff;
 			};
 
