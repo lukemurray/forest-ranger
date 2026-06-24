@@ -156,6 +156,13 @@ function ProjectNode({
 		if (open) loadWorktrees();
 	}, [open, loadWorktrees]);
 
+	// Expand the project when you navigate into it or any of its worktrees —
+	// including from the project's own worktree grid (where the project is
+	// already active, so we also key off the selected worktree changing).
+	useEffect(() => {
+		if (onThisProject) setOpen(true);
+	}, [onThisProject, params.worktreeId]);
+
 	return (
 		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.node}>
 			<RowMenu
