@@ -122,6 +122,11 @@
 .projectRow[data-active] {
 	background: var(--bg-active);
 }
+/* A worktree under this project is open: hint at the lineage without a full
+   selected fill, so only the worktree row reads as selected. */
+.projectRow[data-within] {
+	box-shadow: inset 2px 0 0 color-mix(in srgb, var(--green) 55%, transparent);
+}
 
 .chevron {
 	display: grid;
@@ -175,6 +180,10 @@
 }
 .worktree:hover {
 	background: var(--bg-hover);
+	color: var(--text);
+}
+.worktree[data-active] {
+	background: var(--bg-active);
 	color: var(--text);
 }
 

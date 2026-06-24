@@ -4,7 +4,16 @@ import { Collapsible } from "@base-ui-components/react/collapsible";
 import type { Project, Worktree } from "../../shared/types";
 import { api } from "../rpc";
 import { relativeTime } from "../lib/format";
-import { ChevronIcon, PlusIcon, TreeIcon, ClockIcon } from "./icons";
+import {
+	ChevronIcon,
+	ClockIcon,
+	PlusIcon,
+	RevealIcon,
+	TreeIcon,
+	TrashIcon,
+} from "./icons";
+import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { SettingsMenu } from "./SettingsMenu";
 import styles from "./Sidebar.module.css";
 
@@ -89,12 +98,23 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 
 function ProjectNode({ project }: { project: Project }) {
 	const navigate = useNavigate();
+	const router = useRouter();
 	const params = useParams({ strict: false });
-	const isActive = params.projectId === project.id;
+	const onThisProject = params.projectId === project.id;
+	// Only the project row itself is "selected" on the project route; when a
+	// worktree under it is open, the highlighted child carries the selection.
+	const projectActive = onThisProject && !params.worktreeId;
 
-	const [open, setOpen] = useState(isActive);
+	const [open, setOpen] = useState(onThisProject);
 	const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
+	const [confirmOpen, setConfirmOpen] = useState(false);
 	const fetching = useRef(false);
+
+	async function removeProject() {
+		await api.removeProject({ id: project.id });
+		await router.invalidate();
+		if (onThisProject) navigate({ to: "/" });
+	}
 
 	// Fetch once; reused by both expand and hover-prefetch so a click feels instant.
 	const loadWorktrees = useCallback(() => {
@@ -112,30 +132,44 @@ function ProjectNode({ project }: { project: Project }) {
 		if (open) loadWorktrees();
 	}, [open, loadWorktrees]);
 
-	function openWorktree() {
-		navigate({ to: "/project/$projectId", params: { projectId: project.id } });
-	}
-
 	return (
 		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.node}>
-			<div
-				className={styles.projectRow}
-				data-active={isActive || undefined}
-				onMouseEnter={loadWorktrees}
+			<RowMenu
+				trigger={
+					<div
+						className={styles.projectRow}
+						data-active={projectActive || undefined}
+						data-within={(onThisProject && !projectActive) || undefined}
+						onMouseEnter={loadWorktrees}
+					>
+						<Collapsible.Trigger className={styles.chevron} aria-label="Toggle worktrees">
+							<ChevronIcon />
+						</Collapsible.Trigger>
+						<button
+							className={styles.projectName}
+							onClick={() =>
+								navigate({ to: "/project/$projectId", params: { projectId: project.id } })
+							}
+							title={project.path}
+						>
+							{project.name}
+						</button>
+					</div>
+				}
 			>
-				<Collapsible.Trigger className={styles.chevron} aria-label="Toggle worktrees">
-					<ChevronIcon />
-				</Collapsible.Trigger>
-				<button
-					className={styles.projectName}
-					onClick={() =>
-						navigate({ to: "/project/$projectId", params: { projectId: project.id } })
-					}
-					title={project.path}
-				>
-					{project.name}
-				</button>
-			</div>
+				<MenuItem
+					icon={<RevealIcon size={15} />}
+					label="Reveal in Finder"
+					onClick={() => api.revealInFinder({ path: project.path })}
+				/>
+				<Separator />
+				<MenuItem
+					icon={<TrashIcon size={15} />}
+					label="Remove project"
+					danger
+					onClick={() => setConfirmOpen(true)}
+				/>
+			</RowMenu>
 
 			<Collapsible.Panel className={styles.panel}>
 				{worktrees === null ? (
@@ -144,23 +178,45 @@ function ProjectNode({ project }: { project: Project }) {
 					<div className={styles.loading}>No worktrees</div>
 				) : (
 					worktrees.map((wt) => (
-						<button
+						<RowMenu
 							key={wt.id}
-							className={styles.worktree}
-							onClick={openWorktree}
-							title={wt.path}
+							trigger={
+								<button
+									className={styles.worktree}
+									data-active={params.worktreeId === wt.id || undefined}
+									onClick={() =>
+										navigate({
+											to: "/project/$projectId/worktree/$worktreeId",
+											params: { projectId: project.id, worktreeId: wt.id },
+										})
+									}
+									title={wt.path}
+								>
+									<span className={styles.worktreeBranch}>
+										{wt.branch ?? "detached"}
+										{wt.isPrimary && <span className={styles.primaryDot} title="primary worktree" />}
+									</span>
+									<span className={styles.worktreeTime}>
+										{relativeTime(wt.lastActivityAt)}
+									</span>
+								</button>
+							}
 						>
-							<span className={styles.worktreeBranch}>
-								{wt.branch ?? "detached"}
-								{wt.isPrimary && <span className={styles.primaryDot} title="primary worktree" />}
-							</span>
-							<span className={styles.worktreeTime}>
-								{relativeTime(wt.lastActivityAt)}
-							</span>
-						</button>
+							<OpenItems path={wt.path} />
+						</RowMenu>
 					))
 				)}
 			</Collapsible.Panel>
+
+			<ConfirmDialog
+				open={confirmOpen}
+				onOpenChange={setConfirmOpen}
+				title="Remove project?"
+				description={`"${project.name}" will be removed from Forest Ranger. Your git repository and its worktrees on disk are not touched.`}
+				confirmLabel="Remove"
+				danger
+				onConfirm={removeProject}
+			/>
 		</Collapsible.Root>
 	);
 }

@@ -68,6 +68,39 @@ export const GearIcon = ({ size = 16 }: Props) =>
 export const ChevronUpDownIcon = ({ size = 16 }: Props) =>
 	svg(size, <><path d="m8 9 4-4 4 4" /><path d="m16 15-4 4-4-4" /></>);
 
+export const PlayIcon = ({ size = 15 }: Props) =>
+	svg(size, <path d="M7 4.5v15l12-7.5-12-7.5Z" />);
+
+export const PencilIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M12 20h9" />
+			<path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" />
+		</>,
+	);
+
+export const TrashIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M4 7h16" />
+			<path d="M10 11v6M14 11v6" />
+			<path d="M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13" />
+			<path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+		</>,
+	);
+
+export const TerminalIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<rect x="3" y="4" width="18" height="16" rx="2" />
+			<path d="m7 9 3 3-3 3" />
+			<path d="M13 15h4" />
+		</>,
+	);
+
 export const RevealIcon = ({ size = 15 }: Props) =>
 	svg(
 		size,

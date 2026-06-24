@@ -1,0 +1,71 @@
+.backdrop {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.45);
+	z-index: 100;
+}
+
+.popup {
+	position: fixed;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	z-index: 101;
+	width: 360px;
+	max-width: calc(100vw - 48px);
+	padding: 20px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+	outline: none;
+}
+
+.title {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text);
+}
+
+.description {
+	margin-top: 8px;
+	font-size: 13px;
+	line-height: 1.55;
+	color: var(--text-muted);
+}
+
+.actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 20px;
+}
+
+.cancel,
+.confirm,
+.danger {
+	padding: 7px 14px;
+	border-radius: var(--radius-sm);
+	font-size: 13px;
+	font-weight: 500;
+}
+.cancel {
+	border: 1px solid var(--border-strong);
+	color: var(--text-muted);
+}
+.cancel:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.confirm {
+	background: var(--accent);
+	color: #fff;
+}
+.danger {
+	background: #e5484d;
+	color: #fff;
+}
+.confirm:hover,
+.danger:hover {
+	filter: brightness(1.08);
+}

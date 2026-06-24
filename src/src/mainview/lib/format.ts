@@ -23,3 +23,11 @@ export function shortHash(head: string | null): string {
 export function tildePath(path: string): string {
 	return path.replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
 }
+
+/** Split "a/b/c.ts" into dir ("a/b/") and name ("c.ts") for two-tone display. */
+export function splitPath(path: string): { dir: string; name: string } {
+	const i = path.lastIndexOf("/");
+	return i === -1
+		? { dir: "", name: path }
+		: { dir: path.slice(0, i + 1), name: path.slice(i + 1) };
+}

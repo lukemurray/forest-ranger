@@ -75,6 +75,10 @@
 	color: var(--accent);
 	font-weight: 500;
 	margin-right: 8px;
+	cursor: pointer;
+}
+.project:hover {
+	text-decoration: underline;
 }
 
 .meta {

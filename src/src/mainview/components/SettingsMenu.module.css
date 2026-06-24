@@ -74,6 +74,18 @@
 	color: var(--text-muted);
 }
 
+.note {
+	padding: 5px 9px;
+	font-size: 12.5px;
+	color: var(--text-faint);
+}
+
+.separator {
+	height: 1px;
+	margin: 5px 0;
+	background: var(--border);
+}
+
 .groupLabel {
 	display: block;
 	padding: 5px 9px;

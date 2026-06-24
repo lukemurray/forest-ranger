@@ -1,0 +1,57 @@
+.bar {
+	flex-shrink: 0;
+	height: var(--titlebar-height);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 0 14px;
+	background: var(--bg);
+	border-bottom: 1px solid var(--border);
+}
+
+.left {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	font-size: 13.5px;
+	font-weight: 600;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.left svg {
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+
+.muted {
+	font-weight: 400;
+	color: var(--text-faint);
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.actionButton {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	font-size: 12.5px;
+}
+.actionButton:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}

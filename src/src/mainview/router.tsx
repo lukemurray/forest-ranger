@@ -8,6 +8,7 @@ import { ErrorView } from "./components/ErrorView";
 import { RootLayout } from "./routes/RootLayout";
 import { RecentView } from "./routes/RecentView";
 import { ProjectView } from "./routes/ProjectView";
+import { WorktreeView } from "./routes/WorktreeView";
 
 export const rootRoute = createRootRoute({
 	component: RootLayout,
@@ -28,7 +29,18 @@ export const projectRoute = createRoute({
 	component: ProjectView,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, projectRoute]);
+export const worktreeRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/project/$projectId/worktree/$worktreeId",
+	loader: ({ params }) => api.worktreeDetail({ id: params.worktreeId }),
+	component: WorktreeView,
+});
+
+const routeTree = rootRoute.addChildren([
+	indexRoute,
+	projectRoute,
+	worktreeRoute,
+]);
 
 export const router = createRouter({
 	routeTree,

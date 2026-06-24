@@ -1,19 +1,22 @@
 import { Outlet } from "@tanstack/react-router";
 import { Sidebar } from "../components/Sidebar";
+import { TerminalDock } from "../components/TerminalDock";
+import { useTerminals } from "../lib/terminalStore";
 import { rootRoute } from "../router";
 import styles from "./RootLayout.module.css";
 
 export function RootLayout() {
 	const projects = rootRoute.useLoaderData();
+	const { dock } = useTerminals();
 	return (
 		<div className={styles.shell}>
 			<Sidebar projects={projects} />
-			<main className={styles.main}>
-				<div className={`${styles.titlebar} electrobun-webkit-app-region-drag`} />
-				<div className={styles.scroll}>
+			<div className={styles.workarea} data-dock={dock}>
+				<main className={styles.main}>
 					<Outlet />
-				</div>
-			</main>
+				</main>
+				<TerminalDock />
+			</div>
 		</div>
 	);
 }

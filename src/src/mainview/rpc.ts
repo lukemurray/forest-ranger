@@ -11,6 +11,15 @@ export function onDataChanged(fn: (scope: DataChangedScope) => void) {
 	return () => listeners.delete(fn);
 }
 
+type TermSub = { onData: (data: string) => void; onExit: (code: number) => void };
+const termSubs = new Map<string, TermSub>();
+
+/** Subscribe to a PTY session's output/exit. Call before termStart(sessionId). */
+export function subscribeTerminal(sessionId: string, sub: TermSub) {
+	termSubs.set(sessionId, sub);
+	return () => termSubs.delete(sessionId);
+}
+
 const rpcConfig = Electroview.defineRPC<AppRPC>({
 	handlers: {
 		requests: {},
@@ -18,11 +27,17 @@ const rpcConfig = Electroview.defineRPC<AppRPC>({
 			dataChanged: ({ scope }) => {
 				for (const fn of listeners) fn(scope);
 			},
+			termData: ({ sessionId, data }) => termSubs.get(sessionId)?.onData(data),
+			termExit: ({ sessionId, exitCode }) =>
+				termSubs.get(sessionId)?.onExit(exitCode),
 		},
 	},
 });
 
 const electroview = new Electroview({ rpc: rpcConfig });
+
+/** Fire-and-forget messages to the Bun process (PTY input/resize/kill). */
+export const bus = electroview.rpc!.send;
 
 const win = window as unknown as {
 	__electrobun_encrypt?: unknown;

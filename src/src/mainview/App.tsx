@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { onDataChanged } from "./rpc";
+import { resolveDefaults } from "./lib/openTargets";
+import { Toaster } from "./components/Toaster";
 
 export default function App() {
 	// Refetch all route data when the Bun process signals a change.
@@ -11,5 +13,16 @@ export default function App() {
 			off();
 		};
 	}, []);
-	return <RouterProvider router={router} />;
+
+	// Warm app detection and settle default editor/terminal choices on startup.
+	useEffect(() => {
+		resolveDefaults();
+	}, []);
+
+	return (
+		<>
+			<RouterProvider router={router} />
+			<Toaster />
+		</>
+	);
 }

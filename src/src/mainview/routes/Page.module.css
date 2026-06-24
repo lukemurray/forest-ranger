@@ -1,51 +1,19 @@
+/* A view fills the main panel: fixed titlebar on top, scrolling body below. */
+.view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.scroll {
+	flex: 1;
+	overflow-y: auto;
+}
+
 .page {
 	max-width: 1000px;
 	margin: 0 auto;
-	padding: 12px 32px 48px;
-}
-
-.header {
-	margin-bottom: 22px;
-}
-
-.header h1 {
-	display: flex;
-	align-items: center;
-	gap: 9px;
-	font-size: 20px;
-	font-weight: 650;
-	letter-spacing: -0.2px;
-}
-.header h1 svg {
-	color: var(--text-muted);
-}
-
-.titleRow {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-}
-
-.subtitle {
-	margin-top: 5px;
-	color: var(--text-muted);
-	font-size: 13px;
-}
-
-.ghostButton {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 6px 11px;
-	border: 1px solid var(--border-strong);
-	border-radius: var(--radius-sm);
-	color: var(--text-muted);
-	font-size: 13px;
-}
-.ghostButton:hover {
-	background: var(--bg-hover);
-	color: var(--text);
+	padding: 20px 32px 48px;
 }
 
 .grid {
@@ -60,6 +28,95 @@
 	padding: 8px 0;
 }
 
+.section {
+	margin-bottom: 28px;
+}
+.sectionHead {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 10px;
+}
+.sectionTitle {
+	font-size: 13px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: var(--text-faint);
+	margin-bottom: 10px;
+}
+.sectionHead .sectionTitle {
+	margin-bottom: 0;
+}
+
+.addCommand {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	font-size: 12.5px;
+}
+.addCommand:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
+.commandList {
+	list-style: none;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+.commandRow {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 10px 8px 14px;
+}
+.commandRow:not(:last-child) {
+	border-bottom: 1px solid var(--border);
+}
+.commandLabel {
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--text);
+	min-width: 96px;
+	flex-shrink: 0;
+}
+.commandText {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-mono);
+	font-size: 12.5px;
+	color: var(--text-muted);
+}
+.commandDir {
+	color: var(--text-faint);
+}
+.commandAction {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	border-radius: var(--radius-sm);
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.commandAction:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.commandAction[data-danger]:hover {
+	background: rgba(229, 116, 111, 0.14);
+	color: #e5746f;
+}
+
 .emptyState {
 	display: flex;
 	flex-direction: column;
@@ -67,7 +124,7 @@
 	text-align: center;
 	gap: 12px;
 	max-width: 420px;
-	margin: 14vh auto 0;
+	margin: 12vh auto 0;
 	color: var(--text-muted);
 }
 .emptyState svg {

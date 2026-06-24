@@ -3,6 +3,7 @@ import type { Worktree } from "../../shared/types";
 import { api } from "../rpc";
 import { relativeTime, shortHash, tildePath } from "../lib/format";
 import { GitBranchIcon, RevealIcon } from "./icons";
+import { OpenItems, RowMenu } from "./RowMenu";
 import styles from "./WorktreeCard.module.css";
 
 export function WorktreeCard({
@@ -14,7 +15,15 @@ export function WorktreeCard({
 }) {
 	const navigate = useNavigate();
 
-	function openProject() {
+	function open() {
+		navigate({
+			to: "/project/$projectId/worktree/$worktreeId",
+			params: { projectId: worktree.projectId, worktreeId: worktree.id },
+		});
+	}
+
+	function goToProject(e: React.MouseEvent) {
+		e.stopPropagation();
 		navigate({
 			to: "/project/$projectId",
 			params: { projectId: worktree.projectId },
@@ -27,7 +36,31 @@ export function WorktreeCard({
 	}
 
 	return (
-		<button className={styles.card} onClick={openProject}>
+		<RowMenu
+			trigger={
+				<button className={styles.card} onClick={open} title="View worktree">
+					<CardBody worktree={worktree} projectName={projectName} goToProject={goToProject} reveal={reveal} />
+				</button>
+			}
+		>
+			<OpenItems path={worktree.path} />
+		</RowMenu>
+	);
+}
+
+function CardBody({
+	worktree,
+	projectName,
+	goToProject,
+	reveal,
+}: {
+	worktree: Worktree;
+	projectName?: string;
+	goToProject: (e: React.MouseEvent) => void;
+	reveal: (e: React.MouseEvent) => void;
+}) {
+	return (
+		<>
 			<div className={styles.top}>
 				<span className={styles.branch}>
 					<GitBranchIcon />
@@ -41,7 +74,11 @@ export function WorktreeCard({
 			</div>
 
 			<div className={styles.path} title={worktree.path}>
-				{projectName && <span className={styles.project}>{projectName}</span>}
+				{projectName && (
+					<span className={styles.project} onClick={goToProject} title="Go to project">
+						{projectName}
+					</span>
+				)}
 				{tildePath(worktree.path)}
 			</div>
 
@@ -54,6 +91,6 @@ export function WorktreeCard({
 					<RevealIcon />
 				</span>
 			</div>
-		</button>
+		</>
 	);
 }

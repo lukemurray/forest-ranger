@@ -3,7 +3,9 @@ import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const DATA_DIR = join(homedir(), ".forest-ranger");
+// Override with FOREST_RANGER_DATA_DIR so tests/scripts never touch the real DB.
+const DATA_DIR =
+	process.env.FOREST_RANGER_DATA_DIR || join(homedir(), ".forest-ranger");
 mkdirSync(DATA_DIR, { recursive: true });
 
 export const db = new Database(join(DATA_DIR, "forest-ranger.db"), {
@@ -30,7 +32,34 @@ db.exec(`
 		created_at     INTEGER NOT NULL,
 		UNIQUE(project_id, path)
 	);
+
+	CREATE TABLE IF NOT EXISTS project_commands (
+		id         TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+		label      TEXT NOT NULL,
+		command    TEXT NOT NULL,
+		dir        TEXT NOT NULL DEFAULT '',
+		run_target TEXT NOT NULL DEFAULT 'in-app',
+		sort       INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	);
 `);
+
+// Migrate older DBs that predate added columns.
+{
+	const cols = db
+		.query<{ name: string }, []>("PRAGMA table_info(project_commands)")
+		.all()
+		.map((c) => c.name);
+	if (!cols.includes("dir")) {
+		db.exec("ALTER TABLE project_commands ADD COLUMN dir TEXT NOT NULL DEFAULT ''");
+	}
+	if (!cols.includes("run_target")) {
+		db.exec(
+			"ALTER TABLE project_commands ADD COLUMN run_target TEXT NOT NULL DEFAULT 'in-app'",
+		);
+	}
+}
 
 // --- row shapes as stored ---
 
@@ -47,6 +76,17 @@ export type WorktreeRow = {
 	project_id: string;
 	path: string;
 	last_opened_at: number | null;
+	created_at: number;
+};
+
+export type CommandRow = {
+	id: string;
+	project_id: string;
+	label: string;
+	command: string;
+	dir: string;
+	run_target: string;
+	sort: number;
 	created_at: number;
 };
 
@@ -87,6 +127,24 @@ const stmts = {
 	pruneWorktrees: db.query(
 		"DELETE FROM worktrees WHERE project_id = $projectId AND path NOT IN (SELECT value FROM json_each($keepPaths))",
 	),
+
+	getCommand: db.query<CommandRow, [string]>(
+		"SELECT * FROM project_commands WHERE id = ?",
+	),
+	commandsForProject: db.query<CommandRow, [string]>(
+		"SELECT * FROM project_commands WHERE project_id = ? ORDER BY sort, created_at",
+	),
+	maxCommandSort: db.query<{ max: number | null }, [string]>(
+		"SELECT MAX(sort) AS max FROM project_commands WHERE project_id = ?",
+	),
+	insertCommand: db.query(
+		`INSERT INTO project_commands (id, project_id, label, command, dir, run_target, sort, created_at)
+		 VALUES ($id, $projectId, $label, $command, $dir, $runTarget, $sort, $createdAt)`,
+	),
+	updateCommand: db.query(
+		"UPDATE project_commands SET label = $label, command = $command, dir = $dir, run_target = $runTarget WHERE id = $id",
+	),
+	deleteCommand: db.query("DELETE FROM project_commands WHERE id = $id"),
 };
 
 export const projectsRepo = {
@@ -128,4 +186,45 @@ export const worktreesRepo = {
 			$projectId: projectId,
 			$keepPaths: JSON.stringify(keepPaths),
 		} as never),
+};
+
+export const commandsRepo = {
+	get: (id: string) => stmts.getCommand.get(id) ?? null,
+	forProject: (projectId: string) => stmts.commandsForProject.all(projectId),
+	insert: (row: {
+		id: string;
+		projectId: string;
+		label: string;
+		command: string;
+		dir: string;
+		runTarget: string;
+		createdAt: number;
+	}) => {
+		const sort = (stmts.maxCommandSort.get(row.projectId)?.max ?? -1) + 1;
+		stmts.insertCommand.run({
+			$id: row.id,
+			$projectId: row.projectId,
+			$label: row.label,
+			$command: row.command,
+			$dir: row.dir,
+			$runTarget: row.runTarget,
+			$sort: sort,
+			$createdAt: row.createdAt,
+		} as never);
+	},
+	update: (
+		id: string,
+		label: string,
+		command: string,
+		dir: string,
+		runTarget: string,
+	) =>
+		stmts.updateCommand.run({
+			$id: id,
+			$label: label,
+			$command: command,
+			$dir: dir,
+			$runTarget: runTarget,
+		} as never),
+	remove: (id: string) => stmts.deleteCommand.run({ $id: id } as never),
 };

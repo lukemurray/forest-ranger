@@ -16,7 +16,7 @@ const AUGMENTED_PATH = [
 	.filter(Boolean)
 	.join(":");
 
-type GitResult = { ok: boolean; stdout: string; stderr: string };
+type GitResult = { ok: boolean; stdout: string; stderr: string; exitCode: number };
 
 // Async (not spawnSync) so independent git invocations can run concurrently —
 // scanning N worktrees fans out instead of blocking the bun thread one at a time.
@@ -33,10 +33,10 @@ async function git(cwd: string, args: string[]): Promise<GitResult> {
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
-		return { ok: exitCode === 0, stdout, stderr };
+		return { ok: exitCode === 0, stdout, stderr, exitCode };
 	} catch (err) {
 		// git binary not found / not executable
-		return { ok: false, stdout: "", stderr: String(err) };
+		return { ok: false, stdout: "", stderr: String(err), exitCode: -1 };
 	}
 }
 
@@ -118,6 +118,104 @@ async function computeWorktreeActivity(worktreePath: string): Promise<number> {
 	}
 
 	return latest;
+}
+
+export type GitStatusFile = { path: string; x: string; y: string };
+
+export type GitStatus = {
+	branch: string | null;
+	upstream: string | null;
+	ahead: number;
+	behind: number;
+	files: GitStatusFile[];
+	/** path -> line stats vs HEAD (null for binary / unavailable). */
+	numstat: Map<string, { insertions: number | null; deletions: number | null }>;
+};
+
+/** Working-tree status + branch tracking + per-file line stats for a worktree. */
+export async function worktreeStatus(worktreePath: string): Promise<GitStatus> {
+	const [statusRes, numstatRes] = await Promise.all([
+		git(worktreePath, ["status", "--porcelain=v1", "-b"]),
+		git(worktreePath, ["diff", "--numstat", "HEAD"]),
+	]);
+
+	let branch: string | null = null;
+	let upstream: string | null = null;
+	let ahead = 0;
+	let behind = 0;
+	const files: GitStatusFile[] = [];
+
+	for (const raw of statusRes.stdout.split("\n")) {
+		if (raw === "") continue;
+		if (raw.startsWith("## ")) {
+			const info = raw.slice(3);
+			ahead = Number(info.match(/ahead (\d+)/)?.[1] ?? 0);
+			behind = Number(info.match(/behind (\d+)/)?.[1] ?? 0);
+			const names = info.replace(/\s*\[.*\]$/, "");
+			const [head, up] = names.split("...");
+			branch = head.trim() === "HEAD (no branch)" ? null : head.trim() || null;
+			upstream = up?.trim() ?? null;
+			continue;
+		}
+		const x = raw[0] ?? " ";
+		const y = raw[1] ?? " ";
+		let path = raw.slice(3);
+		const arrow = path.indexOf(" -> "); // renames: "old -> new"
+		if (arrow !== -1) path = path.slice(arrow + 4);
+		path = path.replace(/^"|"$/g, "");
+		files.push({ path, x, y });
+	}
+
+	const numstat = new Map<string, { insertions: number | null; deletions: number | null }>();
+	if (numstatRes.ok) {
+		for (const line of numstatRes.stdout.split("\n")) {
+			if (line === "") continue;
+			const [adds, dels, ...rest] = line.split("\t");
+			const path = rest.join("\t");
+			numstat.set(path, {
+				insertions: adds === "-" ? null : Number(adds),
+				deletions: dels === "-" ? null : Number(dels),
+			});
+		}
+	}
+
+	return { branch, upstream, ahead, behind, files, numstat };
+}
+
+export type RawFileDiff = { binary: boolean; text: string };
+
+function isBinaryDiff(text: string): boolean {
+	return /^Binary files .* differ$/m.test(text) || text.includes("GIT binary patch");
+}
+
+/**
+ * Raw unified diff for one file in a worktree (parsed/rendered by the view).
+ * Uses `diff HEAD` for tracked changes; falls back to `--no-index` so untracked
+ * files show as all-additions.
+ */
+export async function fileDiff(
+	worktreePath: string,
+	relPath: string,
+): Promise<RawFileDiff> {
+	const tracked = await git(worktreePath, ["diff", "HEAD", "--", relPath]);
+	if (tracked.ok && tracked.stdout.trim() !== "") {
+		return { binary: isBinaryDiff(tracked.stdout), text: tracked.stdout };
+	}
+
+	// Untracked file: diff against an empty file. `--no-index` exits 1 when the
+	// files differ, which is the normal "there's a diff" case (not an error).
+	const untracked = await git(worktreePath, [
+		"diff",
+		"--no-index",
+		"--",
+		"/dev/null",
+		relPath,
+	]);
+	if (untracked.exitCode <= 1) {
+		return { binary: isBinaryDiff(untracked.stdout), text: untracked.stdout };
+	}
+
+	return { binary: false, text: "" };
 }
 
 export type GitWorktree = {
