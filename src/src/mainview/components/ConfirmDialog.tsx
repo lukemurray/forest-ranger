@@ -1,4 +1,5 @@
-import { AlertDialog } from "@base-ui-components/react/alert-dialog";
+import { Modal, ModalClose, ModalTitle } from "./ui/Modal";
+import { Button } from "./ui/Button";
 import styles from "./ConfirmDialog.module.css";
 
 export function ConfirmDialog({
@@ -19,28 +20,21 @@ export function ConfirmDialog({
 	danger?: boolean;
 }) {
 	return (
-		<AlertDialog.Root open={open} onOpenChange={onOpenChange}>
-			<AlertDialog.Portal>
-				<AlertDialog.Backdrop className={styles.backdrop} />
-				<AlertDialog.Popup className={styles.popup}>
-					<AlertDialog.Title className={styles.title}>{title}</AlertDialog.Title>
-					<AlertDialog.Description className={styles.description}>
-						{description}
-					</AlertDialog.Description>
-					<div className={styles.actions}>
-						<AlertDialog.Close className={styles.cancel}>Cancel</AlertDialog.Close>
-						<button
-							className={danger ? styles.danger : styles.confirm}
-							onClick={() => {
-								onConfirm();
-								onOpenChange(false);
-							}}
-						>
-							{confirmLabel}
-						</button>
-					</div>
-				</AlertDialog.Popup>
-			</AlertDialog.Portal>
-		</AlertDialog.Root>
+		<Modal open={open} onOpenChange={onOpenChange} width={360}>
+			<ModalTitle className={styles.title}>{title}</ModalTitle>
+			<p className={styles.description}>{description}</p>
+			<div className={styles.actions}>
+				<ModalClose className={styles.cancel}>Cancel</ModalClose>
+				<Button
+					variant={danger ? "danger" : "primary"}
+					onClick={() => {
+						onConfirm();
+						onOpenChange(false);
+					}}
+				>
+					{confirmLabel}
+				</Button>
+			</div>
+		</Modal>
 	);
 }

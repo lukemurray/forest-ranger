@@ -1,0 +1,33 @@
+.bar {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 8px 12px;
+	margin-bottom: 18px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-elevated);
+	font-size: 13px;
+}
+.bar svg {
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.bar[data-behind] {
+	border-color: color-mix(in srgb, var(--amber) 45%, var(--border-strong));
+	background: color-mix(in srgb, var(--amber) 8%, var(--bg-elevated));
+}
+
+.branch {
+	font-family: var(--font-mono);
+	font-weight: 600;
+	color: var(--text);
+}
+.state {
+	color: var(--text-muted);
+	flex: 1;
+	min-width: 0;
+}
+.bar[data-behind] .state {
+	color: var(--amber);
+}

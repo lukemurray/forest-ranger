@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
 import type { Project, Worktree } from "../../shared/types";
-import { api } from "../rpc";
+import { api, onDataChanged } from "../rpc";
 import { relativeTime } from "../lib/format";
 import {
 	ChevronIcon,
@@ -140,20 +140,33 @@ function ProjectNode({
 		if (onThisProject) navigate({ to: "/" });
 	}
 
-	// Fetch once; reused by both expand and hover-prefetch so a click feels instant.
-	const loadWorktrees = useCallback(() => {
-		if (worktrees !== null || fetching.current) return;
-		fetching.current = true;
-		api
-			.listWorktrees({ projectId: project.id })
-			.then(setWorktrees)
-			.finally(() => {
-				fetching.current = false;
-			});
-	}, [worktrees, project.id]);
+	// Fetch once (cached); pass force to bypass the cache after a change.
+	const loadWorktrees = useCallback(
+		(force = false) => {
+			if ((!force && worktrees !== null) || fetching.current) return;
+			fetching.current = true;
+			api
+				.listWorktrees({ projectId: project.id })
+				.then(setWorktrees)
+				.finally(() => {
+					fetching.current = false;
+				});
+		},
+		[worktrees, project.id],
+	);
 
 	useEffect(() => {
 		if (open) loadWorktrees();
+	}, [open, loadWorktrees]);
+
+	// Refetch when worktrees change (e.g. a new one was created) if expanded.
+	useEffect(() => {
+		const off = onDataChanged((scope) => {
+			if (scope === "worktrees" && open) loadWorktrees(true);
+		});
+		return () => {
+			off();
+		};
 	}, [open, loadWorktrees]);
 
 	// Expand the project when you navigate into it or any of its worktrees —
@@ -171,7 +184,7 @@ function ProjectNode({
 						className={styles.projectRow}
 						data-active={projectActive || undefined}
 						data-within={(onThisProject && !projectActive) || undefined}
-						onMouseEnter={loadWorktrees}
+						onMouseEnter={() => loadWorktrees()}
 					>
 						<Collapsible.Trigger className={styles.chevron} aria-label="Toggle worktrees">
 							<ChevronIcon />

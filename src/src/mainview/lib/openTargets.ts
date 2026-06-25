@@ -98,3 +98,16 @@ export async function runProjectCommand(id: string, cwd: string) {
 		notify(`Couldn't run command${res.error ? `: ${res.error}` : ""}`, "error");
 	}
 }
+
+/** Run an arbitrary command (e.g. an agent) in an external terminal at `cwd`. */
+export async function runExternalCommand(command: string, cwd: string) {
+	const app = await terminal.resolve();
+	if (!app) {
+		notify("No terminal found.", "error");
+		return;
+	}
+	const res = await api.runExternal({ cwd, command, app });
+	if (!res.ok) {
+		notify(`Couldn't run command${res.error ? `: ${res.error}` : ""}`, "error");
+	}
+}

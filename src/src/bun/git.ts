@@ -356,6 +356,89 @@ export async function fileDiff(
 	return { binary: false, text: "" };
 }
 
+/** How far a local branch is ahead/behind its `origin/<branch>` (no fetch). */
+export async function branchTracking(
+	repoPath: string,
+	branch: string,
+): Promise<{ ahead: number; behind: number; hasRemote: boolean }> {
+	const remote = `origin/${branch}`;
+	const exists = await git(repoPath, ["rev-parse", "--verify", "--quiet", remote]);
+	if (!exists.ok || exists.stdout.trim() === "") {
+		return { ahead: 0, behind: 0, hasRemote: false };
+	}
+	const res = await git(repoPath, [
+		"rev-list",
+		"--count",
+		"--left-right",
+		`${branch}...${remote}`,
+	]);
+	let ahead = 0;
+	let behind = 0;
+	if (res.ok) {
+		const [a, b] = res.stdout.trim().split(/\s+/);
+		ahead = Number(a) || 0;
+		behind = Number(b) || 0;
+	}
+	return { ahead, behind, hasRemote: true };
+}
+
+/**
+ * Fetch from origin and fast-forward the local `branch` to `origin/branch`.
+ * Uses a refspec so the branch updates without being checked out; if it's
+ * currently checked out (or non-FF), falls back to a plain fetch so the
+ * remote-tracking ref is still current for the behind count.
+ */
+export async function fetchProject(
+	repoPath: string,
+	branch: string | null,
+): Promise<{ ok: boolean; error?: string }> {
+	if (branch) {
+		const ff = await git(repoPath, ["fetch", "origin", `${branch}:${branch}`]);
+		if (ff.ok) return { ok: true };
+	}
+	const f = await git(repoPath, ["fetch", "origin"]);
+	return f.ok ? { ok: true } : { ok: false, error: f.stderr.trim() || "fetch failed" };
+}
+
+/** Remove a worktree (`--force` discards uncommitted/untracked changes). */
+export async function removeWorktree(
+	repoPath: string,
+	worktreePath: string,
+	force: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+	const args = ["worktree", "remove"];
+	if (force) args.push("--force");
+	args.push(worktreePath);
+	const r = await git(repoPath, args);
+	return r.ok
+		? { ok: true }
+		: { ok: false, error: r.stderr.trim() || "git worktree remove failed" };
+}
+
+/** Force-delete a local branch. */
+export async function deleteBranch(
+	repoPath: string,
+	branch: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const r = await git(repoPath, ["branch", "-D", branch]);
+	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() };
+}
+
+/** Create a new worktree at `worktreePath` on a new `branch` off `base`. */
+export async function addWorktree(
+	repoPath: string,
+	worktreePath: string,
+	branch: string,
+	base: string | null,
+): Promise<{ ok: boolean; error?: string }> {
+	const args = ["worktree", "add", worktreePath, "-b", branch];
+	if (base) args.push(base);
+	const res = await git(repoPath, args);
+	return res.ok
+		? { ok: true }
+		: { ok: false, error: res.stderr.trim() || "git worktree add failed" };
+}
+
 export type GitWorktree = {
 	path: string;
 	head: string | null;

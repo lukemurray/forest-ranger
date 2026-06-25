@@ -68,6 +68,18 @@ export const GearIcon = ({ size = 16 }: Props) =>
 export const ChevronUpDownIcon = ({ size = 16 }: Props) =>
 	svg(size, <><path d="m8 9 4-4 4 4" /><path d="m16 15-4 4-4-4" /></>);
 
+export const DownloadIcon = ({ size = 15 }: Props) =>
+	svg(size, <><path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" /></>);
+
+export const SparkleIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M12 3l1.6 4.6L18 9.2l-4.4 1.6L12 15l-1.6-4.2L6 9.2l4.4-1.6L12 3Z" />
+			<path d="M18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8L18 14Z" />
+		</>,
+	);
+
 export const PlayIcon = ({ size = 15 }: Props) =>
 	svg(size, <path d="M7 4.5v15l12-7.5-12-7.5Z" />);
 

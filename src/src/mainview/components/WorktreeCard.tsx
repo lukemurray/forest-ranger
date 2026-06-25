@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import type { Worktree } from "../../shared/types";
-import { api } from "../rpc";
+import { api, emitDataChanged } from "../rpc";
 import { relativeTime, shortHash, tildePath } from "../lib/format";
-import { GitBranchIcon, RevealIcon } from "./icons";
-import { OpenItems, RowMenu } from "./RowMenu";
+import { GitBranchIcon, RevealIcon, TrashIcon } from "./icons";
+import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
+import { RemoveWorktreeDialog } from "./RemoveWorktreeDialog";
 import styles from "./WorktreeCard.module.css";
 
 export function WorktreeCard({
@@ -14,6 +16,7 @@ export function WorktreeCard({
 	projectName?: string;
 }) {
 	const navigate = useNavigate();
+	const [removeOpen, setRemoveOpen] = useState(false);
 
 	function open() {
 		navigate({
@@ -36,15 +39,34 @@ export function WorktreeCard({
 	}
 
 	return (
-		<RowMenu
-			trigger={
-				<button className={styles.card} onClick={open} title="View worktree">
-					<CardBody worktree={worktree} projectName={projectName} goToProject={goToProject} reveal={reveal} />
-				</button>
-			}
-		>
-			<OpenItems path={worktree.path} />
-		</RowMenu>
+		<>
+			<RowMenu
+				trigger={
+					<button className={styles.card} onClick={open} title="View worktree">
+						<CardBody worktree={worktree} projectName={projectName} goToProject={goToProject} reveal={reveal} />
+					</button>
+				}
+			>
+				<OpenItems path={worktree.path} />
+				{!worktree.isPrimary && (
+					<>
+						<Separator />
+						<MenuItem
+							icon={<TrashIcon size={15} />}
+							label="Remove worktree…"
+							danger
+							onClick={() => setRemoveOpen(true)}
+						/>
+					</>
+				)}
+			</RowMenu>
+			<RemoveWorktreeDialog
+				open={removeOpen}
+				onOpenChange={setRemoveOpen}
+				worktreeId={worktree.id}
+				onRemoved={() => emitDataChanged("worktrees")}
+			/>
+		</>
 	);
 }
 

@@ -21,7 +21,8 @@ db.exec(`
 		name           TEXT NOT NULL,
 		path           TEXT NOT NULL UNIQUE,
 		added_at       INTEGER NOT NULL,
-		last_opened_at INTEGER
+		last_opened_at INTEGER,
+		worktree_dir   TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS worktrees (
@@ -47,17 +48,25 @@ db.exec(`
 
 // Migrate older DBs that predate added columns.
 {
-	const cols = db
+	const cmdCols = db
 		.query<{ name: string }, []>("PRAGMA table_info(project_commands)")
 		.all()
 		.map((c) => c.name);
-	if (!cols.includes("dir")) {
+	if (!cmdCols.includes("dir")) {
 		db.exec("ALTER TABLE project_commands ADD COLUMN dir TEXT NOT NULL DEFAULT ''");
 	}
-	if (!cols.includes("run_target")) {
+	if (!cmdCols.includes("run_target")) {
 		db.exec(
 			"ALTER TABLE project_commands ADD COLUMN run_target TEXT NOT NULL DEFAULT 'in-app'",
 		);
+	}
+
+	const projCols = db
+		.query<{ name: string }, []>("PRAGMA table_info(projects)")
+		.all()
+		.map((c) => c.name);
+	if (!projCols.includes("worktree_dir")) {
+		db.exec("ALTER TABLE projects ADD COLUMN worktree_dir TEXT");
 	}
 }
 
@@ -69,6 +78,7 @@ export type ProjectRow = {
 	path: string;
 	added_at: number;
 	last_opened_at: number | null;
+	worktree_dir: string | null;
 };
 
 export type WorktreeRow = {
@@ -108,6 +118,9 @@ const stmts = {
 	deleteProject: db.query("DELETE FROM projects WHERE id = $id"),
 	touchProject: db.query(
 		"UPDATE projects SET last_opened_at = $now WHERE id = $id",
+	),
+	setWorktreeDir: db.query(
+		"UPDATE projects SET worktree_dir = $dir WHERE id = $id",
 	),
 
 	getWorktree: db.query<WorktreeRow, [string]>(
@@ -161,6 +174,8 @@ export const projectsRepo = {
 	remove: (id: string) => stmts.deleteProject.run({ $id: id } as never),
 	touch: (id: string, now: number) =>
 		stmts.touchProject.run({ $id: id, $now: now } as never),
+	setWorktreeDir: (id: string, dir: string) =>
+		stmts.setWorktreeDir.run({ $id: id, $dir: dir } as never),
 };
 
 export const worktreesRepo = {

@@ -1,0 +1,27 @@
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.label {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-muted);
+}
+
+.input {
+	width: 100%;
+	padding: 8px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text);
+	font-size: 13px;
+}
+.input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+.mono {
+	font-family: var(--font-mono);
+}

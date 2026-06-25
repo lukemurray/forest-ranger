@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ProjectCommand } from "../../shared/types";
+import { useNavigate } from "@tanstack/react-router";
+import type { CommandRunTarget, ProjectCommand } from "../../shared/types";
 import { projectRoute, rootRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
+import { Button } from "../components/ui/Button";
+import { BranchSyncBar } from "../components/BranchSyncBar";
 import { WorktreeCard } from "../components/WorktreeCard";
 import { CommandDialog } from "../components/CommandDialog";
+import { NewWorktreeDialog } from "../components/NewWorktreeDialog";
 import {
 	FolderIcon,
 	PencilIcon,
@@ -11,7 +15,11 @@ import {
 	RevealIcon,
 	TrashIcon,
 } from "../components/icons";
-import { api } from "../rpc";
+import { api, emitDataChanged } from "../rpc";
+import { openSession } from "../lib/terminalStore";
+import { getDefaultRunTarget } from "../lib/runTarget";
+import { runExternalCommand } from "../lib/openTargets";
+import { prepareAgentLaunch, type Agent } from "../lib/agents";
 import tb from "../components/Titlebar.module.css";
 import styles from "./Page.module.css";
 
@@ -20,10 +28,40 @@ export function ProjectView() {
 	const { projectId } = projectRoute.useParams();
 	const projects = rootRoute.useLoaderData();
 	const project = projects.find((p) => p.id === projectId);
+	const navigate = useNavigate();
 
 	const [commands, setCommands] = useState<ProjectCommand[]>([]);
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [editing, setEditing] = useState<ProjectCommand | null>(null);
+	const [newOpen, setNewOpen] = useState(false);
+
+	function onWorktreeCreated(
+		worktreeId: string,
+		path: string,
+		agent: Agent | null,
+	) {
+		emitDataChanged("worktrees"); // refresh sidebar + project grid
+		if (agent) {
+			const { command, sessionId } = prepareAgentLaunch(agent);
+			if (getDefaultRunTarget() === "external" && path) {
+				runExternalCommand(command, path);
+			} else {
+				openSession({
+					worktreeId,
+					projectId,
+					commandId: null,
+					command,
+					resumeCommand: agent.resumeCommand || null,
+					sessionId,
+					title: agent.label,
+				});
+			}
+		}
+		navigate({
+			to: "/project/$projectId/worktree/$worktreeId",
+			params: { projectId, worktreeId },
+		});
+	}
 
 	const loadCommands = useCallback(() => {
 		api.listCommands({ projectId }).then(setCommands);
@@ -45,7 +83,7 @@ export function ProjectView() {
 		label: string,
 		command: string,
 		dir: string,
-		runTarget: "in-app" | "external",
+		runTarget: CommandRunTarget,
 	) {
 		if (editing) {
 			await api.updateCommand({ id: editing.id, label, command, dir, runTarget });
@@ -93,12 +131,14 @@ export function ProjectView() {
 
 			<div className={styles.scroll}>
 				<div className={styles.page}>
+					<BranchSyncBar projectId={projectId} />
+
 					<section className={styles.section}>
 						<div className={styles.sectionHead}>
 							<h2 className={styles.sectionTitle}>Commands</h2>
-							<button className={styles.addCommand} onClick={openAdd}>
-								<PlusIcon size={14} /> Add command
-							</button>
+							<Button variant="ghost" icon={<PlusIcon size={14} />} onClick={openAdd}>
+								Add command
+							</Button>
 						</div>
 						{commands.length === 0 ? (
 							<p className={styles.hint}>
@@ -136,7 +176,16 @@ export function ProjectView() {
 					</section>
 
 					<section className={styles.section}>
-						<h2 className={styles.sectionTitle}>Worktrees</h2>
+						<div className={styles.sectionHead}>
+							<h2 className={styles.sectionTitle}>Worktrees</h2>
+							<Button
+								variant="ghost"
+								icon={<PlusIcon size={14} />}
+								onClick={() => setNewOpen(true)}
+							>
+								New worktree
+							</Button>
+						</div>
 						{worktrees.length === 0 ? (
 							<p className={styles.hint}>No worktrees found for this project.</p>
 						) : (
@@ -159,6 +208,12 @@ export function ProjectView() {
 				initialDir={editing?.dir ?? ""}
 				initialRunTarget={editing?.runTarget ?? "in-app"}
 				onSubmit={submit}
+			/>
+			<NewWorktreeDialog
+				open={newOpen}
+				onOpenChange={setNewOpen}
+				projectId={projectId}
+				onCreated={onWorktreeCreated}
 			/>
 		</div>
 	);

@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useParams } from "@tanstack/react-router";
 import {
 	closeSession,
 	setActiveSession,
@@ -19,14 +20,21 @@ function endSession(id: string) {
 
 export function TerminalDock() {
 	const { sessions, activeId, dock, open } = useTerminals();
+	const params = useParams({ strict: false });
+	const worktreeId = params.worktreeId;
 	const [size, setSize] = useState(() => {
 		const saved = Number(localStorage.getItem("forest-ranger:dock-size"));
 		return saved || (dock === "bottom" ? 280 : 460);
 	});
 	const drag = useRef<{ start: number; size: number } | null>(null);
 
-	// No sessions → nothing to show.
-	if (sessions.length === 0) return null;
+	// A terminal belongs to a worktree: only show sessions for the one in view.
+	const visible = sessions.filter((s) => s.worktreeId === worktreeId);
+	const activeVisibleId = visible.some((s) => s.id === activeId)
+		? activeId
+		: (visible[0]?.id ?? null);
+
+	if (visible.length === 0) return null;
 
 	// Hidden but sessions still running → collapsed strip so it can be reopened.
 	if (!open) {
@@ -37,7 +45,7 @@ export function TerminalDock() {
 				title="Show terminal"
 			>
 				<TerminalIcon size={14} />
-				<span>Terminal{sessions.length > 1 ? ` (${sessions.length})` : ""}</span>
+				<span>Terminal{visible.length > 1 ? ` (${visible.length})` : ""}</span>
 			</button>
 		);
 	}
@@ -71,11 +79,11 @@ export function TerminalDock() {
 			<div className={styles.resizer} onMouseDown={onResizeDown} />
 			<div className={styles.header}>
 				<div className={styles.tabs}>
-					{sessions.map((s) => (
+					{visible.map((s) => (
 						<button
 							key={s.id}
 							className={styles.tab}
-							data-active={s.id === activeId || undefined}
+							data-active={s.id === activeVisibleId || undefined}
 							onClick={() => setActiveSession(s.id)}
 							title={s.title}
 						>
@@ -110,16 +118,17 @@ export function TerminalDock() {
 				</div>
 			</div>
 			<div className={styles.body}>
-				{sessions.map((s) => (
+				{visible.map((s) => (
 					<div
 						key={s.id}
 						className={styles.pane}
-						style={{ display: s.id === activeId ? "block" : "none" }}
+						style={{ display: s.id === activeVisibleId ? "block" : "none" }}
 					>
 						<TerminalPane
 							sessionId={s.id}
 							worktreeId={s.worktreeId}
 							commandId={s.commandId}
+							command={s.command}
 						/>
 					</div>
 				))}

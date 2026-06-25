@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
-import { Combobox } from "@base-ui-components/react/combobox";
 import {
 	Diff as DiffViewer,
 	Hunk,
@@ -15,28 +14,46 @@ import "react-diff-view/style/index.css";
 import type {
 	ChangedFile,
 	ChangeKind,
+	CommandRunTarget,
 	FileDiff,
 	ProjectCommand,
 } from "../../shared/types";
 import { worktreeRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
 import { CommandDialog } from "../components/CommandDialog";
+import { AgentsDialog } from "../components/AgentsDialog";
+import { RemoveWorktreeDialog } from "../components/RemoveWorktreeDialog";
+import { BranchCombobox } from "../components/BranchCombobox";
+import { Button } from "../components/ui/Button";
 import { MenuItem, RowMenu, Separator } from "../components/RowMenu";
 import {
 	ChevronIcon,
-	ChevronUpDownIcon,
+	ClockIcon,
 	FolderIcon,
 	GitBranchIcon,
 	PencilIcon,
 	PlayIcon,
 	PlusIcon,
 	RevealIcon,
+	SparkleIcon,
 	TerminalIcon,
 	TrashIcon,
 } from "../components/icons";
-import { api } from "../rpc";
-import { openInEditor, openInTerminal, runProjectCommand } from "../lib/openTargets";
-import { openSession } from "../lib/terminalStore";
+import { api, emitDataChanged } from "../rpc";
+import {
+	openInEditor,
+	openInTerminal,
+	runExternalCommand,
+	runProjectCommand,
+} from "../lib/openTargets";
+import {
+	getRestorableSessions,
+	openSession,
+	reopenSessions,
+	useTerminals,
+} from "../lib/terminalStore";
+import { useDefaultRunTarget } from "../lib/runTarget";
+import { prepareAgentLaunch, useAgents, type Agent } from "../lib/agents";
 import { relativeTime, shortHash, splitPath } from "../lib/format";
 import tb from "../components/Titlebar.module.css";
 import styles from "./WorktreeView.module.css";
@@ -59,6 +76,10 @@ export function WorktreeView() {
 
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [editing, setEditing] = useState<ProjectCommand | null>(null);
+	const [agentsOpen, setAgentsOpen] = useState(false);
+	const [removeOpen, setRemoveOpen] = useState(false);
+	const agents = useAgents();
+	const defaultTarget = useDefaultRunTarget();
 
 	function openAdd() {
 		setEditing(null);
@@ -72,7 +93,7 @@ export function WorktreeView() {
 		label: string,
 		command: string,
 		dir: string,
-		runTarget: "in-app" | "external",
+		runTarget: CommandRunTarget,
 	) {
 		if (editing) {
 			await api.updateCommand({ id: editing.id, label, command, dir, runTarget });
@@ -102,6 +123,15 @@ export function WorktreeView() {
 	const { worktree, projectName, branch, base, branches, ahead, behind, committed, uncommitted, commands } =
 		detail;
 
+	// Previous-run sessions for this worktree that aren't already running.
+	const { sessions } = useTerminals();
+	const liveCmds = new Set(
+		sessions.filter((s) => s.worktreeId === worktree.id).flatMap((s) => [s.command, s.resumeCommand]),
+	);
+	const resumable = getRestorableSessions(worktree.id).filter(
+		(r) => r.resumeCommand && !liveCmds.has(r.command) && !liveCmds.has(r.resumeCommand),
+	);
+
 	function selectBase(next: string) {
 		navigate({
 			to: "/project/$projectId/worktree/$worktreeId",
@@ -111,14 +141,35 @@ export function WorktreeView() {
 	}
 
 	function run(cmd: ProjectCommand) {
-		if (cmd.runTarget === "external") {
+		const target = cmd.runTarget === "default" ? defaultTarget : cmd.runTarget;
+		if (target === "external") {
 			runProjectCommand(cmd.id, worktree.path);
 		} else {
 			openSession({
 				worktreeId: worktree.id,
 				projectId,
 				commandId: cmd.id,
+				command: null,
+				resumeCommand: null,
+				sessionId: null,
 				title: `${branch ?? "detached"} · ${cmd.label}`,
+			});
+		}
+	}
+
+	function startAgent(agent: Agent) {
+		const { command, sessionId } = prepareAgentLaunch(agent);
+		if (defaultTarget === "external") {
+			runExternalCommand(command, worktree.path);
+		} else {
+			openSession({
+				worktreeId: worktree.id,
+				projectId,
+				commandId: null,
+				command,
+				resumeCommand: agent.resumeCommand || null,
+				sessionId,
+				title: `${branch ?? "detached"} · ${agent.label}`,
 			});
 		}
 	}
@@ -148,6 +199,15 @@ export function WorktreeView() {
 						>
 							<RevealIcon />
 						</button>
+						{!worktree.isPrimary && (
+							<button
+								className={tb.actionButton}
+								onClick={() => setRemoveOpen(true)}
+								title="Remove worktree"
+							>
+								<TrashIcon />
+							</button>
+						)}
 					</>
 				}
 			>
@@ -166,37 +226,75 @@ export function WorktreeView() {
 
 			<div className={styles.scroll}>
 				<div className={styles.body}>
-					<section className={styles.commands}>
-						{commands.map((cmd) => (
-							<RowMenu
-								key={cmd.id}
-								trigger={
-									<button
-										className={styles.runButton}
-										onClick={() => run(cmd)}
-										title={cmd.command}
-									>
-										<PlayIcon size={13} /> {cmd.label}
-									</button>
-								}
+					<section className={styles.actionsBar}>
+						<div className={styles.actionGroup}>
+							{commands.map((cmd) => (
+								<RowMenu
+									key={cmd.id}
+									trigger={
+										<Button
+											variant="success"
+											icon={<PlayIcon size={13} />}
+											onClick={() => run(cmd)}
+											title={cmd.command}
+										>
+											{cmd.label}
+										</Button>
+									}
+								>
+									<MenuItem
+										icon={<PencilIcon size={15} />}
+										label="Edit command"
+										onClick={() => openEdit(cmd)}
+									/>
+									<Separator />
+									<MenuItem
+										icon={<TrashIcon size={15} />}
+										label="Delete command"
+										danger
+										onClick={() => removeCommand(cmd.id)}
+									/>
+								</RowMenu>
+							))}
+							<Button
+								variant="dashed"
+								icon={<PlusIcon size={14} />}
+								onClick={openAdd}
 							>
-								<MenuItem
-									icon={<PencilIcon size={15} />}
-									label="Edit command"
-									onClick={() => openEdit(cmd)}
-								/>
-								<Separator />
-								<MenuItem
-									icon={<TrashIcon size={15} />}
-									label="Delete command"
-									danger
-									onClick={() => removeCommand(cmd.id)}
-								/>
-							</RowMenu>
-						))}
-						<button className={styles.addCommandButton} onClick={openAdd}>
-							<PlusIcon size={14} /> {commands.length === 0 ? "Add a run command" : "Add"}
-						</button>
+								{commands.length === 0 ? "Add a run command" : "Add"}
+							</Button>
+						</div>
+
+						<div className={styles.actionGroup}>
+							{resumable.map((r) => (
+								<button
+									key={`${r.worktreeId}|${r.command}`}
+									className={styles.resumeButton}
+									onClick={() => reopenSessions([r])}
+									title="Reopen the previous session (resumes the chat)"
+								>
+									<ClockIcon size={13} /> Resume {r.title.split(" · ").pop()}
+								</button>
+							))}
+							{agents.map((agent) => (
+								<Button
+									key={agent.id}
+									variant="primary"
+									icon={<SparkleIcon size={14} />}
+									onClick={() => startAgent(agent)}
+									title={`Run ${agent.command} in this worktree`}
+								>
+									{agent.label}
+								</Button>
+							))}
+							<Button
+								variant="dashed"
+								icon={<SparkleIcon size={13} />}
+								onClick={() => setAgentsOpen(true)}
+							>
+								{agents.length === 0 ? "Add an agent" : "Agents"}
+							</Button>
+						</div>
 					</section>
 
 					<section className={styles.summary}>
@@ -264,6 +362,16 @@ export function WorktreeView() {
 				initialRunTarget={editing?.runTarget ?? "in-app"}
 				onSubmit={submitCommand}
 			/>
+			<AgentsDialog open={agentsOpen} onOpenChange={setAgentsOpen} />
+			<RemoveWorktreeDialog
+				open={removeOpen}
+				onOpenChange={setRemoveOpen}
+				worktreeId={worktree.id}
+				onRemoved={() => {
+					emitDataChanged("worktrees");
+					navigate({ to: "/project/$projectId", params: { projectId } });
+				}}
+			/>
 		</div>
 	);
 }
@@ -319,57 +427,6 @@ function ChangeSection({
 	);
 }
 
-function BranchCombobox({
-	value,
-	branches,
-	onSelect,
-}: {
-	value: string | null;
-	branches: string[];
-	onSelect: (branch: string) => void;
-}) {
-	return (
-		<Combobox.Root
-			items={branches}
-			value={value ?? ""}
-			onValueChange={(v) => {
-				if (typeof v === "string" && v) onSelect(v);
-			}}
-		>
-			<div className={styles.combo}>
-				<Combobox.Input
-					className={styles.comboInput}
-					placeholder="branch…"
-					// Defer so the selection wins over the component's own focus handling,
-					// letting you type to replace the current branch right away.
-					onFocus={(e) => {
-						const el = e.currentTarget;
-						setTimeout(() => el.select(), 0);
-					}}
-				/>
-				<Combobox.Icon className={styles.comboIcon}>
-					<ChevronUpDownIcon size={13} />
-				</Combobox.Icon>
-			</div>
-			<Combobox.Portal>
-				<Combobox.Positioner className={styles.comboPositioner} sideOffset={4}>
-					<Combobox.Popup className={styles.comboPopup}>
-						<Combobox.Empty className={styles.comboEmpty}>
-							No matching branch
-						</Combobox.Empty>
-						<Combobox.List>
-							{(item: string) => (
-								<Combobox.Item key={item} value={item} className={styles.comboItem}>
-									{item}
-								</Combobox.Item>
-							)}
-						</Combobox.List>
-					</Combobox.Popup>
-				</Combobox.Positioner>
-			</Combobox.Portal>
-		</Combobox.Root>
-	);
-}
 
 function FileRow({
 	worktreeId,

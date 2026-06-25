@@ -29,10 +29,12 @@ export function TerminalPane({
 	sessionId,
 	worktreeId,
 	commandId,
+	command,
 }: {
 	sessionId: string;
 	worktreeId: string;
 	commandId: string | null;
+	command: string | null;
 }) {
 	const hostRef = useRef<HTMLDivElement>(null);
 	const termRef = useRef<Terminal | null>(null);
@@ -68,6 +70,21 @@ export function TerminalPane({
 		};
 		safeFit();
 
+		// ⌘C copies the selection; ⌘V pastes. (Ctrl-C still goes through as SIGINT.)
+		term.attachCustomKeyEventHandler((e) => {
+			if (e.type !== "keydown" || !e.metaKey) return true;
+			const key = e.key.toLowerCase();
+			if (key === "c" && term.hasSelection()) {
+				navigator.clipboard?.writeText(term.getSelection());
+				return false;
+			}
+			if (key === "v") {
+				navigator.clipboard?.readText().then((t) => t && term.paste(t));
+				return false;
+			}
+			return true;
+		});
+
 		const unsub = subscribeTerminal(sessionId, {
 			onData: (b64) => term.write(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))),
 			onExit: (code) => {
@@ -83,6 +100,7 @@ export function TerminalPane({
 				sessionId,
 				worktreeId,
 				commandId,
+				command,
 				cols: term.cols,
 				rows: term.rows,
 			})
@@ -108,7 +126,7 @@ export function TerminalPane({
 			term.dispose();
 			termRef.current = null;
 		};
-	}, [sessionId, worktreeId, commandId]);
+	}, [sessionId, worktreeId, commandId, command]);
 
 	return <div ref={hostRef} className={styles.host} />;
 }

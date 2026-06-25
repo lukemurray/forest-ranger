@@ -1,5 +1,7 @@
 import Electrobun, { BrowserView, BrowserWindow, Updater, Utils } from "electrobun/bun";
-import { basename, join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import type {
 	AppRPC,
 	ChangedFile,
@@ -26,8 +28,13 @@ import {
 	type ProjectRow,
 } from "./db";
 import {
+	addWorktree as gitAddWorktree,
+	branchTracking,
+	deleteBranch as gitDeleteBranch,
+	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
 	gitVersion,
+	removeWorktree as gitRemoveWorktree,
 	listWorktrees as gitListWorktrees,
 	localBranches,
 	resolveBaseBranch,
@@ -63,7 +70,10 @@ function toCommand(row: CommandRow): ProjectCommand {
 		label: row.label,
 		command: row.command,
 		dir: row.dir,
-		runTarget: row.run_target === "external" ? "external" : "in-app",
+		runTarget:
+			row.run_target === "external" || row.run_target === "default"
+				? row.run_target
+				: "in-app",
 	};
 }
 
@@ -118,6 +128,34 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 
 function recencyDesc(a: Worktree, b: Worktree): number {
 	return b.lastActivityAt - a.lastActivityAt;
+}
+
+function expandTilde(p: string): string {
+	return p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+}
+
+/**
+ * Where new worktrees for a project go: the explicit per-project setting if set,
+ * else the conventional `<repo>.worktrees`, else the most common existing
+ * location (so a stray worktree from another tool doesn't hijack the default).
+ */
+async function worktreeParentFor(project: ProjectRow): Promise<string> {
+	if (project.worktree_dir) return project.worktree_dir;
+
+	const conventional = `${project.path}.worktrees`;
+	const parents = (await gitListWorktrees(project.path))
+		.filter((e) => e.path !== project.path && !e.isBare)
+		.map((e) => dirname(e.path));
+
+	if (parents.includes(conventional) || existsSync(conventional)) {
+		return conventional;
+	}
+	if (parents.length > 0) {
+		const counts = new Map<string, number>();
+		for (const p of parents) counts.set(p, (counts.get(p) ?? 0) + 1);
+		return [...counts].sort((a, b) => b[1] - a[1])[0][0];
+	}
+	return conventional;
 }
 
 function letterKind(letter: string): ChangeKind {
@@ -299,6 +337,120 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				return { path, binary, diff: text };
 			},
 
+			worktreeRemovalInfo: async ({ id }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return null;
+				const project = projectsRepo.get(row.project_id);
+				if (!project) return null;
+				const entries = await gitListWorktrees(project.path);
+				const entry = entries.find((e) => e.path === row.path);
+				const isPrimary = row.path === project.path;
+				const base = await resolveBaseBranch(project.path, null);
+				const usableBase = base && base !== entry?.branch ? base : null;
+				const changes = await worktreeChanges(row.path, usableBase);
+				return {
+					branch: entry?.branch ?? null,
+					path: row.path,
+					isPrimary,
+					uncommitted: changes.uncommitted.length,
+					unmerged: changes.ahead,
+					base: usableBase,
+				};
+			},
+
+			removeWorktree: async ({ id, force, deleteBranch }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				const project = projectsRepo.get(row.project_id);
+				if (!project) return { ok: false, error: "Project not found" };
+				if (row.path === project.path) {
+					return { ok: false, error: "Can't remove the primary worktree" };
+				}
+				const entries = await gitListWorktrees(project.path);
+				const branch = entries.find((e) => e.path === row.path)?.branch;
+
+				const rem = await gitRemoveWorktree(project.path, row.path, force);
+				if (!rem.ok) return rem;
+				if (deleteBranch && branch) {
+					await gitDeleteBranch(project.path, branch); // best-effort
+				}
+				return { ok: true };
+			},
+
+			branchStatus: async ({ projectId }) => {
+				const project = projectsRepo.get(projectId);
+				const base = project
+					? await resolveBaseBranch(project.path, null)
+					: null;
+				if (!project || !base) {
+					return { branch: base, ahead: 0, behind: 0, hasRemote: false };
+				}
+				const t = await branchTracking(project.path, base);
+				return { branch: base, ...t };
+			},
+
+			fetchProject: async ({ projectId }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return { ok: false, error: "Project not found" };
+				const base = await resolveBaseBranch(project.path, null);
+				return gitFetchProject(project.path, base);
+			},
+
+			projectBranches: async ({ projectId }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return { branches: [], base: null, worktreeDir: "" };
+				const [branches, base, worktreeDir] = await Promise.all([
+					localBranches(project.path),
+					resolveBaseBranch(project.path, null),
+					worktreeParentFor(project),
+				]);
+				return { branches, base, worktreeDir };
+			},
+
+			createWorktree: async ({ projectId, name, base, location }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return { ok: false, error: "Project not found" };
+
+				const branch =
+					name.trim() ||
+					`worktree-${Math.random().toString(36).slice(2, 8)}`;
+
+				// Explicit location (from the dialog) wins and becomes the project's
+				// remembered default; otherwise use the stored/detected location.
+				const parent = location?.trim()
+					? expandTilde(location.trim())
+					: await worktreeParentFor(project);
+				projectsRepo.setWorktreeDir(projectId, parent);
+				mkdirSync(parent, { recursive: true });
+
+				const dirName =
+					(branch.split("/").pop() || branch).replace(/[^\w.-]+/g, "-") ||
+					"worktree";
+				let wtPath = join(parent, dirName);
+				for (let n = 2; existsSync(wtPath); n++) {
+					wtPath = join(parent, `${dirName}-${n}`);
+				}
+
+				const resolvedBase = await resolveBaseBranch(project.path, base);
+				const res = await gitAddWorktree(
+					project.path,
+					wtPath,
+					branch,
+					resolvedBase,
+				);
+				if (!res.ok) return { ok: false, error: res.error };
+
+				const id = worktreeId(projectId, wtPath);
+				worktreesRepo.upsert({
+					id,
+					projectId,
+					path: wtPath,
+					createdAt: now(),
+				});
+				console.log(`[createWorktree] ${branch} -> ${wtPath}`);
+				return { ok: true, worktreeId: id, path: wtPath };
+			},
+
 			listCommands: ({ projectId }) =>
 				commandsRepo.forProject(projectId).map(toCommand),
 
@@ -332,19 +484,21 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				return runInTerminal(app, runCwd, cmd.command);
 			},
 
-			termStart: ({ sessionId, worktreeId, commandId, cols, rows }) => {
+			runExternal: ({ cwd, command, app }) => runInTerminal(app, cwd, command),
+
+			termStart: ({ sessionId, worktreeId, commandId, command, cols, rows }) => {
 				const row = worktreesRepo.get(worktreeId);
 				if (!row) return { ok: false, error: "Worktree not found" };
 				let cwd = row.path;
-				let command: string | undefined;
-				if (commandId) {
+				let toRun: string | undefined = command ?? undefined;
+				if (!toRun && commandId) {
 					const cmd = commandsRepo.get(commandId);
 					if (cmd) {
-						command = cmd.command;
+						toRun = cmd.command;
 						if (cmd.dir) cwd = join(cwd, cmd.dir);
 					}
 				}
-				termStart({ sessionId, cwd, command, cols, rows });
+				termStart({ sessionId, cwd, command: toRun, cols, rows });
 				return { ok: true };
 			},
 		},

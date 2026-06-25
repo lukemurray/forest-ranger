@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
-import { Dialog } from "@base-ui-components/react/dialog";
-import type { RunTarget } from "../../shared/types";
+import type { CommandRunTarget } from "../../shared/types";
+import { Modal, ModalClose, ModalTitle } from "./ui/Modal";
+import { Button } from "./ui/Button";
+import { TextField } from "./ui/TextField";
+import { Segmented } from "./ui/Segmented";
 import styles from "./CommandDialog.module.css";
+
+const RUN_TARGETS: { value: CommandRunTarget; label: string }[] = [
+	{ value: "default", label: "Default" },
+	{ value: "in-app", label: "In-app" },
+	{ value: "external", label: "External" },
+];
 
 export function CommandDialog({
 	open,
@@ -10,7 +19,7 @@ export function CommandDialog({
 	initialLabel = "",
 	initialCommand = "",
 	initialDir = "",
-	initialRunTarget = "in-app",
+	initialRunTarget = "default",
 	onSubmit,
 }: {
 	open: boolean;
@@ -19,18 +28,18 @@ export function CommandDialog({
 	initialLabel?: string;
 	initialCommand?: string;
 	initialDir?: string;
-	initialRunTarget?: RunTarget;
+	initialRunTarget?: CommandRunTarget;
 	onSubmit: (
 		label: string,
 		command: string,
 		dir: string,
-		runTarget: RunTarget,
+		runTarget: CommandRunTarget,
 	) => void;
 }) {
 	const [label, setLabel] = useState(initialLabel);
 	const [command, setCommand] = useState(initialCommand);
 	const [dir, setDir] = useState(initialDir);
-	const [runTarget, setRunTarget] = useState<RunTarget>(initialRunTarget);
+	const [runTarget, setRunTarget] = useState<CommandRunTarget>(initialRunTarget);
 
 	useEffect(() => {
 		if (open) {
@@ -52,73 +61,48 @@ export function CommandDialog({
 	}
 
 	return (
-		<Dialog.Root open={open} onOpenChange={onOpenChange}>
-			<Dialog.Portal>
-				<Dialog.Backdrop className={styles.backdrop} />
-				<Dialog.Popup className={styles.popup}>
-					<Dialog.Title className={styles.title}>{title}</Dialog.Title>
+		<Modal open={open} onOpenChange={onOpenChange} width={420}>
+			<ModalTitle className={styles.title}>{title}</ModalTitle>
 
-					<label className={styles.field}>
-						<span>Label</span>
-						<input
-							className={styles.input}
-							value={label}
-							onChange={(e) => setLabel(e.target.value)}
-							placeholder="Run"
-							autoFocus
-						/>
-					</label>
-					<label className={styles.field}>
-						<span>Command</span>
-						<input
-							className={styles.input}
-							value={command}
-							onChange={(e) => setCommand(e.target.value)}
-							onKeyDown={(e) => e.key === "Enter" && save()}
-							placeholder="npm run dev"
-							spellCheck={false}
-						/>
-					</label>
-					<label className={styles.field}>
-						<span>Working directory (optional)</span>
-						<input
-							className={styles.input}
-							value={dir}
-							onChange={(e) => setDir(e.target.value)}
-							onKeyDown={(e) => e.key === "Enter" && save()}
-							placeholder="repo root — e.g. apps/web"
-							spellCheck={false}
-						/>
-					</label>
+			<div className={styles.fields}>
+				<TextField
+					label="Label"
+					value={label}
+					onChange={(e) => setLabel(e.target.value)}
+					placeholder="Run"
+					autoFocus
+				/>
+				<TextField
+					label="Command"
+					mono
+					value={command}
+					onChange={(e) => setCommand(e.target.value)}
+					onKeyDown={(e) => e.key === "Enter" && save()}
+					placeholder="npm run dev"
+					spellCheck={false}
+				/>
+				<TextField
+					label="Working directory (optional)"
+					mono
+					value={dir}
+					onChange={(e) => setDir(e.target.value)}
+					onKeyDown={(e) => e.key === "Enter" && save()}
+					placeholder="repo root — e.g. apps/web"
+					spellCheck={false}
+				/>
 
-					<div className={styles.field}>
-						<span>Run in</span>
-						<div className={styles.segmented}>
-							<button
-								type="button"
-								data-active={runTarget === "in-app" || undefined}
-								onClick={() => setRunTarget("in-app")}
-							>
-								In-app terminal
-							</button>
-							<button
-								type="button"
-								data-active={runTarget === "external" || undefined}
-								onClick={() => setRunTarget("external")}
-							>
-								External terminal
-							</button>
-						</div>
-					</div>
+				<div className={styles.field}>
+					<span className={styles.label}>Run in</span>
+					<Segmented value={runTarget} options={RUN_TARGETS} onChange={setRunTarget} />
+				</div>
+			</div>
 
-					<div className={styles.actions}>
-						<Dialog.Close className={styles.cancel}>Cancel</Dialog.Close>
-						<button className={styles.save} disabled={!valid} onClick={save}>
-							Save
-						</button>
-					</div>
-				</Dialog.Popup>
-			</Dialog.Portal>
-		</Dialog.Root>
+			<div className={styles.actions}>
+				<ModalClose className={styles.cancel}>Cancel</ModalClose>
+				<Button variant="primary" disabled={!valid} onClick={save}>
+					Save
+				</Button>
+			</div>
+		</Modal>
 	);
 }

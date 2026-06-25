@@ -5,10 +5,15 @@ type DataChangedScope = "projects" | "worktrees";
 
 const listeners = new Set<(scope: DataChangedScope) => void>();
 
-/** Subscribe to "data changed" pushes from the Bun process. */
+/** Subscribe to "data changed" notifications (from Bun or local mutations). */
 export function onDataChanged(fn: (scope: DataChangedScope) => void) {
 	listeners.add(fn);
 	return () => listeners.delete(fn);
+}
+
+/** Fire a "data changed" notification locally (after a view-initiated mutation). */
+export function emitDataChanged(scope: DataChangedScope) {
+	for (const fn of listeners) fn(scope);
 }
 
 type TermSub = { onData: (data: string) => void; onExit: (code: number) => void };

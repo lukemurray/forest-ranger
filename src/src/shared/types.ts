@@ -55,8 +55,11 @@ export type ChangedFile = {
 };
 
 /** A saved, runnable command for a project (e.g. "Run" → "npm run dev"). */
-/** Where a command runs when its Run button is clicked. */
+/** The global default for where a command/agent runs. */
 export type RunTarget = "in-app" | "external";
+
+/** A command's run target — "default" defers to the global setting. */
+export type CommandRunTarget = "default" | "in-app" | "external";
 
 export type ProjectCommand = {
 	id: string;
@@ -65,7 +68,7 @@ export type ProjectCommand = {
 	command: string;
 	/** Subdirectory (relative to the worktree root) to run in; "" = root. */
 	dir: string;
-	runTarget: RunTarget;
+	runTarget: CommandRunTarget;
 };
 
 /** Everything the worktree detail view needs. */
@@ -162,6 +165,69 @@ export type AppRPC = {
 				response: FileDiff;
 			};
 
+			/** Pre-flight info for removing a worktree (safety check). */
+			worktreeRemovalInfo: {
+				params: { id: string };
+				response: {
+					branch: string | null;
+					path: string;
+					isPrimary: boolean;
+					uncommitted: number;
+					unmerged: number;
+					base: string | null;
+				} | null;
+			};
+			/** Remove a worktree; optionally force and delete its branch. */
+			removeWorktree: {
+				params: { id: string; force: boolean; deleteBranch: boolean };
+				response: { ok: boolean; error?: string };
+			};
+
+			/** Whether the project's default branch is behind its remote. */
+			branchStatus: {
+				params: { projectId: string };
+				response: {
+					branch: string | null;
+					ahead: number;
+					behind: number;
+					hasRemote: boolean;
+				};
+			};
+			/** Fetch origin and fast-forward the default branch. */
+			fetchProject: {
+				params: { projectId: string };
+				response: { ok: boolean; error?: string };
+			};
+
+			/** Local branches, default base, and where new worktrees will go. */
+			projectBranches: {
+				params: { projectId: string };
+				response: {
+					branches: string[];
+					base: string | null;
+					worktreeDir: string;
+				};
+			};
+			/**
+			 * Create a worktree (new branch off base). name="" auto-generates.
+			 * `location` is the parent dir for the worktree (persisted as the
+			 * project's default); null uses the project's stored/detected location.
+			 */
+			createWorktree: {
+				params: {
+					projectId: string;
+					name: string;
+					base: string | null;
+					location: string | null;
+				};
+				response: {
+					ok: boolean;
+					worktreeId?: string;
+					path?: string;
+					error?: string;
+				};
+			};
+
 			listCommands: {
 				params: { projectId: string };
 				response: ProjectCommand[];
@@ -172,7 +238,7 @@ export type AppRPC = {
 					label: string;
 					command: string;
 					dir: string;
-					runTarget: RunTarget;
+					runTarget: CommandRunTarget;
 				};
 				response: ProjectCommand;
 			};
@@ -182,7 +248,7 @@ export type AppRPC = {
 					label: string;
 					command: string;
 					dir: string;
-					runTarget: RunTarget;
+					runTarget: CommandRunTarget;
 				};
 				response: void;
 			};
@@ -192,12 +258,20 @@ export type AppRPC = {
 				params: { id: string; cwd: string; app: AppId };
 				response: OpenResult;
 			};
+			/** Run an arbitrary command (e.g. an agent) in an external terminal. */
+			runExternal: {
+				params: { cwd: string; command: string; app: AppId };
+				response: OpenResult;
+			};
 			/** Start an in-app PTY session (view supplies the sessionId). */
 			termStart: {
 				params: {
 					sessionId: string;
 					worktreeId: string;
+					/** Run a saved project command... */
 					commandId: string | null;
+					/** ...or an explicit command (e.g. an agent CLI). Takes precedence. */
+					command: string | null;
 					cols: number;
 					rows: number;
 				};
