@@ -1,59 +1,68 @@
-# React + Vite Electrobun Template
+# Forest Ranger
 
-A fast Electrobun desktop app template with React, and Vite for hot module replacement (HMR).
+A desktop app for browsing and managing git worktrees by recency. Built with
+Electron, React, and Vite (via electron-vite) for hot module replacement.
 
 ## Getting Started
 
 ```bash
-# Install dependencies
+# Install dependencies (also rebuilds native modules for Electron)
 bun install
 
-# Development without HMR (uses bundled assets)
+# Development with HMR
 bun run dev
 
-# Development with HMR (recommended)
-bun run dev:hmr
+# Type-check
+bun run typecheck
 
-# Build a canary (pre-release) package
-bun run build:canary
+# Build the production bundle (out/)
+bun run build
 
-# Build a stable production package
-bun run build:stable
+# Build and package a distributable (.dmg) via electron-builder
+bun run dist
 ```
 
-## How HMR Works
+Native modules (`better-sqlite3`, `node-pty`) must be compiled against
+Electron's ABI. `bun install` runs `electron-builder install-app-deps`, and you
+can rebuild them manually any time with `bun run rebuild`.
 
-When you run `bun run dev:hmr`:
+## How it works
 
-1. **Vite dev server** starts on `http://localhost:5178` with HMR enabled
-2. **Electrobun** starts and detects the running Vite server
-3. The app loads from the Vite dev server instead of bundled assets
-4. Changes to React components update instantly without full page reload
-
-When you run `bun run dev` (without HMR):
-
-1. Electrobun starts and loads from `views://mainview/index.html`
-2. You need to rebuild (`bun run build`) to see changes
+`electron-vite dev` starts the Vite dev server and the Electron main process
+together; the renderer loads from the dev server (HMR) in development and from
+`out/renderer/index.html` in a production build. The main process exposes a
+single `forestRanger` bridge to the renderer through a context-isolated preload
+(`invoke` for request/response, `send` for fire-and-forget, `onEvent` for
+main→renderer pushes).
 
 ## Project Structure
 
 ```
 ├── src/
-│   ├── bun/
-│   │   └── index.ts        # Main process (Electrobun/Bun)
-│   └── mainview/
-│       ├── App.tsx         # React app component
-│       ├── main.tsx        # React entry point
-│       ├── index.html      # HTML template
-│       └── index.css       # CSS
-├── electrobun.config.ts    # Electrobun configuration
-├── vite.config.ts          # Vite configuration
-└── package.json
+│   ├── main/                # Electron main process
+│   │   ├── index.ts         # App lifecycle, window, IPC wiring
+│   │   ├── db.ts            # SQLite store (better-sqlite3)
+│   │   ├── terminals.ts     # PTY sessions (node-pty)
+│   │   ├── agentChat.ts     # Claude Code stream-json chat driver
+│   │   ├── git.ts           # git CLI wrapper
+│   │   ├── gitlab.ts        # GitLab integration
+│   │   └── apps.ts          # Editor/terminal detection + launching
+│   ├── preload/
+│   │   └── index.ts         # contextBridge → window.forestRanger
+│   ├── shared/
+│   │   └── types.ts         # IPC contract shared by main + renderer
+│   └── mainview/            # React renderer
+│       ├── App.tsx
+│       ├── main.tsx
+│       ├── index.html
+│       └── index.css
+├── electron.vite.config.ts  # electron-vite (main/preload/renderer) config
+└── package.json             # scripts + electron-builder config
 ```
 
 ## Customizing
 
-- **React components**: Edit files in `src/mainview/`
-- **Vite settings**: Edit `vite.config.ts`
-- **Window settings**: Edit `src/bun/index.ts`
-- **App metadata**: Edit `electrobun.config.ts`
+- **React components**: edit files in `src/mainview/`
+- **Build/dev config**: edit `electron.vite.config.ts`
+- **Window settings**: edit `createWindow()` in `src/main/index.ts`
+- **App metadata / packaging**: edit the `build` field in `package.json`

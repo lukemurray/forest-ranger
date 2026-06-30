@@ -1,5 +1,3 @@
-import type { RPCSchema } from "electrobun/bun";
-
 /** A git repository the user has added to Forest Ranger. */
 export type Project = {
 	id: string;
@@ -198,9 +196,12 @@ export type AddProjectResult =
  * `bun` = handlers that live in the main process (called from the view).
  * `webview` = handlers that live in the view (called from the main process).
  */
-export type AppRPC = {
-	bun: RPCSchema<{
-		requests: {
+/**
+ * RPC contract between the renderer and the Electron main process.
+ * `RpcRequests` = request/response calls (`ipcRenderer.invoke`).
+ * `ViewMessage` = fire-and-forget renderer→main. `MainEvent` = main→renderer push.
+ */
+export type RpcRequests = {
 			listProjects: { params: Record<string, never>; response: Project[] };
 			/** Opens a folder picker; validates it's a git repo and stores it. */
 			addProject: { params: Record<string, never>; response: AddProjectResult };
@@ -419,31 +420,37 @@ export type AppRPC = {
 				};
 				response: OpenResult;
 			};
-		};
-		messages: {
-			/** Keystrokes/input for a PTY session (base64 or raw). */
-			termInput: { sessionId: string; data: string };
-			termResize: { sessionId: string; cols: number; rows: number };
-			termKill: { sessionId: string };
+};
 
-			/** Send a user turn to a chat agent session, with optional attachments. */
-			agentChatSend: { sessionId: string; text: string; attachments?: ChatAttachment[] };
-			/** Answer a pending tool-permission request (allow or deny). */
-			agentChatPermission: { sessionId: string; requestId: string; allow: boolean };
-			/** Stop (kill) a chat agent session. */
-			agentChatStop: { sessionId: string };
-		};
-	}>;
-	webview: RPCSchema<{
-		requests: Record<string, never>;
-		messages: {
-			/** Bun tells the view that underlying data changed and to refetch. */
-			dataChanged: { scope: "projects" | "worktrees" };
-			/** PTY output (base64) for a session. */
-			termData: { sessionId: string; data: string };
-			termExit: { sessionId: string; exitCode: number };
-			/** A normalized event from a native chat agent session. */
-			agentChatEvent: { sessionId: string; event: AgentChatEvent };
-		};
-	}>;
+/** Fire-and-forget messages from the renderer to the main process. */
+export type ViewMessage =
+	/** Keystrokes/input for a PTY session (base64 or raw). */
+	| { type: "termInput"; sessionId: string; data: string }
+	| { type: "termResize"; sessionId: string; cols: number; rows: number }
+	| { type: "termKill"; sessionId: string }
+	/** Send a user turn to a chat agent session, with optional attachments. */
+	| { type: "agentChatSend"; sessionId: string; text: string; attachments?: ChatAttachment[] }
+	/** Answer a pending tool-permission request (allow or deny). */
+	| { type: "agentChatPermission"; sessionId: string; requestId: string; allow: boolean }
+	/** Stop (kill) a chat agent session. */
+	| { type: "agentChatStop"; sessionId: string };
+
+/** Push events from the main process to the renderer. */
+export type MainEvent =
+	/** Underlying data changed; the view should refetch. */
+	| { type: "dataChanged"; scope: "projects" | "worktrees" }
+	/** PTY output (base64) for a session. */
+	| { type: "termData"; sessionId: string; data: string }
+	| { type: "termExit"; sessionId: string; exitCode: number }
+	/** A normalized event from a native chat agent session. */
+	| { type: "agentChatEvent"; sessionId: string; event: AgentChatEvent };
+
+/** The bridge the preload exposes on `window` for the renderer. */
+export type ForestRangerBridge = {
+	invoke: <M extends keyof RpcRequests>(
+		method: M,
+		params: RpcRequests[M]["params"],
+	) => Promise<RpcRequests[M]["response"]>;
+	send: (message: ViewMessage) => void;
+	onEvent: (handler: (event: MainEvent) => void) => () => void;
 };

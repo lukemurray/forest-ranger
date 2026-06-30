@@ -1,11 +1,17 @@
-import { Electroview } from "electrobun/view";
-import type { AgentChatEvent, AppRPC } from "../shared/types";
+import type {
+	AgentChatEvent,
+	ForestRangerBridge,
+	MainEvent,
+	RpcRequests,
+	ViewMessage,
+} from "../shared/types";
+
+const bridge = (window as unknown as { forestRanger: ForestRangerBridge }).forestRanger;
 
 type DataChangedScope = "projects" | "worktrees";
-
 const listeners = new Set<(scope: DataChangedScope) => void>();
 
-/** Subscribe to "data changed" notifications (from Bun or local mutations). */
+/** Subscribe to "data changed" notifications (from main or local mutations). */
 export function onDataChanged(fn: (scope: DataChangedScope) => void) {
 	listeners.add(fn);
 	return () => listeners.delete(fn);
@@ -36,94 +42,44 @@ export function subscribeAgentChat(
 	return () => chatSubs.delete(sessionId);
 }
 
-const rpcConfig = Electroview.defineRPC<AppRPC>({
-	// Electrobun defaults view→bun requests to 1s, which silently times out (and
-	// then retries/rejects) anything slower — e.g. `git fetch`, big diffs. Give
-	// real operations room; the bun handlers have their own internal timeouts.
-	maxRequestTime: 60_000,
-	handlers: {
-		requests: {},
-		messages: {
-			dataChanged: ({ scope }) => {
-				for (const fn of listeners) fn(scope);
-			},
-			termData: ({ sessionId, data }) => termSubs.get(sessionId)?.onData(data),
-			termExit: ({ sessionId, exitCode }) =>
-				termSubs.get(sessionId)?.onExit(exitCode),
-			agentChatEvent: ({ sessionId, event }) => chatSubs.get(sessionId)?.(event),
-		},
-	},
-});
-
-const electroview = new Electroview({ rpc: rpcConfig });
-
-/** Fire-and-forget messages to the Bun process (PTY input/resize/kill). */
-export const bus = electroview.rpc!.send;
-
-const win = window as unknown as {
-	__electrobun_encrypt?: unknown;
-	__electrobunBunBridge?: unknown;
-};
-
-/**
- * Whether the transport can actually deliver a message right now. Two things
- * race on startup and can both lag behind first paint:
- *  - the bun WebSocket finishing its handshake (`OPEN`), and
- *  - the preload's async `initEncryption()` assigning `__electrobun_encrypt`.
- * If we send before both are ready, Electrobun silently drops the message and
- * the request times out. (No socket = remote browser → postMessage path,
- * which doesn't encrypt, so we only need the bridge to exist.)
- */
-function canSend(): boolean {
-	const socket = electroview.bunSocket;
-	if (socket) {
-		return (
-			socket.readyState === WebSocket.OPEN &&
-			typeof win.__electrobun_encrypt === "function"
-		);
+// Route main-process push events to the right subscribers.
+bridge.onEvent((e: MainEvent) => {
+	switch (e.type) {
+		case "dataChanged":
+			for (const fn of listeners) fn(e.scope);
+			break;
+		case "termData":
+			termSubs.get(e.sessionId)?.onData(e.data);
+			break;
+		case "termExit":
+			termSubs.get(e.sessionId)?.onExit(e.exitCode);
+			break;
+		case "agentChatEvent":
+			chatSubs.get(e.sessionId)?.(e.event);
+			break;
 	}
-	return win.__electrobunBunBridge != null;
-}
-
-/** Resolves once {@link canSend} is true, polling, with an 8s safety cap. */
-const bridgeReady: Promise<void> = new Promise((resolve) => {
-	if (canSend()) return resolve();
-	const start = Date.now();
-	const timer = setInterval(() => {
-		if (canSend() || Date.now() - start > 8000) {
-			clearInterval(timer);
-			resolve();
-		}
-	}, 30);
 });
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-const rawRequest = electroview.rpc!.request;
-
-/**
- * Typed request methods for every Bun-side handler. Each call waits for the
- * bridge to be ready, then retries a couple of times on timeout to absorb any
- * residual startup race.
- */
-export const api = new Proxy(rawRequest, {
-	get(target, prop: string) {
-		const fn = (target as unknown as Record<string, unknown>)[prop];
-		if (typeof fn !== "function") return fn;
-		const call = fn as (...a: unknown[]) => Promise<unknown>;
-		return async (...args: unknown[]) => {
-			await bridgeReady;
-			let lastErr: unknown;
-			for (let attempt = 0; attempt < 3; attempt++) {
-				try {
-					return await call.apply(target, args);
-				} catch (err) {
-					lastErr = err;
-					if (!String(err).includes("timed out")) throw err;
-					await delay(200);
-				}
-			}
-			throw lastErr;
-		};
+/** Typed request methods, one per main-process handler (`api.foo(params)`). */
+type Api = {
+	[M in keyof RpcRequests]: (
+		params: RpcRequests[M]["params"],
+	) => Promise<RpcRequests[M]["response"]>;
+};
+export const api = new Proxy({} as Api, {
+	get(_t, prop: string) {
+		return (params: unknown) =>
+			bridge.invoke(prop as keyof RpcRequests, params as never);
 	},
-}) as typeof rawRequest;
+});
+
+/** Fire-and-forget messages to main (`bus.termInput({...})`). */
+type MsgType = ViewMessage["type"];
+type PayloadOf<T extends MsgType> = Omit<Extract<ViewMessage, { type: T }>, "type">;
+type Bus = { [T in MsgType]: (payload: PayloadOf<T>) => void };
+export const bus = new Proxy({} as Bus, {
+	get(_t, prop: string) {
+		return (payload: object) =>
+			bridge.send({ type: prop as MsgType, ...payload } as ViewMessage);
+	},
+});

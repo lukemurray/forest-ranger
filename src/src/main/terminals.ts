@@ -1,12 +1,14 @@
-/** PTY-backed terminal sessions using Bun's native `terminal` spawn option. */
+/** PTY-backed terminal sessions using node-pty. */
 
-// Sessions live in the Bun process, so they survive webview reloads/HMR. We keep
-// a capped scrollback buffer per session so a reattaching view can replay it.
+import * as pty from "node-pty";
+
+// Sessions live in the main process, so they survive renderer reloads/HMR. We
+// keep a capped scrollback buffer per session so a reattaching view can replay.
 const BUFFER_CAP = 256 * 1024;
 
 type Session = {
-	proc: ReturnType<typeof Bun.spawn>;
-	chunks: Uint8Array[];
+	proc: pty.IPty;
+	chunks: Buffer[];
 	size: number;
 };
 
@@ -19,7 +21,7 @@ type Callbacks = {
 
 let cb: Callbacks | null = null;
 
-/** Wire the bun->webview push callbacks (set once at startup). */
+/** Wire the main->renderer push callbacks (set once at startup). */
 export function setTerminalCallbacks(callbacks: Callbacks) {
 	cb = callbacks;
 }
@@ -49,51 +51,48 @@ export function startSession(opts: {
 	}
 
 	const shell = process.env.SHELL || "/bin/zsh";
-	const session: Session = { proc: undefined as never, chunks: [], size: 0 };
-
-	const proc = Bun.spawn([shell, "-il"], {
+	const proc = pty.spawn(shell, ["-il"], {
+		name: "xterm-256color",
+		cols,
+		rows,
 		cwd,
-		env: { ...process.env, TERM: "xterm-256color" },
-		terminal: {
-			cols,
-			rows,
-			data(_term: unknown, data: Uint8Array) {
-				const b = new Uint8Array(data); // copy — Bun may reuse the buffer
-				session.chunks.push(b);
-				session.size += b.length;
-				while (session.size > BUFFER_CAP && session.chunks.length > 1) {
-					session.size -= session.chunks.shift()!.length;
-				}
-				cb?.onData(sessionId, Buffer.from(b).toString("base64"));
-			},
-		},
-	} as never);
+		env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
+	});
 
-	session.proc = proc;
+	const session: Session = { proc, chunks: [], size: 0 };
 	sessions.set(sessionId, session);
+
+	proc.onData((data: string) => {
+		const b = Buffer.from(data, "utf8");
+		session.chunks.push(b);
+		session.size += b.length;
+		while (session.size > BUFFER_CAP && session.chunks.length > 1) {
+			session.size -= session.chunks.shift()!.length;
+		}
+		cb?.onData(sessionId, b.toString("base64"));
+	});
+
+	proc.onExit(({ exitCode }) => {
+		sessions.delete(sessionId);
+		cb?.onExit(sessionId, exitCode);
+	});
 
 	if (command) {
 		// Give the shell a beat to initialize, then run the command.
 		setTimeout(() => write(sessionId, `${command}\n`), 60);
 	}
-
-	proc.exited.then((code: number) => {
-		sessions.delete(sessionId);
-		cb?.onExit(sessionId, code);
-	});
 }
 
 export function write(sessionId: string, data: string): void {
-	const s = sessions.get(sessionId);
-	(s?.proc as { terminal?: { write(d: string): void } } | undefined)?.terminal?.write(data);
+	sessions.get(sessionId)?.proc.write(data);
 }
 
 export function resize(sessionId: string, cols: number, rows: number): void {
-	const s = sessions.get(sessionId);
-	(s?.proc as { terminal?: { resize(c: number, r: number): void } } | undefined)?.terminal?.resize(
-		cols,
-		rows,
-	);
+	try {
+		sessions.get(sessionId)?.proc.resize(cols, rows);
+	} catch {
+		// resize on a dead pty throws; ignore.
+	}
 }
 
 export function kill(sessionId: string): void {
@@ -109,14 +108,9 @@ export function killAll(): void {
 	sessions.clear();
 }
 
-function closeProc(proc: ReturnType<typeof Bun.spawn>): void {
-	// Closing the PTY sends SIGHUP to the foreground group (kills dev servers);
-	// kill() finishes off the shell itself.
-	try {
-		(proc as { terminal?: { close(): void } }).terminal?.close();
-	} catch {
-		// already gone
-	}
+function closeProc(proc: pty.IPty): void {
+	// Killing the PTY sends SIGHUP to the foreground group (kills dev servers)
+	// and finishes off the shell itself.
 	try {
 		proc.kill();
 	} catch {

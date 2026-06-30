@@ -1,5 +1,6 @@
 /** Thin wrapper around the `git` CLI for worktree discovery. */
 
+import { spawn } from "node:child_process";
 import { existsSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -33,19 +34,33 @@ const GIT_ENV: Record<string, string> = {
 		"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10",
 };
 
-async function git(
+function git(
 	cwd: string,
 	args: string[],
 	opts?: { timeoutMs?: number },
 ): Promise<GitResult> {
-	try {
-		const proc = Bun.spawn(["git", ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			env: GIT_ENV,
-		});
+	return new Promise((resolve) => {
+		let proc: ReturnType<typeof spawn>;
+		try {
+			proc = spawn("git", args, { cwd, env: GIT_ENV });
+		} catch (err) {
+			// git binary not found / not executable
+			resolve({ ok: false, stdout: "", stderr: String(err), exitCode: -1 });
+			return;
+		}
+
+		let stdout = "";
+		let stderr = "";
 		let timedOut = false;
+		let settled = false;
+
+		proc.stdout?.on("data", (d: Buffer) => {
+			stdout += d.toString();
+		});
+		proc.stderr?.on("data", (d: Buffer) => {
+			stderr += d.toString();
+		});
+
 		const timer = opts?.timeoutMs
 			? setTimeout(() => {
 					timedOut = true;
@@ -56,20 +71,26 @@ async function git(
 					}
 				}, opts.timeoutMs)
 			: undefined;
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		if (timer) clearTimeout(timer);
-		if (timedOut) {
-			return { ok: false, stdout, stderr: "timed out", exitCode: -1 };
-		}
-		return { ok: exitCode === 0, stdout, stderr, exitCode };
-	} catch (err) {
-		// git binary not found / not executable
-		return { ok: false, stdout: "", stderr: String(err), exitCode: -1 };
-	}
+
+		proc.on("error", (err) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolve({ ok: false, stdout: "", stderr: String(err), exitCode: -1 });
+		});
+
+		proc.on("close", (code) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			if (timedOut) {
+				resolve({ ok: false, stdout, stderr: "timed out", exitCode: -1 });
+				return;
+			}
+			const exitCode = code ?? -1;
+			resolve({ ok: exitCode === 0, stdout, stderr, exitCode });
+		});
+	});
 }
 
 /** Returns the git version string, or null if the git binary can't be run. */

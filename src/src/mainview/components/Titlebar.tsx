@@ -20,12 +20,12 @@ export function Titlebar({
 }) {
 	const slot = useTitlebarSlot();
 	const bar = (
-		<div className={`${styles.bar} electrobun-webkit-app-region-drag`}>
+		<div className={`${styles.bar} app-region-drag`}>
 			<div className={styles.left} title={title}>
 				{children}
 			</div>
 			{actions && (
-				<div className={`${styles.actions} electrobun-webkit-app-region-no-drag`}>
+				<div className={`${styles.actions} app-region-no-drag`}>
 					{actions}
 				</div>
 			)}

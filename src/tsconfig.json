@@ -1,10 +1,11 @@
 {
 	"compilerOptions": {
-		"target": "ES2020",
+		"target": "ES2022",
 		"useDefineForClassFields": true,
-		"lib": ["ES2020", "DOM", "DOM.Iterable"],
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
 		"module": "ESNext",
 		"skipLibCheck": true,
+		"esModuleInterop": true,
 		"moduleResolution": "bundler",
 		"allowImportingTsExtensions": true,
 		"isolatedModules": true,
@@ -17,5 +18,5 @@
 		"noFallthroughCasesInSwitch": true
 	},
 	"include": ["src"],
-	"exclude": ["node_modules", "dist", "build", "../../package/dist"]
+	"exclude": ["node_modules", "dist", "build", "out", "../../package/dist"]
 }

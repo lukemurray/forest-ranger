@@ -2,20 +2,23 @@
 	"name": "forest-ranger",
 	"version": "1.0.0",
 	"description": "Manage your worktrees",
+	"main": "out/main/index.js",
 	"scripts": {
-		"start": "vite build && electrobun dev",
-		"dev": "electrobun dev --watch",
-		"dev:hmr": "concurrently \"bun run hmr\" \"bun run start\"",
-		"hmr": "vite --port 5178",
-		"build:canary": "vite build && electrobun build --env=canary",
-		"build:stable": "vite build && electrobun build --env=stable"
+		"dev": "electron-vite dev",
+		"build": "electron-vite build",
+		"preview": "electron-vite preview",
+		"typecheck": "tsc --noEmit",
+		"rebuild": "electron-rebuild -f -w better-sqlite3,node-pty",
+		"dist": "electron-vite build && electron-builder",
+		"postinstall": "electron-builder install-app-deps"
 	},
 	"dependencies": {
 		"@base-ui-components/react": "1.0.0-rc.0",
 		"@tanstack/react-router": "^1.170.16",
 		"@xterm/addon-fit": "^0.11.0",
 		"@xterm/xterm": "^6.0.0",
-		"electrobun": "1.18.1",
+		"better-sqlite3": "^12.11.1",
+		"node-pty": "^1.1.0",
 		"react": "^19.2.7",
 		"react-diff-view": "^3.3.3",
 		"react-dom": "^19.2.7",
@@ -24,12 +27,26 @@
 		"remark-gfm": "^4.0.1"
 	},
 	"devDependencies": {
-		"@types/bun": "latest",
+		"@electron/rebuild": "^4.0.6",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^26.0.1",
 		"@types/react": "^19.2.17",
 		"@types/react-dom": "^19.2.3",
 		"@vitejs/plugin-react": "^6.0.2",
-		"concurrently": "^10.0.3",
+		"electron": "^42.5.1",
+		"electron-builder": "^26.15.3",
+		"electron-vite": "^5.0.0",
 		"typescript": "^6.0.3",
 		"vite": "^8.0.16"
+	},
+	"build": {
+		"appId": "dev.forestranger.app",
+		"productName": "Forest Ranger",
+		"directories": { "output": "release" },
+		"files": ["out/**/*", "package.json"],
+		"mac": {
+			"category": "public.app-category.developer-tools",
+			"target": "dmg"
+		}
 	}
 }

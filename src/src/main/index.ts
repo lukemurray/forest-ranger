@@ -1,22 +1,19 @@
-import Electrobun, {
-	ApplicationMenu,
-	BrowserView,
-	BrowserWindow,
-	Updater,
-	Utils,
-} from "electrobun/bun";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
-	AppRPC,
 	BranchIntegrations,
 	ChangedFile,
 	ChangeKind,
 	IntegrationStatus,
 	IntegrationType,
+	MainEvent,
 	Project,
 	ProjectCommand,
+	RpcRequests,
+	ViewMessage,
 	Worktree,
 	WorktreeWithProject,
 } from "../shared/types";
@@ -72,13 +69,11 @@ import {
 	type BaseChange,
 } from "./git";
 
-const DEV_SERVER_PORT = 5178;
-const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
-
 const now = () => Date.now();
 
 function worktreeId(projectId: string, path: string): string {
-	return `${projectId}-${Bun.hash(path).toString(36)}`;
+	const hash = createHash("sha1").update(path).digest("hex").slice(0, 12);
+	return `${projectId}-${hash}`;
 }
 
 function toProject(row: ProjectRow): Project {
@@ -233,19 +228,20 @@ function toChangedFile(c: BaseChange): ChangedFile {
 	};
 }
 
-const rpc = BrowserView.defineRPC<AppRPC>({
-	maxRequestTime: 15000,
-	handlers: {
-		requests: {
-			listProjects: () => projectsRepo.list().map(toProject),
+type RpcHandlers = {
+	[M in keyof RpcRequests]: (
+		params: RpcRequests[M]["params"],
+	) => RpcRequests[M]["response"] | Promise<RpcRequests[M]["response"]>;
+};
+
+const handlers: RpcHandlers = {
+	listProjects: () => projectsRepo.list().map(toProject),
 
 			addProject: async () => {
-				const chosen = await Utils.openFileDialog({
-					canChooseDirectory: true,
-					canChooseFiles: false,
-					allowsMultipleSelection: false,
+				const result = await dialog.showOpenDialog({
+					properties: ["openDirectory"],
 				});
-				const picked = (Array.isArray(chosen) ? chosen[0] : chosen)?.trim();
+				const picked = result.canceled ? undefined : result.filePaths[0]?.trim();
 				console.log(`[addProject] picked: ${JSON.stringify(picked)}`);
 				if (!picked) return { status: "cancelled" } as const;
 
@@ -317,7 +313,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 			},
 
 			revealInFinder: ({ path }) => {
-				Bun.spawn(["open", "-R", path]);
+				shell.showItemInFolder(path);
 			},
 
 			detectApps: () => detectApps(),
@@ -543,7 +539,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 
 			openUrl: ({ url }) => {
 				try {
-					Bun.spawn(["open", url]);
+					void shell.openExternal(url);
 					return { ok: true };
 				} catch (err) {
 					return { ok: false, error: String(err) };
@@ -634,69 +630,107 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				agentChatRestart({ sessionId, cwd: row.path, resume: true, permissionMode, model });
 				return { ok: true };
 			},
-		},
-		messages: {
-			termInput: ({ sessionId, data }) => termWrite(sessionId, data),
-			termResize: ({ sessionId, cols, rows }) => termResize(sessionId, cols, rows),
-			termKill: ({ sessionId }) => termKill(sessionId),
+};
 
-			agentChatSend: ({ sessionId, text, attachments }) =>
-				agentChatSend(sessionId, text, attachments),
-			agentChatPermission: ({ sessionId, requestId, allow }) =>
-				agentChatRespond(sessionId, requestId, allow),
-			agentChatStop: ({ sessionId }) => agentChatStop(sessionId),
-		},
-	},
+// Fire-and-forget renderer→main messages (no response expected).
+function dispatchMessage(msg: ViewMessage): void {
+	switch (msg.type) {
+		case "termInput":
+			termWrite(msg.sessionId, msg.data);
+			break;
+		case "termResize":
+			termResize(msg.sessionId, msg.cols, msg.rows);
+			break;
+		case "termKill":
+			termKill(msg.sessionId);
+			break;
+		case "agentChatSend":
+			agentChatSend(msg.sessionId, msg.text, msg.attachments);
+			break;
+		case "agentChatPermission":
+			agentChatRespond(msg.sessionId, msg.requestId, msg.allow);
+			break;
+		case "agentChatStop":
+			agentChatStop(msg.sessionId);
+			break;
+	}
+}
+
+// Push an event to every open window's renderer.
+function broadcast(event: MainEvent): void {
+	for (const win of BrowserWindow.getAllWindows()) {
+		win.webContents.send("event", event);
+	}
+}
+
+// One request channel (invoke→response) and one message channel (fire-and-forget).
+ipcMain.handle("rpc", (_event, method: keyof RpcRequests, params: unknown) => {
+	const handler = handlers[method] as (p: unknown) => unknown;
+	return handler(params);
 });
+ipcMain.on("message", (_event, msg: ViewMessage) => dispatchMessage(msg));
 
-// Stream PTY output / exit from the bun process to the webview.
+// Stream PTY output / exit from the main process to the renderer.
 setTerminalCallbacks({
-	onData: (sessionId, data) => rpc.send.termData({ sessionId, data }),
-	onExit: (sessionId, exitCode) => rpc.send.termExit({ sessionId, exitCode }),
+	onData: (sessionId, data) => broadcast({ type: "termData", sessionId, data }),
+	onExit: (sessionId, exitCode) =>
+		broadcast({ type: "termExit", sessionId, exitCode }),
 });
 
-// Stream normalized chat-agent events from the bun process to the webview.
-setAgentChatCallback((sessionId, event) => rpc.send.agentChatEvent({ sessionId, event }));
+// Stream normalized chat-agent events from the main process to the renderer.
+setAgentChatCallback((sessionId, event) =>
+	broadcast({ type: "agentChatEvent", sessionId, event }),
+);
 
-// Native menu so the standard editing shortcuts (⌘A/⌘C/⌘X/⌘V/⌘Z) route to the
-// focused field's native selectors — WKWebView doesn't wire these on its own.
-ApplicationMenu.setApplicationMenu([
-	{
-		label: "Forest Ranger",
-		submenu: [
-			{ role: "about" },
-			{ type: "separator" },
-			{ role: "hide", accelerator: "CommandOrControl+H" },
-			{ role: "hideOthers" },
-			{ role: "showAll" },
-			{ type: "separator" },
-			{ role: "quit", accelerator: "CommandOrControl+Q" },
-		],
-	},
-	{
-		label: "Edit",
-		submenu: [
-			{ role: "undo", accelerator: "CommandOrControl+Z" },
-			{ role: "redo", accelerator: "CommandOrControl+Shift+Z" },
-			{ type: "separator" },
-			{ role: "cut", accelerator: "CommandOrControl+X" },
-			{ role: "copy", accelerator: "CommandOrControl+C" },
-			{ role: "paste", accelerator: "CommandOrControl+V" },
-			{ role: "selectAll", accelerator: "CommandOrControl+A" },
-		],
-	},
-	{
-		label: "Window",
-		submenu: [
-			{ role: "minimize", accelerator: "CommandOrControl+M" },
-			{ role: "zoom" },
-			{ role: "close", accelerator: "CommandOrControl+W" },
-		],
-	},
-]);
+function createWindow(): void {
+	const win = new BrowserWindow({
+		title: "Forest Ranger",
+		width: 1100,
+		height: 760,
+		x: 200,
+		y: 200,
+		// Transparent titlebar with inset native traffic-light controls; we draw
+		// our own dark titlebar strip and mark it as a drag region in the renderer.
+		titleBarStyle: "hiddenInset",
+		trafficLightPosition: { x: 12, y: 14 },
+		webPreferences: {
+			preload: join(__dirname, "../preload/index.js"),
+		},
+	});
+
+	if (process.env.ELECTRON_RENDERER_URL) {
+		win.loadURL(process.env.ELECTRON_RENDERER_URL);
+	} else {
+		win.loadFile(join(__dirname, "../renderer/index.html"));
+	}
+}
+
+app.whenReady().then(() => {
+	// Standard app/edit/window menus give us the native clipboard + selection
+	// shortcuts (⌘A/⌘C/⌘X/⌘V/⌘Z) wired to whatever field has focus.
+	Menu.setApplicationMenu(
+		Menu.buildFromTemplate([
+			{ role: "appMenu" },
+			{ role: "editMenu" },
+			{ role: "windowMenu" },
+		]),
+	);
+
+	createWindow();
+
+	app.on("activate", () => {
+		if (BrowserWindow.getAllWindows().length === 0) createWindow();
+	});
+
+	console.log("Forest Ranger app started!");
+});
+
+app.on("window-all-closed", () => {
+	if (process.platform !== "darwin") app.quit();
+});
 
 // Don't leave PTYs (dev servers, etc.) orphaned when the app quits.
-Electrobun.events.on("before-quit", () => {
+app.on("before-quit", () => {
 	termKillAll();
 	agentChatKillAll();
 });
@@ -711,39 +745,3 @@ process.on("exit", () => {
 	termKillAll();
 	agentChatKillAll();
 });
-
-async function getMainViewUrl(): Promise<string> {
-	const channel = await Updater.localInfo.channel();
-	if (channel === "dev") {
-		try {
-			await fetch(DEV_SERVER_URL, { method: "HEAD" });
-			console.log(`HMR enabled: Using Vite dev server at ${DEV_SERVER_URL}`);
-			return DEV_SERVER_URL;
-		} catch {
-			console.log(
-				"Vite dev server not running. Run 'bun run dev:hmr' for HMR support.",
-			);
-		}
-	}
-	return "views://mainview/index.html";
-}
-
-const url = await getMainViewUrl();
-
-new BrowserWindow({
-	title: "Forest Ranger",
-	url,
-	rpc,
-	// Transparent titlebar with inset native traffic-light controls; we draw our
-	// own dark titlebar strip in the webview and mark it as a drag region.
-	titleBarStyle: "hiddenInset",
-	trafficLightOffset: { x: 12, y: 14 },
-	frame: {
-		width: 1100,
-		height: 760,
-		x: 200,
-		y: 200,
-	},
-});
-
-console.log("Forest Ranger app started!");

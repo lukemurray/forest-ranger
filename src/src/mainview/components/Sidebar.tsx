@@ -66,13 +66,13 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 
 	return (
 		<aside className={styles.sidebar}>
-			<div className={`${styles.dragSpacer} electrobun-webkit-app-region-drag`} />
-			<div className={`${styles.header} electrobun-webkit-app-region-drag`}>
+			<div className={`${styles.dragSpacer} app-region-drag`} />
+			<div className={`${styles.header} app-region-drag`}>
 				<span className={styles.brand}>
 					<TreeIcon /> Forest Ranger
 				</span>
 				<button
-					className={`${styles.iconButton} electrobun-webkit-app-region-no-drag`}
+					className={`${styles.iconButton} app-region-no-drag`}
 					onClick={addProject}
 					disabled={adding}
 					title="Add a git project"

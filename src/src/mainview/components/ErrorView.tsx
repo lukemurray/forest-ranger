@@ -17,7 +17,7 @@ export function ErrorView({ error }: { error: Error }) {
 
 	return (
 		<div className={styles.root}>
-			<div className={`${styles.titlebar} electrobun-webkit-app-region-drag`} />
+			<div className={`${styles.titlebar} app-region-drag`} />
 			<div className={styles.center}>
 				<div className={styles.card}>
 					<h2 className={styles.title}>Couldn't load</h2>

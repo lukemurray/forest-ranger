@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import Database from "better-sqlite3";
 import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -8,12 +8,10 @@ const DATA_DIR =
 	process.env.FOREST_RANGER_DATA_DIR || join(homedir(), ".forest-ranger");
 mkdirSync(DATA_DIR, { recursive: true });
 
-export const db = new Database(join(DATA_DIR, "forest-ranger.db"), {
-	create: true,
-});
+export const db = new Database(join(DATA_DIR, "forest-ranger.db"));
 
-db.exec("PRAGMA journal_mode = WAL;");
-db.exec("PRAGMA foreign_keys = ON;");
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 db.exec(`
 	CREATE TABLE IF NOT EXISTS projects (
@@ -54,10 +52,9 @@ db.exec(`
 
 // Migrate older DBs that predate added columns.
 {
-	const cmdCols = db
-		.query<{ name: string }, []>("PRAGMA table_info(project_commands)")
-		.all()
-		.map((c) => c.name);
+	const cmdCols = (
+		db.prepare("PRAGMA table_info(project_commands)").all() as { name: string }[]
+	).map((c) => c.name);
 	if (!cmdCols.includes("dir")) {
 		db.exec("ALTER TABLE project_commands ADD COLUMN dir TEXT NOT NULL DEFAULT ''");
 	}
@@ -67,10 +64,9 @@ db.exec(`
 		);
 	}
 
-	const projCols = db
-		.query<{ name: string }, []>("PRAGMA table_info(projects)")
-		.all()
-		.map((c) => c.name);
+	const projCols = (
+		db.prepare("PRAGMA table_info(projects)").all() as { name: string }[]
+	).map((c) => c.name);
 	if (!projCols.includes("worktree_dir")) {
 		db.exec("ALTER TABLE projects ADD COLUMN worktree_dir TEXT");
 	}
@@ -115,93 +111,88 @@ export type IntegrationRow = {
 // --- prepared statements ---
 
 const stmts = {
-	listProjects: db.query<ProjectRow, []>(
+	listProjects: db.prepare(
 		"SELECT * FROM projects ORDER BY COALESCE(last_opened_at, added_at) DESC",
 	),
-	getProject: db.query<ProjectRow, [string]>(
-		"SELECT * FROM projects WHERE id = ?",
-	),
-	getProjectByPath: db.query<ProjectRow, [string]>(
-		"SELECT * FROM projects WHERE path = ?",
-	),
-	insertProject: db.query(
+	getProject: db.prepare("SELECT * FROM projects WHERE id = ?"),
+	getProjectByPath: db.prepare("SELECT * FROM projects WHERE path = ?"),
+	insertProject: db.prepare(
 		"INSERT INTO projects (id, name, path, added_at, last_opened_at) VALUES ($id, $name, $path, $addedAt, NULL)",
 	),
-	deleteProject: db.query("DELETE FROM projects WHERE id = $id"),
-	touchProject: db.query(
+	deleteProject: db.prepare("DELETE FROM projects WHERE id = $id"),
+	touchProject: db.prepare(
 		"UPDATE projects SET last_opened_at = $now WHERE id = $id",
 	),
-	setWorktreeDir: db.query(
+	setWorktreeDir: db.prepare(
 		"UPDATE projects SET worktree_dir = $dir WHERE id = $id",
 	),
 
-	getWorktree: db.query<WorktreeRow, [string]>(
-		"SELECT * FROM worktrees WHERE id = ?",
-	),
-	worktreesForProject: db.query<WorktreeRow, [string]>(
-		"SELECT * FROM worktrees WHERE project_id = ?",
-	),
-	upsertWorktree: db.query(
+	getWorktree: db.prepare("SELECT * FROM worktrees WHERE id = ?"),
+	worktreesForProject: db.prepare("SELECT * FROM worktrees WHERE project_id = ?"),
+	// Conflict on the natural key (project_id, path), not the surrogate id: the
+	// id is derived from the path, so if the derivation ever changes we migrate
+	// the existing row's id rather than crash on the UNIQUE(project_id, path)
+	// constraint or orphan it under a stale id. last_opened_at/created_at are
+	// preserved (only the id is rewritten).
+	upsertWorktree: db.prepare(
 		`INSERT INTO worktrees (id, project_id, path, last_opened_at, created_at)
 		 VALUES ($id, $projectId, $path, NULL, $createdAt)
-		 ON CONFLICT(id) DO NOTHING`,
+		 ON CONFLICT(project_id, path) DO UPDATE SET id = excluded.id`,
 	),
-	touchWorktree: db.query(
+	touchWorktree: db.prepare(
 		"UPDATE worktrees SET last_opened_at = $now WHERE id = $id",
 	),
-	pruneWorktrees: db.query(
+	pruneWorktrees: db.prepare(
 		"DELETE FROM worktrees WHERE project_id = $projectId AND path NOT IN (SELECT value FROM json_each($keepPaths))",
 	),
 
-	getCommand: db.query<CommandRow, [string]>(
-		"SELECT * FROM project_commands WHERE id = ?",
-	),
-	commandsForProject: db.query<CommandRow, [string]>(
+	getCommand: db.prepare("SELECT * FROM project_commands WHERE id = ?"),
+	commandsForProject: db.prepare(
 		"SELECT * FROM project_commands WHERE project_id = ? ORDER BY sort, created_at",
 	),
-	maxCommandSort: db.query<{ max: number | null }, [string]>(
+	maxCommandSort: db.prepare(
 		"SELECT MAX(sort) AS max FROM project_commands WHERE project_id = ?",
 	),
-	insertCommand: db.query(
+	insertCommand: db.prepare(
 		`INSERT INTO project_commands (id, project_id, label, command, dir, run_target, sort, created_at)
 		 VALUES ($id, $projectId, $label, $command, $dir, $runTarget, $sort, $createdAt)`,
 	),
-	updateCommand: db.query(
+	updateCommand: db.prepare(
 		"UPDATE project_commands SET label = $label, command = $command, dir = $dir, run_target = $runTarget WHERE id = $id",
 	),
-	deleteCommand: db.query("DELETE FROM project_commands WHERE id = $id"),
+	deleteCommand: db.prepare("DELETE FROM project_commands WHERE id = $id"),
 
-	listIntegrations: db.query<IntegrationRow, []>("SELECT * FROM integrations"),
-	getIntegration: db.query<IntegrationRow, [string]>(
-		"SELECT * FROM integrations WHERE type = ?",
-	),
-	upsertIntegration: db.query(
+	listIntegrations: db.prepare("SELECT * FROM integrations"),
+	getIntegration: db.prepare("SELECT * FROM integrations WHERE type = ?"),
+	upsertIntegration: db.prepare(
 		`INSERT INTO integrations (type, enabled, config) VALUES ($type, $enabled, $config)
 		 ON CONFLICT(type) DO UPDATE SET enabled = $enabled, config = $config`,
 	),
 };
 
 export const projectsRepo = {
-	list: () => stmts.listProjects.all(),
-	get: (id: string) => stmts.getProject.get(id) ?? null,
-	getByPath: (path: string) => stmts.getProjectByPath.get(path) ?? null,
+	list: () => stmts.listProjects.all() as ProjectRow[],
+	get: (id: string) => (stmts.getProject.get(id) as ProjectRow | undefined) ?? null,
+	getByPath: (path: string) =>
+		(stmts.getProjectByPath.get(path) as ProjectRow | undefined) ?? null,
 	insert: (row: { id: string; name: string; path: string; addedAt: number }) =>
 		stmts.insertProject.run({
-			$id: row.id,
-			$name: row.name,
-			$path: row.path,
-			$addedAt: row.addedAt,
-		} as never),
-	remove: (id: string) => stmts.deleteProject.run({ $id: id } as never),
-	touch: (id: string, now: number) =>
-		stmts.touchProject.run({ $id: id, $now: now } as never),
+			id: row.id,
+			name: row.name,
+			path: row.path,
+			addedAt: row.addedAt,
+		}),
+	remove: (id: string) => stmts.deleteProject.run({ id }),
+	touch: (id: string, now: number) => stmts.touchProject.run({ id, now }),
 	setWorktreeDir: (id: string, dir: string) =>
-		stmts.setWorktreeDir.run({ $id: id, $dir: dir } as never),
+		stmts.setWorktreeDir.run({ id, dir }),
 };
 
 export const worktreesRepo = {
-	get: (id: string) => stmts.getWorktree.get(id) ?? null,
-	forProject: (projectId: string) => stmts.worktreesForProject.all(projectId),
+	get: (id: string) =>
+		(stmts.getWorktree.get(id) as WorktreeRow | undefined) ?? null,
+	forProject: (projectId: string) =>
+		stmts.worktreesForProject.all(projectId) as WorktreeRow[],
 	upsert: (row: {
 		id: string;
 		projectId: string;
@@ -209,24 +200,25 @@ export const worktreesRepo = {
 		createdAt: number;
 	}) =>
 		stmts.upsertWorktree.run({
-			$id: row.id,
-			$projectId: row.projectId,
-			$path: row.path,
-			$createdAt: row.createdAt,
-		} as never),
-	touch: (id: string, now: number) =>
-		stmts.touchWorktree.run({ $id: id, $now: now } as never),
+			id: row.id,
+			projectId: row.projectId,
+			path: row.path,
+			createdAt: row.createdAt,
+		}),
+	touch: (id: string, now: number) => stmts.touchWorktree.run({ id, now }),
 	/** Remove db rows for worktrees that no longer exist in git. */
 	prune: (projectId: string, keepPaths: string[]) =>
 		stmts.pruneWorktrees.run({
-			$projectId: projectId,
-			$keepPaths: JSON.stringify(keepPaths),
-		} as never),
+			projectId,
+			keepPaths: JSON.stringify(keepPaths),
+		}),
 };
 
 export const commandsRepo = {
-	get: (id: string) => stmts.getCommand.get(id) ?? null,
-	forProject: (projectId: string) => stmts.commandsForProject.all(projectId),
+	get: (id: string) =>
+		(stmts.getCommand.get(id) as CommandRow | undefined) ?? null,
+	forProject: (projectId: string) =>
+		stmts.commandsForProject.all(projectId) as CommandRow[],
 	insert: (row: {
 		id: string;
 		projectId: string;
@@ -236,17 +228,19 @@ export const commandsRepo = {
 		runTarget: string;
 		createdAt: number;
 	}) => {
-		const sort = (stmts.maxCommandSort.get(row.projectId)?.max ?? -1) + 1;
+		const max = (stmts.maxCommandSort.get(row.projectId) as { max: number | null })
+			?.max;
+		const sort = (max ?? -1) + 1;
 		stmts.insertCommand.run({
-			$id: row.id,
-			$projectId: row.projectId,
-			$label: row.label,
-			$command: row.command,
-			$dir: row.dir,
-			$runTarget: row.runTarget,
-			$sort: sort,
-			$createdAt: row.createdAt,
-		} as never);
+			id: row.id,
+			projectId: row.projectId,
+			label: row.label,
+			command: row.command,
+			dir: row.dir,
+			runTarget: row.runTarget,
+			sort,
+			createdAt: row.createdAt,
+		});
 	},
 	update: (
 		id: string,
@@ -254,24 +248,18 @@ export const commandsRepo = {
 		command: string,
 		dir: string,
 		runTarget: string,
-	) =>
-		stmts.updateCommand.run({
-			$id: id,
-			$label: label,
-			$command: command,
-			$dir: dir,
-			$runTarget: runTarget,
-		} as never),
-	remove: (id: string) => stmts.deleteCommand.run({ $id: id } as never),
+	) => stmts.updateCommand.run({ id, label, command, dir, runTarget }),
+	remove: (id: string) => stmts.deleteCommand.run({ id }),
 };
 
 export const integrationsRepo = {
-	list: () => stmts.listIntegrations.all(),
-	get: (type: string) => stmts.getIntegration.get(type) ?? null,
+	list: () => stmts.listIntegrations.all() as IntegrationRow[],
+	get: (type: string) =>
+		(stmts.getIntegration.get(type) as IntegrationRow | undefined) ?? null,
 	upsert: (type: string, enabled: boolean, config: string) =>
 		stmts.upsertIntegration.run({
-			$type: type,
-			$enabled: enabled ? 1 : 0,
-			$config: config,
-		} as never),
+			type,
+			enabled: enabled ? 1 : 0,
+			config,
+		}),
 };

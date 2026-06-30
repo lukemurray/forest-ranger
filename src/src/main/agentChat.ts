@@ -3,13 +3,15 @@
  * in a structured, headless mode (Claude Code's stream-json protocol) and emit a
  * normalized {@link AgentChatEvent} stream the view renders as a chat UI.
  *
- * Sessions live in the Bun process so they survive webview reloads/HMR. Only
+ * Sessions live in the main process so they survive renderer reloads/HMR. Only
  * Claude Code is implemented today; other agents slot in behind {@link AgentDriver}.
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import type { AgentChatEvent, AgentPermissionMode, ChatAttachment } from "../shared/types";
 
 // Persist each chat's event log so the conversation survives a full app restart
@@ -94,14 +96,14 @@ const sessions = new Map<string, AgentDriver>();
 /**
  * Per-session event log, retained while the session is alive so a webview that
  * remounts/reloads (worktree nav, HMR, full reload) can replay the conversation
- * from the still-running Bun process. Mirrors the terminal scrollback buffer.
+ * from the still-running main process. Mirrors the terminal scrollback buffer.
  */
 const buffers = new Map<string, AgentChatEvent[]>();
 const MAX_BUFFER = 5000;
 
 /** Active process per session — used to ignore a superseded process's exit
  * (e.g. after a model/mode switch restarts the agent with `--resume`). */
-const procs = new Map<string, ReturnType<typeof Bun.spawn>>();
+const procs = new Map<string, ChildProcess>();
 
 let emitGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = null;
 
@@ -280,33 +282,30 @@ function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
 	else args.push("--session-id", opts.sessionId);
 	if (opts.model) args.push("--model", opts.model);
 
-	let proc: ReturnType<typeof Bun.spawn>;
+	let proc: ChildProcess;
 	try {
-		proc = Bun.spawn(["claude", ...args], {
+		proc = spawn("claude", args, {
 			cwd: opts.cwd,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
+			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...process.env, PATH: AUGMENTED_PATH },
 		});
 	} catch (err) {
 		emit({ type: "error", message: `Failed to launch claude: ${err}` });
 		return { send() {}, respond() {}, stop() {} };
 	}
+	// A spawn failure (e.g. `claude` not on PATH) surfaces asynchronously here.
+	proc.on("error", (err) => {
+		if (procs.get(opts.sessionId) !== proc) return;
+		emit({ type: "error", message: `Failed to launch claude: ${err.message}` });
+	});
 
 	procs.set(opts.sessionId, proc);
 	// request_id (from a can_use_tool request) -> the tool input, so an "allow"
 	// can echo it back as `updatedInput`.
 	const pending = new Map<string, unknown>();
-	const stdin = proc.stdin as unknown as {
-		write(s: string): void;
-		flush?(): void;
-		end?(): void;
-	};
 	const writeLine = (obj: unknown) => {
 		try {
-			stdin.write(`${JSON.stringify(obj)}\n`);
-			stdin.flush?.();
+			proc.stdin?.write(`${JSON.stringify(obj)}\n`);
 		} catch {
 			// stdin closed
 		}
@@ -318,25 +317,25 @@ function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
 		request_id: `init-${crypto.randomUUID()}`,
 		request: { subtype: "initialize", hooks: null },
 	});
-	pumpStdout(proc.stdout as ReadableStream<Uint8Array>, emit, pending);
-	captureStderr(proc.stderr as ReadableStream<Uint8Array>);
+	pumpStdout(proc.stdout, emit, pending);
+	captureStderr(proc.stderr);
 
-	proc.exited.then((code: number) => {
+	proc.on("exit", (code) => {
 		// Ignore if a restart (model/mode switch) already replaced this process.
 		if (procs.get(opts.sessionId) !== proc) return;
 		procs.delete(opts.sessionId);
 		sessions.delete(opts.sessionId);
-		if (code !== 0) {
+		const exitCode = code ?? 0;
+		if (code != null && code !== 0) {
 			emit({ type: "error", message: `claude exited with code ${code}` });
 		}
-		emit({ type: "exited", code }); // keep the buffer so reattach shows history
+		emit({ type: "exited", code: exitCode }); // keep the buffer so reattach shows history
 	});
 
 	return {
 		send(text: string, attachments: ChatAttachment[] = []) {
 			try {
-				stdin.write(userMessageLine(text, attachments));
-				stdin.flush?.();
+				proc.stdin?.write(userMessageLine(text, attachments));
 			} catch (err) {
 				emit({ type: "error", message: `Failed to send: ${err}` });
 			}
@@ -358,7 +357,7 @@ function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
 		},
 		stop() {
 			try {
-				stdin.end?.();
+				proc.stdin?.end();
 			} catch {
 				// already closed
 			}
@@ -372,45 +371,39 @@ function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
 }
 
 /** Read stdout line-by-line, parse each NDJSON record, and emit normalized events. */
-async function pumpStdout(
-	stream: ReadableStream<Uint8Array>,
+function pumpStdout(
+	stream: Readable | null,
 	emit: Emit,
 	pending: Map<string, unknown>,
 ) {
-	const reader = stream.getReader();
-	const decoder = new TextDecoder();
+	if (!stream) return;
 	let buf = "";
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			buf += decoder.decode(value, { stream: true });
-			let nl: number;
-			while ((nl = buf.indexOf("\n")) !== -1) {
-				const line = buf.slice(0, nl).trim();
-				buf = buf.slice(nl + 1);
-				if (line) handleLine(line, emit, pending);
-			}
+	stream.setEncoding("utf8");
+	stream.on("data", (chunk: string) => {
+		buf += chunk;
+		let nl: number;
+		while ((nl = buf.indexOf("\n")) !== -1) {
+			const line = buf.slice(0, nl).trim();
+			buf = buf.slice(nl + 1);
+			if (line) handleLine(line, emit, pending);
 		}
-	} catch (err) {
+	});
+	stream.on("error", (err) => {
 		emit({ type: "error", message: `Stream read error: ${err}` });
-	}
+	});
 }
 
 /** Keep recent stderr so a spawn/auth failure surfaces a useful message. */
-async function captureStderr(stream: ReadableStream<Uint8Array>) {
-	const reader = stream.getReader();
-	const decoder = new TextDecoder();
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			const text = decoder.decode(value, { stream: true }).trim();
-			if (text) console.error(`[agentChat] ${text}`);
-		}
-	} catch {
+function captureStderr(stream: Readable | null) {
+	if (!stream) return;
+	stream.setEncoding("utf8");
+	stream.on("data", (chunk: string) => {
+		const text = chunk.trim();
+		if (text) console.error(`[agentChat] ${text}`);
+	});
+	stream.on("error", () => {
 		// stream closed
-	}
+	});
 }
 
 type ContentBlock =

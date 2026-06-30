@@ -1,5 +1,6 @@
 /** Detect installed editors/terminals and open worktrees in them (macOS). */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,11 +118,12 @@ export function runInTerminal(
 ): OpenResult {
 	try {
 		const scriptPath = writeRunScript(cwd, command);
-		const proc = Bun.spawnSync(terminalArgv(app, scriptPath), { stderr: "pipe" });
-		if (proc.exitCode !== 0) {
+		const [cmd, ...args] = terminalArgv(app, scriptPath);
+		const proc = spawnSync(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+		if (proc.status !== 0) {
 			return {
 				ok: false,
-				error: proc.stderr.toString().trim() || "Failed to launch terminal",
+				error: proc.stderr?.toString().trim() || "Failed to launch terminal",
 			};
 		}
 		return { ok: true };
@@ -133,18 +135,19 @@ export function runInTerminal(
 export function openWorktree(path: string, app: AppId): OpenResult {
 	try {
 		// Finder: open the folder itself (reveal is a separate action).
-		const args =
+		const argv =
 			app === "finder"
 				? ["open", path]
 				: ["open", "-a", BUNDLE_BY_ID.get(app) ?? "", path];
 		if (app !== "finder" && !BUNDLE_BY_ID.has(app)) {
 			return { ok: false, error: `Unknown app: ${app}` };
 		}
-		const proc = Bun.spawnSync(args, { stderr: "pipe" });
-		if (proc.exitCode !== 0) {
+		const [cmd, ...args] = argv;
+		const proc = spawnSync(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+		if (proc.status !== 0) {
 			return {
 				ok: false,
-				error: proc.stderr.toString().trim() || `Couldn't open ${app}`,
+				error: proc.stderr?.toString().trim() || `Couldn't open ${app}`,
 			};
 		}
 		return { ok: true };

@@ -9,7 +9,7 @@ export function SettingsMenu() {
 	return (
 		<>
 			<button
-				className={`${styles.footer} electrobun-webkit-app-region-no-drag`}
+				className={`${styles.footer} app-region-no-drag`}
 				onClick={() => setOpen(true)}
 			>
 				<span className={styles.mark}>
