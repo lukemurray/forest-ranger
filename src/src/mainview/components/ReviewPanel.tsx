@@ -29,6 +29,7 @@ import styles from "./ReviewPanel.module.css";
 type Staging = {
 	isStaged: (path: string) => boolean;
 	onToggle: (path: string) => void;
+	onSetMany: (paths: string[], staged: boolean) => void;
 };
 
 const KIND_LABEL: Record<ChangeKind, string> = {
@@ -87,6 +88,19 @@ export function ReviewPanel({
 		if (!res.ok) notify(res.error ?? "Failed", "error");
 		router.invalidate();
 	}
+	async function setMany(paths: string[], staged: boolean) {
+		if (paths.length === 0) return;
+		setOptimistic((m) => {
+			const n = new Map(m);
+			for (const p of paths) n.set(p, staged);
+			return n;
+		});
+		const res = staged
+			? await api.stageFiles({ id: worktree.id, paths })
+			: await api.unstageFiles({ id: worktree.id, paths });
+		if (!res.ok) notify(res.error ?? "Failed", "error");
+		router.invalidate();
+	}
 	async function commit() {
 		const msg = message.trim();
 		if (!msg || stagedCount === 0 || committing) return;
@@ -103,7 +117,7 @@ export function ReviewPanel({
 		router.invalidate();
 	}
 
-	const staging: Staging = { isStaged, onToggle: toggleStage };
+	const staging: Staging = { isStaged, onToggle: toggleStage, onSetMany: setMany };
 
 	return (
 		<div className={styles.panel}>
@@ -141,13 +155,6 @@ export function ReviewPanel({
 
 					{uncommitted.length > 0 && (
 						<>
-							<ChangeSection
-								title="Uncommitted"
-								files={uncommitted}
-								base={null}
-								worktreeId={worktree.id}
-								staging={staging}
-							/>
 							<CommitBox
 								total={uncommitted.length}
 								stagedCount={stagedCount}
@@ -157,6 +164,13 @@ export function ReviewPanel({
 								onUnstageAll={() => stageAll(false)}
 								onCommit={commit}
 								committing={committing}
+							/>
+							<ChangeSection
+								title="Uncommitted"
+								files={uncommitted}
+								base={null}
+								worktreeId={worktree.id}
+								staging={staging}
 							/>
 						</>
 					)}
@@ -321,6 +335,16 @@ function basename(path: string): string {
 	return path.split("/").pop() ?? path;
 }
 
+/** All file paths under a tree node, depth-first. */
+function filePaths(node: TreeDir): string[] {
+	const out: string[] = [];
+	for (const c of node.children) {
+		if (c.type === "dir") out.push(...filePaths(c));
+		else out.push(c.file.path);
+	}
+	return out;
+}
+
 function buildTree(files: ChangedFile[]): TreeDir {
 	const root: TreeDir = { type: "dir", name: "", path: "", children: [], count: 0, ins: 0, del: 0 };
 	for (const file of files) {
@@ -406,18 +430,39 @@ function FolderNode({
 	const [open, setOpen] = useState(true);
 	const isOpen = forceOpen || open;
 
+	const paths = useMemo(() => filePaths(node), [node]);
+	const stagedN = staging ? paths.reduce((n, p) => n + (staging.isStaged(p) ? 1 : 0), 0) : 0;
+	const allStaged = staging != null && paths.length > 0 && stagedN === paths.length;
+	const someStaged = stagedN > 0 && !allStaged;
+	const checkRef = useRef<HTMLInputElement>(null);
+	useEffect(() => {
+		if (checkRef.current) checkRef.current.indeterminate = someStaged;
+	}, [someStaged]);
+
 	return (
 		<Collapsible.Root open={isOpen} onOpenChange={setOpen} className={styles.treeDir}>
-			<Collapsible.Trigger className={styles.dirRow} style={{ paddingLeft: 12 + depth * 14 }}>
-				<ChevronIcon size={12} />
-				<FolderIcon size={13} />
-				<span className={styles.dirName}>{node.name}</span>
-				<span className={styles.dirMeta}>
-					{node.count}
-					{node.ins > 0 && <span className={styles.add}> +{node.ins}</span>}
-					{node.del > 0 && <span className={styles.del}> −{node.del}</span>}
-				</span>
-			</Collapsible.Trigger>
+			<div className={styles.dirRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
+				{staging && (
+					<input
+						ref={checkRef}
+						type="checkbox"
+						className={styles.stageCheck}
+						checked={allStaged}
+						onChange={() => staging.onSetMany(paths, !allStaged)}
+						title={allStaged ? "Staged — click to unstage folder" : "Click to stage folder"}
+					/>
+				)}
+				<Collapsible.Trigger className={styles.dirRow}>
+					<ChevronIcon size={12} />
+					<FolderIcon size={13} />
+					<span className={styles.dirName}>{node.name}</span>
+					<span className={styles.dirMeta}>
+						{node.count}
+						{node.ins > 0 && <span className={styles.add}> +{node.ins}</span>}
+						{node.del > 0 && <span className={styles.del}> −{node.del}</span>}
+					</span>
+				</Collapsible.Trigger>
+			</div>
 			<Collapsible.Panel>
 				{node.children.map((c) =>
 					c.type === "dir" ? (

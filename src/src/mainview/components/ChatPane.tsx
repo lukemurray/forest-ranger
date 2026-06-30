@@ -79,6 +79,8 @@ export function ChatPane({
 	const [resolvedModel, setResolvedModel] = useState<string | null>(null);
 	const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
 	const [viewing, setViewing] = useState<string | null>(null);
+	const [dragOver, setDragOver] = useState(false);
+	const dragDepth = useRef(0);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -259,6 +261,35 @@ export function ChatPane({
 			addFiles(files);
 		}
 	}
+	// Drag-and-drop anywhere in the pane. A depth counter avoids the flicker from
+	// dragenter/dragleave firing on child elements.
+	const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
+	function onDragEnter(e: React.DragEvent) {
+		if (!hasFiles(e)) return;
+		e.preventDefault();
+		dragDepth.current += 1;
+		setDragOver(true);
+	}
+	function onDragOver(e: React.DragEvent) {
+		if (!hasFiles(e)) return;
+		e.preventDefault();
+		e.dataTransfer.dropEffect = "copy";
+	}
+	function onDragLeave(e: React.DragEvent) {
+		if (!hasFiles(e)) return;
+		dragDepth.current -= 1;
+		if (dragDepth.current <= 0) {
+			dragDepth.current = 0;
+			setDragOver(false);
+		}
+	}
+	function onDrop(e: React.DragEvent) {
+		if (!hasFiles(e)) return;
+		e.preventDefault();
+		dragDepth.current = 0;
+		setDragOver(false);
+		if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+	}
 
 	// Send when idle; while a turn is running, queue the message to fire when it
 	// finishes (so you can line up follow-ups without waiting).
@@ -327,7 +358,19 @@ export function ChatPane({
 	const canSend = hasContent && (status === "idle" || working);
 
 	return (
-		<div className={styles.pane}>
+		<div
+			className={styles.pane}
+			onDragEnter={onDragEnter}
+			onDragOver={onDragOver}
+			onDragLeave={onDragLeave}
+			onDrop={onDrop}
+		>
+			{dragOver && (
+				<div className={styles.dropZone}>
+					<PlusIcon size={22} />
+					Drop files to attach
+				</div>
+			)}
 			<div className={styles.scroll} ref={scrollRef}>
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>

@@ -3,6 +3,25 @@
 	flex-direction: column;
 	height: 100%;
 	background: var(--bg);
+	position: relative;
+}
+
+.dropZone {
+	position: absolute;
+	inset: 0;
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+	border: 2px dashed var(--accent);
+	border-radius: var(--radius);
+	pointer-events: none;
 }
 
 .scroll {

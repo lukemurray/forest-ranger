@@ -162,18 +162,25 @@
 }
 
 /* --- directory tree --- */
+.dirRowOuter {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding-right: 12px;
+}
+.dirRowOuter:hover {
+	background: var(--bg-hover);
+}
 .dirRow {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	width: 100%;
-	padding: 6px 12px;
+	flex: 1;
+	min-width: 0;
+	padding: 6px 0;
 	font-size: 12.5px;
 	text-align: left;
 	color: var(--text-muted);
-}
-.dirRow:hover {
-	background: var(--bg-hover);
 }
 .dirRow > svg:first-child {
 	color: var(--text-faint);
