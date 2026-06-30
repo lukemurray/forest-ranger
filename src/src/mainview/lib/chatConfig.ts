@@ -12,11 +12,13 @@ export type ChatConfig = {
 	defaultPermissionMode: AgentPermissionMode;
 };
 
+// Concrete models the user picks from. Versions are best-effort labels (they
+// shift as new models ship); the chat also shows the model the agent actually
+// resolved to if it differs, which is the ground truth.
 export const CLAUDE_MODELS: { value: string; label: string }[] = [
-	{ value: "default", label: "Default" },
-	{ value: "sonnet", label: "Sonnet" },
-	{ value: "opus", label: "Opus" },
-	{ value: "haiku", label: "Haiku" },
+	{ value: "opus", label: "Opus 4.8" },
+	{ value: "sonnet", label: "Sonnet 4.6" },
+	{ value: "haiku", label: "Haiku 4.5" },
 ];
 
 export const PERMISSION_MODES: { value: AgentPermissionMode; label: string }[] = [
@@ -37,13 +39,19 @@ export function modelLabel(model: string | null | undefined): string {
 	return CLAUDE_MODELS.find((m) => m.value === v)?.label ?? v;
 }
 
-const DEFAULTS: ChatConfig = { defaultModel: "default", defaultPermissionMode: "default" };
+const DEFAULTS: ChatConfig = { defaultModel: "opus", defaultPermissionMode: "default" };
 const KEY = "forest-ranger:chat-config";
+
+/** Coerce an unknown/legacy model value (e.g. the old opaque "default") to a real one. */
+export function coerceModel(model: string | null | undefined): string {
+	return CLAUDE_MODELS.some((m) => m.value === model) ? (model as string) : DEFAULTS.defaultModel;
+}
 
 function read(): ChatConfig {
 	try {
 		const raw = localStorage.getItem(KEY);
-		return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : DEFAULTS;
+		const cfg = raw ? { ...DEFAULTS, ...JSON.parse(raw) } : DEFAULTS;
+		return { ...cfg, defaultModel: coerceModel(cfg.defaultModel) };
 	} catch {
 		return DEFAULTS;
 	}

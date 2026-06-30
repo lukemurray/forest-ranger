@@ -10,7 +10,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentChatEvent, AgentPermissionMode } from "../shared/types";
+import type { AgentChatEvent, AgentPermissionMode, ChatAttachment } from "../shared/types";
 
 // Persist each chat's event log so the conversation survives a full app restart
 // (the in-memory buffer is gone then, and `claude --resume` continues a session
@@ -79,8 +79,8 @@ const AUGMENTED_PATH = [
 
 /** A running agent session. Backends implement send/stop; the rest is generic. */
 type AgentDriver = {
-	/** Send a user turn. */
-	send(text: string): void;
+	/** Send a user turn, with optional file/image attachments. */
+	send(text: string, attachments?: ChatAttachment[]): void;
 	/** Answer a pending tool-permission request. */
 	respond(requestId: string, allow: boolean): void;
 	/** Kill the underlying process. */
@@ -174,12 +174,19 @@ export function restart(opts: StartOpts): void {
 	sessions.set(opts.sessionId, driver);
 }
 
-export function send(sessionId: string, text: string): void {
+export function send(sessionId: string, text: string, attachments?: ChatAttachment[]): void {
 	const driver = sessions.get(sessionId);
 	if (!driver) return;
-	// Echo the user turn through the buffer so reattach/replay shows it too.
-	emitterFor(sessionId)({ type: "user_text", text });
-	driver.send(text);
+	// Echo the user turn through the buffer (attachment names only — no data — so
+	// the persisted log stays small) so reattach/replay shows it too.
+	emitterFor(sessionId)({
+		type: "user_text",
+		text,
+		attachments: attachments?.length
+			? attachments.map((a) => ({ name: a.name, isImage: a.mediaType.startsWith("image/") }))
+			: undefined,
+	});
+	driver.send(text, attachments);
 }
 
 /** Answer a pending tool-permission request for a session. */
@@ -216,14 +223,40 @@ export function killAll(): void {
 
 // --- Claude Code driver (stream-json) ---
 
-/** A user turn in Claude Code's stream-json input format. */
-function userMessageLine(text: string): string {
-	return (
-		JSON.stringify({
-			type: "user",
-			message: { role: "user", content: [{ type: "text", text }] },
-		}) + "\n"
-	);
+/** A user turn in Claude Code's stream-json input format (text + attachments). */
+function userMessageLine(text: string, attachments: ChatAttachment[] = []): string {
+	const content: unknown[] = [];
+	if (text) content.push({ type: "text", text });
+	for (const a of attachments) {
+		if (a.mediaType.startsWith("image/")) {
+			content.push({
+				type: "image",
+				source: { type: "base64", media_type: a.mediaType, data: a.data },
+			});
+		} else {
+			// Non-image: inline text-like files; note binaries we can't include.
+			const decoded = decodeTextFile(a.data);
+			content.push({
+				type: "text",
+				text:
+					decoded != null
+						? `Attached file \`${a.name}\`:\n\`\`\`\n${decoded}\n\`\`\``
+						: `Attached file \`${a.name}\` (binary, not included).`,
+			});
+		}
+	}
+	if (content.length === 0) content.push({ type: "text", text: "" });
+	return `${JSON.stringify({ type: "user", message: { role: "user", content } })}\n`;
+}
+
+/** Decode a base64 file to UTF-8 text, or null if it looks binary. */
+function decodeTextFile(b64: string): string | null {
+	try {
+		const s = Buffer.from(b64, "base64").toString("utf8");
+		return s.includes("�") ? null : s;
+	} catch {
+		return null;
+	}
 }
 
 function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
@@ -300,9 +333,9 @@ function startClaudeCode(opts: StartOpts, emit: Emit): AgentDriver {
 	});
 
 	return {
-		send(text: string) {
+		send(text: string, attachments: ChatAttachment[] = []) {
 			try {
-				stdin.write(userMessageLine(text));
+				stdin.write(userMessageLine(text, attachments));
 				stdin.flush?.();
 			} catch (err) {
 				emit({ type: "error", message: `Failed to send: ${err}` });

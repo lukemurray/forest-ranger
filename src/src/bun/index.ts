@@ -640,7 +640,8 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 			termResize: ({ sessionId, cols, rows }) => termResize(sessionId, cols, rows),
 			termKill: ({ sessionId }) => termKill(sessionId),
 
-			agentChatSend: ({ sessionId, text }) => agentChatSend(sessionId, text),
+			agentChatSend: ({ sessionId, text, attachments }) =>
+				agentChatSend(sessionId, text, attachments),
 			agentChatPermission: ({ sessionId, requestId, allow }) =>
 				agentChatRespond(sessionId, requestId, allow),
 			agentChatStop: ({ sessionId }) => agentChatStop(sessionId),

@@ -1,15 +1,30 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { AgentChatEvent, AgentPermissionMode } from "../../shared/types";
+import type {
+	AgentChatEvent,
+	AgentPermissionMode,
+	ChatAttachment,
+} from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
 import { markExited, updateSession } from "../lib/terminalStore";
-import { CLAUDE_MODELS, PERMISSION_MODES, modelArg } from "../lib/chatConfig";
+import { CLAUDE_MODELS, PERMISSION_MODES, coerceModel, modelArg } from "../lib/chatConfig";
 import { Select } from "./ui/Select";
 import { Markdown } from "./Markdown";
-import { SparkleIcon } from "./icons";
+import { CloseIcon, PlusIcon, SparkleIcon } from "./icons";
 import styles from "./ChatPane.module.css";
 
+/** A pending attachment held in the composer (with a preview URL). */
+type LocalAttachment = {
+	id: string;
+	name: string;
+	mediaType: string;
+	data: string; // base64, no data: prefix
+	dataUrl: string;
+	isImage: boolean;
+};
+type Outgoing = { text: string; attachments: ChatAttachment[] };
+
 type ChatItem =
-	| { kind: "user"; text: string }
+	| { kind: "user"; text: string; attachments?: { name: string; isImage: boolean }[] }
 	| { kind: "assistant"; text: string }
 	| { kind: "thinking"; text: string }
 	| {
@@ -57,11 +72,16 @@ export function ChatPane({
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
 	const [status, setStatus] = useState<Status>("starting");
-	const [modelValue, setModelValue] = useState(model || "default");
+	const [modelValue, setModelValue] = useState(() => coerceModel(model));
 	const [mode, setMode] = useState<AgentPermissionMode>(permissionMode);
 	const [input, setInput] = useState("");
+	const [queue, setQueue] = useState<Outgoing[]>([]);
+	const [resolvedModel, setResolvedModel] = useState<string | null>(null);
+	const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
+	const [viewing, setViewing] = useState<string | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
 	// Auto-name the tab from the first user message (once), unless renamed.
 	const autoNamed = useRef(false);
 	const renamedRef = useRef(renamed);
@@ -70,14 +90,21 @@ export function ChatPane({
 	useEffect(() => {
 		setItems([]);
 		setStatus("starting");
+		setResolvedModel(null);
+		setAttachments([]);
+		setQueue([]);
 
 		function apply(event: AgentChatEvent) {
 			switch (event.type) {
 				case "system":
+					if (event.model) setResolvedModel(event.model);
 					setStatus((s) => (s === "starting" || s === "ended" ? "idle" : s));
 					break;
 				case "user_text":
-					setItems((it) => [...it, { kind: "user", text: event.text }]);
+					setItems((it) => [
+						...it,
+						{ kind: "user", text: event.text, attachments: event.attachments },
+					]);
 					setStatus("working");
 					if (!autoNamed.current) {
 						autoNamed.current = true;
@@ -147,7 +174,13 @@ export function ChatPane({
 
 		const unsub = subscribeAgentChat(chatId, apply);
 		api
-			.agentChatStart({ sessionId: chatId, worktreeId, resume, permissionMode, model: modelArg(model) })
+			.agentChatStart({
+				sessionId: chatId,
+				worktreeId,
+				resume,
+				permissionMode,
+				model: modelArg(coerceModel(model)),
+			})
 			.then((res) => {
 				if (!res.ok) {
 					apply({ type: "error", message: res.error ?? "Failed to start chat" });
@@ -198,15 +231,70 @@ export function ChatPane({
 		applyModelMode(modelValue, v);
 	}
 
-	function send() {
+	function addFiles(files: FileList | File[]) {
+		for (const file of Array.from(files)) {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const dataUrl = String(reader.result);
+				const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
+				setAttachments((a) => [
+					...a,
+					{
+						id: crypto.randomUUID(),
+						name: file.name || "pasted",
+						mediaType: file.type || "application/octet-stream",
+						data,
+						dataUrl,
+						isImage: (file.type || "").startsWith("image/"),
+					},
+				]);
+			};
+			reader.readAsDataURL(file);
+		}
+	}
+	function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+		const files = Array.from(e.clipboardData.files);
+		if (files.length) {
+			e.preventDefault();
+			addFiles(files);
+		}
+	}
+
+	// Send when idle; while a turn is running, queue the message to fire when it
+	// finishes (so you can line up follow-ups without waiting).
+	function submit() {
 		const text = input.trim();
-		if (!text || status === "working" || status === "ended" || status === "starting") return;
-		bus.agentChatSend({ sessionId: chatId, text });
-		setInput("");
+		const atts: ChatAttachment[] = attachments.map((a) => ({
+			name: a.name,
+			mediaType: a.mediaType,
+			data: a.data,
+		}));
+		if ((!text && atts.length === 0) || status === "starting" || status === "ended") return;
+		const clear = () => {
+			setInput("");
+			setAttachments([]);
+		};
+		if (status === "working") {
+			setQueue((q) => [...q, { text, attachments: atts }]);
+			clear();
+			return;
+		}
+		bus.agentChatSend({ sessionId: chatId, text, attachments: atts });
+		clear();
 		setStatus("working");
 	}
+	// Drain one queued message each time the agent returns to idle.
+	useEffect(() => {
+		if (status !== "idle" || queue.length === 0) return;
+		const [next, ...rest] = queue;
+		setQueue(rest);
+		bus.agentChatSend({ sessionId: chatId, text: next.text, attachments: next.attachments });
+		setStatus("working");
+	}, [status, queue, chatId]);
+
 	function stop() {
 		bus.agentChatStop({ sessionId: chatId });
+		setQueue([]);
 		markExited(dockId);
 		setStatus("ended");
 	}
@@ -223,39 +311,36 @@ export function ChatPane({
 	function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
-			send();
+			submit();
 		}
 	}
 
-	const canSend = status === "idle" && input.trim().length > 0;
+	const hasText = input.trim().length > 0;
+	const working = status === "working";
+	// Surface the resolved model only when it disagrees with the picked label
+	// (e.g. a stale version label) — otherwise the picker already shows it.
+	const pickedLabel = CLAUDE_MODELS.find((m) => m.value === modelValue)?.label;
+	const showResolved = !!resolvedModel && friendlyModel(resolvedModel) !== pickedLabel;
+	// While working with an empty box, the button stops the turn; otherwise it
+	// sends (queuing if a turn is in flight).
+	const showStop = working && !hasText;
+	const canSend = hasText && (status === "idle" || working);
 
 	return (
 		<div className={styles.pane}>
-			<div className={styles.header}>
-				<SparkleIcon size={13} />
-				<span className={styles.provider}>{agentLabel ?? "Claude"}</span>
-				<span className={styles.status} data-status={status}>
-					{status === "starting"
-						? "starting…"
-						: status === "working"
-							? "working…"
-							: status === "ended"
-								? "ended"
-								: "ready"}
-				</span>
-				{status === "working" && (
-					<button className={styles.stop} onClick={stop}>
-						Stop
-					</button>
-				)}
-			</div>
-
 			<div className={styles.scroll} ref={scrollRef}>
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
 				{items.map((item, i) => (
 					<ChatRow key={i} item={item} onPermission={respondPermission} />
+				))}
+				{queue.map((q, i) => (
+					<div key={`q${i}`} className={styles.user} data-queued>
+						<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
+							{q}
+						</div>
+					</div>
 				))}
 			</div>
 
@@ -273,18 +358,47 @@ export function ChatPane({
 				/>
 				<div className={styles.composerBar}>
 					<div className={styles.composerSelect}>
-						<Select value={modelValue} onValueChange={changeModel} options={CLAUDE_MODELS} ariaLabel="Model" />
+						<Select
+							value={modelValue}
+							onValueChange={changeModel}
+							options={CLAUDE_MODELS}
+							ariaLabel="Provider and model"
+							leading={
+								<span className={styles.provider} data-working={working || undefined}>
+									<SparkleIcon size={13} />
+									{agentLabel ?? "Claude"}
+								</span>
+							}
+						/>
 					</div>
+					{showResolved && (
+						<span className={styles.resolvedModel} title={resolvedModel ?? undefined}>
+							{friendlyModel(resolvedModel as string)}
+						</span>
+					)}
 					<div className={styles.composerSelectWide}>
 						<Select value={mode} onValueChange={changeMode} options={PERMISSION_MODES} ariaLabel="Permission mode" />
 					</div>
-					<button className={styles.send} onClick={send} disabled={!canSend}>
-						Send
-					</button>
+					{showStop ? (
+						<button className={styles.stopBtn} onClick={stop}>
+							Stop
+						</button>
+					) : (
+						<button className={styles.send} onClick={submit} disabled={!canSend}>
+							Send
+						</button>
+					)}
 				</div>
 			</div>
 		</div>
 	);
+}
+
+/** Turn a resolved model id (claude-opus-4-8-…) into a friendly label (Opus 4.8). */
+function friendlyModel(id: string): string {
+	const m = /claude-(opus|sonnet|haiku)-(\d+)-(\d+)/.exec(id);
+	if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
+	return id.replace(/^claude-/, "");
 }
 
 /** A short tab name derived from the first user message. */

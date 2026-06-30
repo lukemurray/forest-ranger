@@ -105,11 +105,14 @@ export type FileDiff = { path: string; binary: boolean; diff: string };
  * (Claude Code first; others as adapters) maps its own protocol onto this so
  * the view renders one event model regardless of which CLI is driving.
  */
+/** A file/image the user attaches to a chat message (data is base64, no prefix). */
+export type ChatAttachment = { name: string; mediaType: string; data: string };
+
 export type AgentChatEvent =
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
 	/** The user's own turn, echoed so it's buffered/replayed on reattach. */
-	| { type: "user_text"; text: string }
+	| { type: "user_text"; text: string; attachments?: { name: string; isImage: boolean }[] }
 	/** A chunk of assistant prose. */
 	| { type: "assistant_text"; text: string }
 	/** A chunk of the agent's thinking. */
@@ -423,8 +426,8 @@ export type AppRPC = {
 			termResize: { sessionId: string; cols: number; rows: number };
 			termKill: { sessionId: string };
 
-			/** Send a user turn to a chat agent session. */
-			agentChatSend: { sessionId: string; text: string };
+			/** Send a user turn to a chat agent session, with optional attachments. */
+			agentChatSend: { sessionId: string; text: string; attachments?: ChatAttachment[] };
 			/** Answer a pending tool-permission request (allow or deny). */
 			agentChatPermission: { sessionId: string; requestId: string; allow: boolean };
 			/** Stop (kill) a chat agent session. */

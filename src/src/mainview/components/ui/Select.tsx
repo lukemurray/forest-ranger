@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Select as BaseSelect } from "@base-ui-components/react/select";
 import { CheckIcon, ChevronUpDownIcon } from "../icons";
 import styles from "./Select.module.css";
@@ -9,12 +10,15 @@ export function Select<T extends string>({
 	options,
 	ariaLabel,
 	className,
+	leading,
 }: {
 	value: T;
 	onValueChange: (value: T) => void;
 	options: { value: T; label: string }[];
 	ariaLabel?: string;
 	className?: string;
+	/** Optional content rendered inside the trigger, before the selected value. */
+	leading?: ReactNode;
 }) {
 	const items = Object.fromEntries(options.map((o) => [o.value, o.label]));
 	return (
@@ -27,6 +31,7 @@ export function Select<T extends string>({
 				className={`${styles.trigger} ${className ?? ""}`}
 				aria-label={ariaLabel}
 			>
+				{leading}
 				<BaseSelect.Value />
 				<BaseSelect.Icon className={styles.icon}>
 					<ChevronUpDownIcon size={14} />
