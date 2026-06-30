@@ -315,16 +315,16 @@ export function ChatPane({
 		}
 	}
 
-	const hasText = input.trim().length > 0;
+	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
 	// Surface the resolved model only when it disagrees with the picked label
 	// (e.g. a stale version label) — otherwise the picker already shows it.
 	const pickedLabel = CLAUDE_MODELS.find((m) => m.value === modelValue)?.label;
 	const showResolved = !!resolvedModel && friendlyModel(resolvedModel) !== pickedLabel;
-	// While working with an empty box, the button stops the turn; otherwise it
+	// With nothing to send while working, the button stops the turn; otherwise it
 	// sends (queuing if a turn is in flight).
-	const showStop = working && !hasText;
-	const canSend = hasText && (status === "idle" || working);
+	const showStop = working && !hasContent;
+	const canSend = hasContent && (status === "idle" || working);
 
 	return (
 		<div className={styles.pane}>
@@ -338,25 +338,75 @@ export function ChatPane({
 				{queue.map((q, i) => (
 					<div key={`q${i}`} className={styles.user} data-queued>
 						<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
-							{q}
+							{q.text || `📎 ${q.attachments.length} attachment${q.attachments.length === 1 ? "" : "s"}`}
 						</div>
 					</div>
 				))}
 			</div>
 
 			<div className={styles.composer}>
+				{attachments.length > 0 && (
+					<div className={styles.attachments}>
+						{attachments.map((a) => (
+							<div key={a.id} className={styles.chip} data-image={a.isImage || undefined}>
+								{a.isImage ? (
+									<button
+										type="button"
+										className={styles.chipThumb}
+										onClick={() => setViewing(a.dataUrl)}
+										title={`${a.name} — click to view`}
+									>
+										<img src={a.dataUrl} alt={a.name} />
+									</button>
+								) : (
+									<span className={styles.chipFile} title={a.name}>
+										{a.name}
+									</span>
+								)}
+								<button
+									type="button"
+									className={styles.chipRemove}
+									onClick={() => setAttachments((list) => list.filter((x) => x.id !== a.id))}
+									aria-label={`Remove ${a.name}`}
+								>
+									<CloseIcon size={11} />
+								</button>
+							</div>
+						))}
+					</div>
+				)}
 				<textarea
 					ref={inputRef}
 					className={styles.input}
 					value={input}
 					onChange={(e) => setInput(e.target.value)}
 					onKeyDown={onKeyDown}
-					placeholder={status === "ended" ? "Session ended" : "Message Claude…  (Enter to send)"}
+					onPaste={onPaste}
+					placeholder={status === "ended" ? "Session ended" : "Message Claude…  (Enter to send, paste images)"}
 					disabled={status === "ended"}
 					rows={1}
 					spellCheck={false}
 				/>
 				<div className={styles.composerBar}>
+					<button
+						type="button"
+						className={styles.attach}
+						onClick={() => fileInputRef.current?.click()}
+						title="Attach files or images"
+						disabled={status === "ended"}
+					>
+						<PlusIcon size={15} />
+					</button>
+					<input
+						ref={fileInputRef}
+						type="file"
+						multiple
+						hidden
+						onChange={(e) => {
+							if (e.target.files) addFiles(e.target.files);
+							e.target.value = "";
+						}}
+					/>
 					<div className={styles.composerSelect}>
 						<Select
 							value={modelValue}
@@ -390,6 +440,12 @@ export function ChatPane({
 					)}
 				</div>
 			</div>
+
+			{viewing && (
+				<div className={styles.lightbox} onClick={() => setViewing(null)}>
+					<img src={viewing} alt="attachment" />
+				</div>
+			)}
 		</div>
 	);
 }
@@ -425,7 +481,18 @@ function ChatRow({
 	if (item.kind === "user") {
 		return (
 			<div className={styles.user}>
-				<div className={styles.bubble}>{item.text}</div>
+				<div className={styles.bubble}>
+					{item.attachments && item.attachments.length > 0 && (
+						<div className={styles.sentAttachments}>
+							{item.attachments.map((a, j) => (
+								<span key={j} className={styles.sentChip}>
+									{a.isImage ? "🖼" : "📎"} {a.name}
+								</span>
+							))}
+						</div>
+					)}
+					{item.text}
+				</div>
 			</div>
 		);
 	}
