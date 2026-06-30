@@ -28,16 +28,22 @@ export function BranchSyncBar({ projectId }: { projectId: string }) {
 	if (!status || !status.hasRemote || !status.branch) return null;
 
 	async function update() {
+		if (busy) return; // guard against double-fire while a fetch is in flight
 		setBusy(true);
-		const res = await api.fetchProject({ projectId });
-		setBusy(false);
-		if (!res.ok) {
-			notify(`Fetch failed${res.error ? `: ${res.error}` : ""}`, "error");
-			return;
+		try {
+			const res = await api.fetchProject({ projectId });
+			if (!res.ok) {
+				notify(`Fetch failed${res.error ? `: ${res.error}` : ""}`, "error");
+				return;
+			}
+			load();
+			emitDataChanged("worktrees");
+			notify(`Fetched ${status?.branch}`);
+		} catch (err) {
+			notify(`Fetch failed: ${String(err)}`, "error");
+		} finally {
+			setBusy(false);
 		}
-		load();
-		emitDataChanged("worktrees");
-		notify(`Fetched ${status?.branch}`);
 	}
 
 	const behind = status.behind;

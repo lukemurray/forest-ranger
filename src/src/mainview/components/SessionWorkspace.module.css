@@ -1,0 +1,123 @@
+.workspace {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-width: 0;
+	background: var(--bg);
+}
+
+.tabs {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--border);
+	overflow-x: auto;
+	flex-shrink: 0;
+}
+
+.tab {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 9px;
+	border-radius: var(--radius-sm);
+	font-size: 12px;
+	color: var(--text-muted);
+	white-space: nowrap;
+	max-width: 220px;
+	flex-shrink: 0;
+}
+.tab:hover {
+	background: var(--bg-hover);
+}
+.tab[data-active] {
+	background: var(--bg-active);
+	color: var(--text);
+}
+.tab > svg {
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.tab[data-active] > svg {
+	color: var(--accent);
+}
+.tabLabel {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-family: var(--font-mono);
+}
+.tabClose {
+	display: grid;
+	place-items: center;
+	width: 17px;
+	height: 17px;
+	border-radius: 4px;
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.tabClose svg {
+	display: block;
+}
+.tabClose:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
+.tabInput {
+	padding: 5px 9px;
+	border-radius: var(--radius-sm);
+	font-size: 12px;
+	font-family: var(--font-mono);
+	border: 1px solid var(--accent);
+	background: var(--bg-elevated);
+	color: var(--text);
+	width: 160px;
+	flex-shrink: 0;
+}
+
+.newButtons {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+.add {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 5px 9px;
+	border-radius: var(--radius-sm);
+	font-size: 12px;
+	color: var(--text-muted);
+	border: 1px dashed var(--border-strong);
+}
+.add:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
+.body {
+	flex: 1;
+	min-height: 0;
+	position: relative;
+}
+.pane {
+	position: absolute;
+	inset: 0;
+}
+
+.empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 14px;
+	height: 100%;
+	color: var(--text-faint);
+	font-size: 13.5px;
+}
+.emptyActions {
+	display: flex;
+	gap: 8px;
+}

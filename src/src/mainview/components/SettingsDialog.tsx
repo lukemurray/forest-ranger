@@ -13,15 +13,17 @@ import {
 	useTerminal,
 } from "../lib/openTargets";
 import { AgentsManager } from "./AgentsManager";
+import { IntegrationsManager } from "./IntegrationsManager";
 import { CheckIcon } from "./icons";
 import styles from "./SettingsDialog.module.css";
 
-type Section = "general" | "apps" | "agents";
+type Section = "general" | "apps" | "agents" | "integrations";
 
 const SECTIONS: { id: Section; label: string }[] = [
 	{ id: "general", label: "General" },
 	{ id: "apps", label: "Applications" },
 	{ id: "agents", label: "Agents" },
+	{ id: "integrations", label: "Integrations" },
 ];
 
 const RUN_OPTIONS: { value: RunTarget; label: string }[] = [
@@ -171,9 +173,17 @@ export function SettingsDialog({
 								<AgentsManager />
 							</Group>
 						)}
+
+						{section === "integrations" && (
+							<Group label="Integrations">
+								<IntegrationsManager />
+							</Group>
+						)}
 					</div>
 
-					<ModalClose className={styles.close}>Done</ModalClose>
+					<div className={styles.footer}>
+						<ModalClose className={styles.done}>Done</ModalClose>
+					</div>
 		</Modal>
 	);
 }

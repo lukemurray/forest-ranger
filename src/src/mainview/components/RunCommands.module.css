@@ -1,0 +1,63 @@
+.slot {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	justify-content: flex-end;
+	align-items: center;
+	overflow: hidden;
+}
+
+.inline {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+}
+
+/* Sized to match the top-bar action buttons (Titlebar .actionButton). */
+.cmd {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	font-size: 12.5px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	color: var(--text-muted);
+}
+
+.run {
+	color: var(--green);
+	border-color: color-mix(in srgb, var(--green) 45%, var(--border-strong));
+}
+.run svg {
+	color: var(--green);
+}
+.run:hover {
+	background: rgba(78, 201, 165, 0.12);
+}
+
+.add {
+	border-style: dashed;
+	color: var(--text-muted);
+}
+.add:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
+/* Off-screen measurement of the full inline layout's natural width. */
+.measure {
+	position: absolute;
+	top: 0;
+	left: 0;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	visibility: hidden;
+	pointer-events: none;
+	white-space: nowrap;
+}

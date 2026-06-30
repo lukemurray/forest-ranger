@@ -1,6 +1,6 @@
 /** Thin wrapper around the `git` CLI for worktree discovery. */
 
-import { statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // A macOS GUI app inherits the minimal launchd PATH, which can omit the user's
@@ -20,19 +20,51 @@ type GitResult = { ok: boolean; stdout: string; stderr: string; exitCode: number
 
 // Async (not spawnSync) so independent git invocations can run concurrently —
 // scanning N worktrees fans out instead of blocking the bun thread one at a time.
-async function git(cwd: string, args: string[]): Promise<GitResult> {
+// Never let a network git op (fetch) block on an interactive prompt — a GUI
+// process has no TTY, so a credential/passphrase/host-key prompt would hang
+// forever. These make git fail fast instead. SSH keys in the agent and the
+// macOS keychain credential helper still work (those aren't terminal prompts).
+const GIT_ENV: Record<string, string> = {
+	...(process.env as Record<string, string>),
+	PATH: AUGMENTED_PATH,
+	GIT_TERMINAL_PROMPT: "0",
+	GIT_SSH_COMMAND:
+		process.env.GIT_SSH_COMMAND ??
+		"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10",
+};
+
+async function git(
+	cwd: string,
+	args: string[],
+	opts?: { timeoutMs?: number },
+): Promise<GitResult> {
 	try {
 		const proc = Bun.spawn(["git", ...args], {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, PATH: AUGMENTED_PATH },
+			env: GIT_ENV,
 		});
+		let timedOut = false;
+		const timer = opts?.timeoutMs
+			? setTimeout(() => {
+					timedOut = true;
+					try {
+						proc.kill();
+					} catch {
+						// already exited
+					}
+				}, opts.timeoutMs)
+			: undefined;
 		const [stdout, stderr, exitCode] = await Promise.all([
 			new Response(proc.stdout).text(),
 			new Response(proc.stderr).text(),
 			proc.exited,
 		]);
+		if (timer) clearTimeout(timer);
+		if (timedOut) {
+			return { ok: false, stdout, stderr: "timed out", exitCode: -1 };
+		}
 		return { ok: exitCode === 0, stdout, stderr, exitCode };
 	} catch (err) {
 		// git binary not found / not executable
@@ -195,13 +227,40 @@ export async function localBranches(repoPath: string): Promise<string[]> {
 		.filter((b) => b !== "");
 }
 
-/** Pick a base branch: the preferred one if it exists, else main/master. */
+/**
+ * Local branches plus remote-only branches (as `origin/foo`), for base-branch
+ * pickers. Remote branches that already have a local counterpart are dropped so
+ * the local name wins; this is how new origin branches become selectable.
+ */
+export async function listBranches(repoPath: string): Promise<string[]> {
+	const [localRes, remoteRes] = await Promise.all([
+		git(repoPath, ["branch", "--format=%(refname:short)"]),
+		git(repoPath, ["branch", "-r", "--format=%(refname:short)"]),
+	]);
+	const local = (localRes.ok ? localRes.stdout : "")
+		.split("\n")
+		.map((b) => b.trim())
+		.filter(Boolean);
+	const localSet = new Set(local);
+	const remoteOnly = (remoteRes.ok ? remoteRes.stdout : "")
+		.split("\n")
+		.map((b) => b.trim())
+		.filter((b) => b && !b.includes("->") && b.startsWith("origin/"))
+		.filter((b) => !localSet.has(b.slice("origin/".length)));
+	return [...local, ...remoteOnly];
+}
+
+/** Pick a base branch: the preferred one if it's a real ref, else main/master. */
 export async function resolveBaseBranch(
 	repoPath: string,
 	preferred?: string | null,
 ): Promise<string | null> {
+	if (preferred) {
+		// Accept any resolvable ref so remote branches (origin/foo) work too.
+		const ok = await git(repoPath, ["rev-parse", "--verify", "--quiet", preferred]);
+		if (ok.ok && ok.stdout.trim() !== "") return preferred;
+	}
 	const branches = await localBranches(repoPath);
-	if (preferred && branches.includes(preferred)) return preferred;
 	for (const cand of ["main", "master"]) {
 		if (branches.includes(cand)) return cand;
 	}
@@ -213,6 +272,8 @@ export type BaseChange = {
 	letter: string; // name-status letter: A/M/D/R/C/T or ? (untracked)
 	insertions: number | null;
 	deletions: number | null;
+	/** uncommitted only: whether the file has staged changes in the index. */
+	staged?: boolean;
 };
 
 export type WorktreeChanges = {
@@ -260,18 +321,23 @@ export async function worktreeChanges(
 	worktreePath: string,
 	base: string | null,
 ): Promise<WorktreeChanges> {
-	const [uncNS, uncNum, untracked] = await Promise.all([
+	const [uncNS, uncNum, untracked, stagedNames] = await Promise.all([
 		git(worktreePath, ["diff", "--name-status", "-M", "HEAD"]),
 		git(worktreePath, ["diff", "--numstat", "-M", "HEAD"]),
 		git(worktreePath, ["ls-files", "--others", "--exclude-standard"]),
+		git(worktreePath, ["diff", "--cached", "--name-only", "HEAD"]),
 	]);
 
+	const stagedSet = new Set(
+		stagedNames.stdout.split("\n").map((p) => p.trim()).filter(Boolean),
+	);
 	const uncommitted = parseChanges(uncNS.stdout, uncNum.stdout);
+	for (const f of uncommitted) f.staged = stagedSet.has(f.path);
 	const seen = new Set(uncommitted.map((f) => f.path));
 	for (const p of untracked.stdout.split("\n")) {
 		const path = p.trim();
 		if (path === "" || seen.has(path)) continue;
-		uncommitted.push({ path, letter: "?", insertions: null, deletions: null });
+		uncommitted.push({ path, letter: "?", insertions: null, deletions: null, staged: false });
 	}
 
 	let resolvedBase: string | null = null;
@@ -299,6 +365,37 @@ export async function worktreeChanges(
 	}
 
 	return { base: resolvedBase, ahead, behind, committed, uncommitted };
+}
+
+/** Stage the given paths (git add), or everything when `paths` is empty. */
+export async function stageFiles(
+	worktreePath: string,
+	paths: string[],
+): Promise<{ ok: boolean; error?: string }> {
+	const args = paths.length ? ["add", "--", ...paths] : ["add", "-A"];
+	const r = await git(worktreePath, args);
+	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() || "stage failed" };
+}
+
+/** Unstage the given paths, or everything when `paths` is empty. */
+export async function unstageFiles(
+	worktreePath: string,
+	paths: string[],
+): Promise<{ ok: boolean; error?: string }> {
+	const args = paths.length
+		? ["restore", "--staged", "--", ...paths]
+		: ["reset", "--quiet", "HEAD", "--"];
+	const r = await git(worktreePath, args);
+	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() || "unstage failed" };
+}
+
+/** Commit the staged index with `message`. */
+export async function commit(
+	worktreePath: string,
+	message: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const r = await git(worktreePath, ["commit", "-m", message]);
+	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() || "commit failed" };
 }
 
 export type RawFileDiff = { binary: boolean; text: string };
@@ -392,12 +489,34 @@ export async function fetchProject(
 	repoPath: string,
 	branch: string | null,
 ): Promise<{ ok: boolean; error?: string }> {
-	if (branch) {
-		const ff = await git(repoPath, ["fetch", "origin", `${branch}:${branch}`]);
-		if (ff.ok) return { ok: true };
+	// Update all remote-tracking refs and prune deleted ones — this is what makes
+	// the behind count accurate and surfaces new/removed origin branches. Bounded
+	// so a stalled connection can't hang the action.
+	const t0 = Date.now();
+	console.log(`[fetch] start ${repoPath} (branch=${branch ?? "—"})`);
+	const fetched = await git(repoPath, ["fetch", "origin", "--prune"], { timeoutMs: 30_000 });
+	console.log(
+		`[fetch] origin --prune: ok=${fetched.ok} exit=${fetched.exitCode} ${Date.now() - t0}ms` +
+			(fetched.stderr.trim() ? ` stderr=${fetched.stderr.trim().slice(0, 300)}` : ""),
+	);
+	if (!fetched.ok) {
+		const err = fetched.stderr.trim();
+		return {
+			ok: false,
+			error: err === "timed out" ? "Fetch timed out — check your network or credentials." : err || "fetch failed",
+		};
 	}
-	const f = await git(repoPath, ["fetch", "origin"]);
-	return f.ok ? { ok: true } : { ok: false, error: f.stderr.trim() || "fetch failed" };
+	// Best-effort fast-forward the local default branch when it isn't checked out
+	// (a no-op/failure here is fine — the remote refs are already updated above).
+	if (branch) {
+		const ff = await git(repoPath, ["fetch", "origin", `${branch}:${branch}`], { timeoutMs: 20_000 });
+		console.log(
+			`[fetch] ff ${branch}: ok=${ff.ok} exit=${ff.exitCode}` +
+				(ff.stderr.trim() ? ` stderr=${ff.stderr.trim().slice(0, 200)}` : ""),
+		);
+	}
+	console.log(`[fetch] done ${Date.now() - t0}ms`);
+	return { ok: true };
 }
 
 /** Remove a worktree (`--force` discards uncommitted/untracked changes). */
@@ -410,9 +529,66 @@ export async function removeWorktree(
 	if (force) args.push("--force");
 	args.push(worktreePath);
 	const r = await git(repoPath, args);
-	return r.ok
-		? { ok: true }
-		: { ok: false, error: r.stderr.trim() || "git worktree remove failed" };
+	if (r.ok) return { ok: true };
+
+	// The worktree may be broken (e.g. its `.git` link is missing) or locked, in
+	// which case `git worktree remove` refuses to validate it. Retry with a
+	// double `--force` to override locks/validation, then fall back to pruning
+	// the stale registration and clearing any leftover directory.
+	const r2 = await git(repoPath, ["worktree", "remove", "--force", "--force", worktreePath]);
+	if (r2.ok) return { ok: true };
+
+	await git(repoPath, ["worktree", "prune"]);
+	const list = await git(repoPath, ["worktree", "list", "--porcelain"]);
+	const stillRegistered = list.stdout
+		.split("\n")
+		.some((line) => line.trim() === `worktree ${worktreePath}`);
+	if (stillRegistered) {
+		return { ok: false, error: r.stderr.trim() || r2.stderr.trim() || "git worktree remove failed" };
+	}
+
+	// Registration is gone; remove the leftover directory if it's still on disk.
+	try {
+		if (worktreePath !== repoPath && existsSync(worktreePath)) {
+			rmSync(worktreePath, { recursive: true, force: true });
+		}
+	} catch {
+		// best effort — the registration is already cleared
+	}
+	return { ok: true };
+}
+
+/** The upstream/tracking branch for a local branch (e.g. `origin/foo`), or null. */
+export async function branchUpstream(
+	repoPath: string,
+	branch: string,
+): Promise<string | null> {
+	const r = await git(repoPath, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+	return r.ok && r.stdout.trim() ? r.stdout.trim() : null;
+}
+
+/** The `origin` remote URL (or the first remote's), or null if none. */
+export async function remoteUrl(repoPath: string): Promise<string | null> {
+	const origin = await git(repoPath, ["remote", "get-url", "origin"]);
+	if (origin.ok && origin.stdout.trim()) return origin.stdout.trim();
+	const remotes = await git(repoPath, ["remote"]);
+	const first = remotes.stdout.split("\n").map((s) => s.trim()).filter(Boolean)[0];
+	if (!first) return null;
+	const url = await git(repoPath, ["remote", "get-url", first]);
+	return url.ok ? url.stdout.trim() || null : null;
+}
+
+/** Parse a git remote URL into host + project path (handles scp-like and URL forms). */
+export function parseRemote(url: string): { host: string; path: string } | null {
+	const u = url.trim();
+	const strip = (p: string) => p.replace(/\.git$/, "").replace(/^\//, "");
+	// scp-like: git@host:group/project.git
+	const scp = u.match(/^[\w.+-]+@([^:]+):(.+)$/);
+	if (scp) return { host: scp[1], path: strip(scp[2]) };
+	// scheme://[user@]host[:port]/group/project(.git)
+	const m = u.match(/^[a-z][\w+.-]*:\/\/(?:[^@/]+@)?([^/]+)\/(.+)$/i);
+	if (m) return { host: m[1].replace(/:\d+$/, ""), path: strip(m[2]) };
+	return null;
 }
 
 /** Force-delete a local branch. */
@@ -431,8 +607,20 @@ export async function addWorktree(
 	branch: string,
 	base: string | null,
 ): Promise<{ ok: boolean; error?: string }> {
-	const args = ["worktree", "add", worktreePath, "-b", branch];
-	if (base) args.push(base);
+	// If the branch already exists locally, check it out; otherwise create it off
+	// `base` (e.g. `-b foo <path> origin/foo` makes a local `foo` tracking origin).
+	const existing = await git(repoPath, [
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		`refs/heads/${branch}`,
+	]);
+	const args =
+		existing.ok && existing.stdout.trim() !== ""
+			? ["worktree", "add", worktreePath, branch]
+			: base
+				? ["worktree", "add", worktreePath, "-b", branch, base]
+				: ["worktree", "add", worktreePath, "-b", branch];
 	const res = await git(repoPath, args);
 	return res.ok
 		? { ok: true }

@@ -17,9 +17,7 @@ import {
 } from "../components/icons";
 import { api, emitDataChanged } from "../rpc";
 import { openSession } from "../lib/terminalStore";
-import { getDefaultRunTarget } from "../lib/runTarget";
-import { runExternalCommand } from "../lib/openTargets";
-import { prepareAgentLaunch, type Agent } from "../lib/agents";
+import { getChatConfig } from "../lib/chatConfig";
 import tb from "../components/Titlebar.module.css";
 import styles from "./Page.module.css";
 
@@ -35,32 +33,29 @@ export function ProjectView() {
 	const [editing, setEditing] = useState<ProjectCommand | null>(null);
 	const [newOpen, setNewOpen] = useState(false);
 
-	function onWorktreeCreated(
-		worktreeId: string,
-		path: string,
-		agent: Agent | null,
-	) {
+	function onWorktreeCreated(worktreeId: string, _path: string, startChat: boolean) {
 		emitDataChanged("worktrees"); // refresh sidebar + project grid
-		if (agent) {
-			const { command, sessionId } = prepareAgentLaunch(agent);
-			if (getDefaultRunTarget() === "external" && path) {
-				runExternalCommand(command, path);
-			} else {
-				openSession({
-					worktreeId,
-					projectId,
-					commandId: null,
-					command,
-					resumeCommand: agent.resumeCommand || null,
-					sessionId,
-					title: agent.label,
-				});
-			}
-		}
 		navigate({
 			to: "/project/$projectId/worktree/$worktreeId",
 			params: { projectId, worktreeId },
 		});
+		if (startChat) {
+			const config = getChatConfig();
+			openSession({
+				worktreeId,
+				projectId,
+				kind: "chat",
+				commandId: null,
+				command: null,
+				resumeCommand: null,
+				sessionId: crypto.randomUUID(),
+				permissionMode: config.defaultPermissionMode,
+				model: config.defaultModel,
+				agentLabel: "Claude",
+				name: "New chat",
+				title: "Claude",
+			});
+		}
 	}
 
 	const loadCommands = useCallback(() => {

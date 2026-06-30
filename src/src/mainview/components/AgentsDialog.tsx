@@ -11,9 +11,10 @@ export function AgentsDialog({
 }) {
 	return (
 		<Modal open={open} onOpenChange={onOpenChange} width={460}>
-			<ModalTitle className={styles.title}>Agents</ModalTitle>
+			<ModalTitle className={styles.title}>Chat agents</ModalTitle>
 			<p className={styles.subtitle}>
-				CLI agents you can launch in a worktree's terminal.
+				Model + permission-mode presets for the in-app chat. To run an agent's CLI
+				directly, open a terminal in the worktree.
 			</p>
 
 			<AgentsManager />

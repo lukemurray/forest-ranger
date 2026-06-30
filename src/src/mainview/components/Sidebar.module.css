@@ -70,6 +70,21 @@
 	color: var(--text);
 }
 
+.navBadge {
+	margin-left: auto;
+	min-width: 18px;
+	height: 18px;
+	padding: 0 5px;
+	display: grid;
+	place-items: center;
+	border-radius: 9px;
+	font-size: 11px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	color: var(--green);
+	background: rgba(78, 201, 165, 0.16);
+}
+
 .notice {
 	margin: 4px 6px 2px;
 	padding: 8px 10px;

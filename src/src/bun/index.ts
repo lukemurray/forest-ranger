@@ -1,11 +1,20 @@
-import Electrobun, { BrowserView, BrowserWindow, Updater, Utils } from "electrobun/bun";
+import Electrobun, {
+	ApplicationMenu,
+	BrowserView,
+	BrowserWindow,
+	Updater,
+	Utils,
+} from "electrobun/bun";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
 	AppRPC,
+	BranchIntegrations,
 	ChangedFile,
 	ChangeKind,
+	IntegrationStatus,
+	IntegrationType,
 	Project,
 	ProjectCommand,
 	Worktree,
@@ -21,22 +30,41 @@ import {
 	write as termWrite,
 } from "./terminals";
 import {
+	killAll as agentChatKillAll,
+	respondPermission as agentChatRespond,
+	restart as agentChatRestart,
+	send as agentChatSend,
+	setAgentChatCallback,
+	startSession as agentChatStart,
+	stop as agentChatStop,
+} from "./agentChat";
+import {
 	commandsRepo,
+	integrationsRepo,
 	projectsRepo,
 	worktreesRepo,
 	type CommandRow,
 	type ProjectRow,
 } from "./db";
 import {
+	branchStatus as gitlabBranchStatus,
+	testConnection as gitlabTest,
+	type GitLabConfig,
+} from "./gitlab";
+import {
 	addWorktree as gitAddWorktree,
 	branchTracking,
+	branchUpstream,
 	deleteBranch as gitDeleteBranch,
 	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
 	gitVersion,
 	removeWorktree as gitRemoveWorktree,
 	listWorktrees as gitListWorktrees,
-	localBranches,
+	listBranches,
+	stageFiles as gitStage,
+	unstageFiles as gitUnstage,
+	commit as gitCommit,
 	resolveBaseBranch,
 	resolveRepoToplevel,
 	worktreeActivity,
@@ -77,6 +105,23 @@ function toCommand(row: CommandRow): ProjectCommand {
 	};
 }
 
+
+const KNOWN_INTEGRATIONS: IntegrationType[] = ["gitlab"];
+const DEFAULT_HOST: Record<IntegrationType, string> = {
+	gitlab: "https://gitlab.com",
+};
+
+function integrationConfig(type: IntegrationType): { host: string; token: string } {
+	const row = integrationsRepo.get(type);
+	const stored = row ? (JSON.parse(row.config) as Partial<GitLabConfig>) : {};
+	return { host: stored.host || DEFAULT_HOST[type], token: stored.token || "" };
+}
+
+function integrationStatus(type: IntegrationType): IntegrationStatus {
+	const row = integrationsRepo.get(type);
+	const cfg = integrationConfig(type);
+	return { type, enabled: !!row?.enabled, host: cfg.host, hasToken: !!cfg.token };
+}
 
 /** Scan git for a project's worktrees, sync the db, and return merged rows. */
 async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
@@ -184,6 +229,7 @@ function toChangedFile(c: BaseChange): ChangedFile {
 		kind: letterKind(c.letter),
 		insertions: c.insertions,
 		deletions: c.deletions,
+		staged: c.staged ?? false,
 	};
 }
 
@@ -293,10 +339,11 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				const resolvedBase = await resolveBaseBranch(project.path, preferred);
 				const usableBase = resolvedBase === entry.branch ? null : resolvedBase;
 
-				const [activity, branches, changes] = await Promise.all([
+				const [activity, branches, changes, upstream] = await Promise.all([
 					worktreeActivity(row.path),
-					localBranches(project.path),
+					listBranches(project.path),
 					worktreeChanges(row.path, usableBase),
+					entry.branch ? branchUpstream(row.path, entry.branch) : Promise.resolve(null),
 				]);
 
 				const committed = changes.committed.map(toChangedFile);
@@ -320,6 +367,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 					projectId: project.id,
 					projectName: project.name,
 					branch: entry.branch,
+					upstream,
 					base: changes.base,
 					branches,
 					ahead: changes.ahead,
@@ -392,6 +440,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 			fetchProject: async ({ projectId }) => {
 				const project = projectsRepo.get(projectId);
 				if (!project) return { ok: false, error: "Project not found" };
+				console.log(`[fetch] request for project ${project.name} (${project.path})`);
 				const base = await resolveBaseBranch(project.path, null);
 				return gitFetchProject(project.path, base);
 			},
@@ -400,7 +449,7 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				const project = projectsRepo.get(projectId);
 				if (!project) return { branches: [], base: null, worktreeDir: "" };
 				const [branches, base, worktreeDir] = await Promise.all([
-					localBranches(project.path),
+					listBranches(project.path),
 					resolveBaseBranch(project.path, null),
 					worktreeParentFor(project),
 				]);
@@ -411,8 +460,13 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				const project = projectsRepo.get(projectId);
 				if (!project) return { ok: false, error: "Project not found" };
 
+				// No explicit name: if basing off a remote branch (origin/foo), check
+				// out that branch (named `foo`) so the worktree reflects it; otherwise
+				// fall back to a generated name.
+				const remoteBase = base && /^origin\//.test(base) ? base.slice("origin/".length) : null;
 				const branch =
 					name.trim() ||
+					remoteBase ||
 					`worktree-${Math.random().toString(36).slice(2, 8)}`;
 
 				// Explicit location (from the dialog) wins and becomes the project's
@@ -423,9 +477,10 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				projectsRepo.setWorktreeDir(projectId, parent);
 				mkdirSync(parent, { recursive: true });
 
+				// Slugify the whole branch so the folder keeps its context
+				// (feature/foo -> feature-foo) and leaf names don't collide.
 				const dirName =
-					(branch.split("/").pop() || branch).replace(/[^\w.-]+/g, "-") ||
-					"worktree";
+					branch.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "worktree";
 				let wtPath = join(parent, dirName);
 				for (let n = 2; existsSync(wtPath); n++) {
 					wtPath = join(parent, `${dirName}-${n}`);
@@ -486,6 +541,64 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 
 			runExternal: ({ cwd, command, app }) => runInTerminal(app, cwd, command),
 
+			openUrl: ({ url }) => {
+				try {
+					Bun.spawn(["open", url]);
+					return { ok: true };
+				} catch (err) {
+					return { ok: false, error: String(err) };
+				}
+			},
+
+			stageFiles: ({ id, paths }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				return gitStage(row.path, paths);
+			},
+			unstageFiles: ({ id, paths }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				return gitUnstage(row.path, paths);
+			},
+			commitChanges: ({ id, message }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				return gitCommit(row.path, message);
+			},
+
+			listIntegrations: () => KNOWN_INTEGRATIONS.map(integrationStatus),
+
+			setIntegration: ({ type, enabled, host, token }) => {
+				const cfg = integrationConfig(type);
+				cfg.host = host.trim() || DEFAULT_HOST[type];
+				if (token !== null) cfg.token = token; // "" clears, null keeps
+				integrationsRepo.upsert(type, enabled, JSON.stringify(cfg));
+				return integrationStatus(type);
+			},
+
+			testIntegration: async ({ type, host, token }) => {
+				const cfg = integrationConfig(type);
+				const useHost = host.trim() || cfg.host;
+				const useToken = token !== null ? token : cfg.token;
+				if (!useToken) return { ok: false, error: "No token provided" };
+				return gitlabTest({ host: useHost, token: useToken });
+			},
+
+			branchIntegrations: async ({ projectId, branch }) => {
+				const out: BranchIntegrations = {};
+				const project = projectsRepo.get(projectId);
+				if (!project || !branch) return out;
+				const row = integrationsRepo.get("gitlab");
+				if (row?.enabled) {
+					const cfg = integrationConfig("gitlab");
+					if (cfg.token) {
+						const status = await gitlabBranchStatus(cfg, project.path, branch);
+						if (status) out.gitlab = status;
+					}
+				}
+				return out;
+			},
+
 			termStart: ({ sessionId, worktreeId, commandId, command, cols, rows }) => {
 				const row = worktreesRepo.get(worktreeId);
 				if (!row) return { ok: false, error: "Worktree not found" };
@@ -501,11 +614,36 @@ const rpc = BrowserView.defineRPC<AppRPC>({
 				termStart({ sessionId, cwd, command: toRun, cols, rows });
 				return { ok: true };
 			},
+
+			agentChatStart: ({ sessionId, worktreeId, resume, permissionMode, model }) => {
+				const row = worktreesRepo.get(worktreeId);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				const ok = agentChatStart({
+					sessionId,
+					cwd: row.path,
+					resume,
+					permissionMode,
+					model,
+				});
+				return ok ? { ok: true } : { ok: false, error: "Session already running" };
+			},
+
+			agentChatRestart: ({ sessionId, worktreeId, permissionMode, model }) => {
+				const row = worktreesRepo.get(worktreeId);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				agentChatRestart({ sessionId, cwd: row.path, resume: true, permissionMode, model });
+				return { ok: true };
+			},
 		},
 		messages: {
 			termInput: ({ sessionId, data }) => termWrite(sessionId, data),
 			termResize: ({ sessionId, cols, rows }) => termResize(sessionId, cols, rows),
 			termKill: ({ sessionId }) => termKill(sessionId),
+
+			agentChatSend: ({ sessionId, text }) => agentChatSend(sessionId, text),
+			agentChatPermission: ({ sessionId, requestId, allow }) =>
+				agentChatRespond(sessionId, requestId, allow),
+			agentChatStop: ({ sessionId }) => agentChatStop(sessionId),
 		},
 	},
 });
@@ -516,15 +654,62 @@ setTerminalCallbacks({
 	onExit: (sessionId, exitCode) => rpc.send.termExit({ sessionId, exitCode }),
 });
 
+// Stream normalized chat-agent events from the bun process to the webview.
+setAgentChatCallback((sessionId, event) => rpc.send.agentChatEvent({ sessionId, event }));
+
+// Native menu so the standard editing shortcuts (⌘A/⌘C/⌘X/⌘V/⌘Z) route to the
+// focused field's native selectors — WKWebView doesn't wire these on its own.
+ApplicationMenu.setApplicationMenu([
+	{
+		label: "Forest Ranger",
+		submenu: [
+			{ role: "about" },
+			{ type: "separator" },
+			{ role: "hide", accelerator: "CommandOrControl+H" },
+			{ role: "hideOthers" },
+			{ role: "showAll" },
+			{ type: "separator" },
+			{ role: "quit", accelerator: "CommandOrControl+Q" },
+		],
+	},
+	{
+		label: "Edit",
+		submenu: [
+			{ role: "undo", accelerator: "CommandOrControl+Z" },
+			{ role: "redo", accelerator: "CommandOrControl+Shift+Z" },
+			{ type: "separator" },
+			{ role: "cut", accelerator: "CommandOrControl+X" },
+			{ role: "copy", accelerator: "CommandOrControl+C" },
+			{ role: "paste", accelerator: "CommandOrControl+V" },
+			{ role: "selectAll", accelerator: "CommandOrControl+A" },
+		],
+	},
+	{
+		label: "Window",
+		submenu: [
+			{ role: "minimize", accelerator: "CommandOrControl+M" },
+			{ role: "zoom" },
+			{ role: "close", accelerator: "CommandOrControl+W" },
+		],
+	},
+]);
+
 // Don't leave PTYs (dev servers, etc.) orphaned when the app quits.
-Electrobun.events.on("before-quit", () => termKillAll());
+Electrobun.events.on("before-quit", () => {
+	termKillAll();
+	agentChatKillAll();
+});
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
 	process.on(sig, () => {
 		termKillAll();
+		agentChatKillAll();
 		process.exit(0);
 	});
 }
-process.on("exit", () => termKillAll());
+process.on("exit", () => {
+	termKillAll();
+	agentChatKillAll();
+});
 
 async function getMainViewUrl(): Promise<string> {
 	const channel = await Updater.localInfo.channel();

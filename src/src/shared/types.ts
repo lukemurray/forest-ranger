@@ -52,6 +52,8 @@ export type ChangedFile = {
 	kind: ChangeKind;
 	insertions: number | null;
 	deletions: number | null;
+	/** uncommitted only: the file currently has staged changes in the index. */
+	staged: boolean;
 };
 
 /** A saved, runnable command for a project (e.g. "Run" → "npm run dev"). */
@@ -77,6 +79,8 @@ export type WorktreeDetail = {
 	projectId: string;
 	projectName: string;
 	branch: string | null;
+	/** The upstream/tracking branch (e.g. `origin/foo`), or null if not tracking. */
+	upstream: string | null;
 	/** The base branch changes are computed against (null if none available). */
 	base: string | null;
 	/** Local branches selectable as the base. */
@@ -93,6 +97,44 @@ export type WorktreeDetail = {
 
 /** Raw unified diff for a file; the view parses & renders it. */
 export type FileDiff = { path: string; binary: boolean; diff: string };
+
+// --- native chat agents ---
+
+/**
+ * A normalized event from a native chat agent session. Each backend driver
+ * (Claude Code first; others as adapters) maps its own protocol onto this so
+ * the view renders one event model regardless of which CLI is driving.
+ */
+export type AgentChatEvent =
+	/** Session is up; carries the agent's own session id (for resume) + model. */
+	| { type: "system"; sessionId: string | null; model: string | null }
+	/** The user's own turn, echoed so it's buffered/replayed on reattach. */
+	| { type: "user_text"; text: string }
+	/** A chunk of assistant prose. */
+	| { type: "assistant_text"; text: string }
+	/** A chunk of the agent's thinking. */
+	| { type: "thinking"; text: string }
+	/** The agent invoked a tool. */
+	| { type: "tool_use"; id: string; name: string; input: unknown }
+	/** A tool returned. `summary` is a short, display-ready result string. */
+	| { type: "tool_result"; id: string; ok: boolean; summary: string }
+	/** The turn finished (agent is idle, awaiting the next user message). */
+	| { type: "result"; ok: boolean; durationMs: number | null }
+	/** The agent needs permission to run a tool; the user must allow or deny. */
+	| { type: "permission"; id: string; toolName: string; input: unknown }
+	/** A pending permission request was answered (for replay/UI state). */
+	| { type: "permission_resolved"; id: string; allow: boolean }
+	/** Something went wrong (spawn failure, bad output, process died). */
+	| { type: "error"; message: string }
+	/** The underlying process exited; the session is no longer running. */
+	| { type: "exited"; code: number };
+
+/** How a chat agent handles tool-permission prompts (mirrors Claude Code modes). */
+export type AgentPermissionMode =
+	| "default"
+	| "acceptEdits"
+	| "plan"
+	| "bypassPermissions";
 
 /** Apps a worktree can be opened in. */
 export type AppId =
@@ -113,6 +155,32 @@ export type OpenApp = {
 };
 
 export type OpenResult = { ok: boolean; error?: string };
+
+// --- integrations ---
+
+/** A connectable external service. GitLab is the first; more can follow. */
+export type IntegrationType = "gitlab";
+
+/** Settings-facing status of an integration (never ships the token itself). */
+export type IntegrationStatus = {
+	type: IntegrationType;
+	enabled: boolean;
+	host: string;
+	hasToken: boolean;
+};
+
+/** GitLab MR + pipeline status for one branch. */
+export type GitLabBranchStatus = {
+	/** Web URL of the GitLab project this repo maps to. */
+	projectUrl: string | null;
+	mr: { iid: number; title: string; state: string; url: string } | null;
+	pipeline: { status: string; url: string } | null;
+	/** Set when the lookup failed (e.g. bad token); UI can show it quietly. */
+	error?: string;
+};
+
+/** Per-branch status gathered from all enabled integrations. */
+export type BranchIntegrations = { gitlab?: GitLabBranchStatus };
 
 /** Outcome of an "add project" attempt, so the UI can give clear feedback. */
 export type AddProjectResult =
@@ -253,6 +321,45 @@ export type AppRPC = {
 				response: void;
 			};
 			removeCommand: { params: { id: string }; response: void };
+			/** Open a URL in the user's default browser. */
+			openUrl: { params: { url: string }; response: OpenResult };
+
+			/** Stage paths in a worktree (empty paths = stage all). */
+			stageFiles: { params: { id: string; paths: string[] }; response: OpenResult };
+			/** Unstage paths in a worktree (empty paths = unstage all). */
+			unstageFiles: { params: { id: string; paths: string[] }; response: OpenResult };
+			/** Commit the staged index in a worktree. */
+			commitChanges: {
+				params: { id: string; message: string };
+				response: { ok: boolean; error?: string };
+			};
+
+			/** Configured integrations (GitLab, …) with enable + token state. */
+			listIntegrations: {
+				params: Record<string, never>;
+				response: IntegrationStatus[];
+			};
+			/** Save an integration. token=null keeps the stored token; "" clears it. */
+			setIntegration: {
+				params: {
+					type: IntegrationType;
+					enabled: boolean;
+					host: string;
+					token: string | null;
+				};
+				response: IntegrationStatus;
+			};
+			/** Test an integration's credentials. token=null uses the stored token. */
+			testIntegration: {
+				params: { type: IntegrationType; host: string; token: string | null };
+				response: { ok: boolean; user?: string; error?: string };
+			};
+			/** MR/pipeline status for a branch from every enabled integration. */
+			branchIntegrations: {
+				params: { projectId: string; branch: string };
+				response: BranchIntegrations;
+			};
+
 			/** Run a saved command in a worktree directory via the given app. */
 			runCommand: {
 				params: { id: string; cwd: string; app: AppId };
@@ -277,12 +384,51 @@ export type AppRPC = {
 				};
 				response: OpenResult;
 			};
+
+			/**
+			 * Start a native chat agent session (Claude Code, driven via stream-json).
+			 * The view supplies `sessionId` (also used as the agent's session id, so
+			 * the same conversation can be resumed). Events stream back via
+			 * `agentChatEvent`.
+			 */
+			agentChatStart: {
+				params: {
+					sessionId: string;
+					worktreeId: string;
+					/** Resume the prior conversation under this session id. */
+					resume: boolean;
+					permissionMode: AgentPermissionMode;
+					/** Model alias/name, or null for the agent's default. */
+					model: string | null;
+				};
+				response: OpenResult;
+			};
+			/**
+			 * Switch a live chat's model/permission mode without losing context:
+			 * stops and relaunches the agent with `--resume`.
+			 */
+			agentChatRestart: {
+				params: {
+					sessionId: string;
+					worktreeId: string;
+					permissionMode: AgentPermissionMode;
+					model: string | null;
+				};
+				response: OpenResult;
+			};
 		};
 		messages: {
 			/** Keystrokes/input for a PTY session (base64 or raw). */
 			termInput: { sessionId: string; data: string };
 			termResize: { sessionId: string; cols: number; rows: number };
 			termKill: { sessionId: string };
+
+			/** Send a user turn to a chat agent session. */
+			agentChatSend: { sessionId: string; text: string };
+			/** Answer a pending tool-permission request (allow or deny). */
+			agentChatPermission: { sessionId: string; requestId: string; allow: boolean };
+			/** Stop (kill) a chat agent session. */
+			agentChatStop: { sessionId: string };
 		};
 	}>;
 	webview: RPCSchema<{
@@ -293,6 +439,8 @@ export type AppRPC = {
 			/** PTY output (base64) for a session. */
 			termData: { sessionId: string; data: string };
 			termExit: { sessionId: string; exitCode: number };
+			/** A normalized event from a native chat agent session. */
+			agentChatEvent: { sessionId: string; event: AgentChatEvent };
 		};
 	}>;
 };

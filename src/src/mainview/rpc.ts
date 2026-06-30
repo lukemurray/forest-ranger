@@ -1,5 +1,5 @@
 import { Electroview } from "electrobun/view";
-import type { AppRPC } from "../shared/types";
+import type { AgentChatEvent, AppRPC } from "../shared/types";
 
 type DataChangedScope = "projects" | "worktrees";
 
@@ -25,7 +25,22 @@ export function subscribeTerminal(sessionId: string, sub: TermSub) {
 	return () => termSubs.delete(sessionId);
 }
 
+const chatSubs = new Map<string, (event: AgentChatEvent) => void>();
+
+/** Subscribe to a chat agent session's events. Call before agentChatStart. */
+export function subscribeAgentChat(
+	sessionId: string,
+	sub: (event: AgentChatEvent) => void,
+) {
+	chatSubs.set(sessionId, sub);
+	return () => chatSubs.delete(sessionId);
+}
+
 const rpcConfig = Electroview.defineRPC<AppRPC>({
+	// Electrobun defaults view→bun requests to 1s, which silently times out (and
+	// then retries/rejects) anything slower — e.g. `git fetch`, big diffs. Give
+	// real operations room; the bun handlers have their own internal timeouts.
+	maxRequestTime: 60_000,
 	handlers: {
 		requests: {},
 		messages: {
@@ -35,6 +50,7 @@ const rpcConfig = Electroview.defineRPC<AppRPC>({
 			termData: ({ sessionId, data }) => termSubs.get(sessionId)?.onData(data),
 			termExit: ({ sessionId, exitCode }) =>
 				termSubs.get(sessionId)?.onExit(exitCode),
+			agentChatEvent: ({ sessionId, event }) => chatSubs.get(sessionId)?.(event),
 		},
 	},
 });
@@ -55,7 +71,7 @@ const win = window as unknown as {
  *  - the bun WebSocket finishing its handshake (`OPEN`), and
  *  - the preload's async `initEncryption()` assigning `__electrobun_encrypt`.
  * If we send before both are ready, Electrobun silently drops the message and
- * the request 15s-times-out. (No socket = remote browser → postMessage path,
+ * the request times out. (No socket = remote browser → postMessage path,
  * which doesn't encrypt, so we only need the bridge to exist.)
  */
 function canSend(): boolean {

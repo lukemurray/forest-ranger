@@ -7,7 +7,8 @@
 		"dev": "electrobun dev --watch",
 		"dev:hmr": "concurrently \"bun run hmr\" \"bun run start\"",
 		"hmr": "vite --port 5178",
-		"build:canary": "vite build && electrobun build --env=canary"
+		"build:canary": "vite build && electrobun build --env=canary",
+		"build:stable": "vite build && electrobun build --env=stable"
 	},
 	"dependencies": {
 		"@base-ui-components/react": "1.0.0-rc.0",
@@ -18,7 +19,9 @@
 		"react": "^19.2.7",
 		"react-diff-view": "^3.3.3",
 		"react-dom": "^19.2.7",
-		"refractor": "^5.0.0"
+		"react-markdown": "^10.1.0",
+		"refractor": "^5.0.0",
+		"remark-gfm": "^4.0.1"
 	},
 	"devDependencies": {
 		"@types/bun": "latest",

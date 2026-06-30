@@ -15,6 +15,19 @@ export function relativeTime(ms: number | null): string {
 	return `${Math.round(mo / 12)}y ago`;
 }
 
+/** Compact elapsed duration since a ms timestamp: "0:42", "3:07", "1h 12m". */
+export function elapsed(sinceMs: number): string {
+	const sec = Math.max(0, Math.floor((Date.now() - sinceMs) / 1000));
+	if (sec < 3600) {
+		const m = Math.floor(sec / 60);
+		const s = sec % 60;
+		return `${m}:${String(s).padStart(2, "0")}`;
+	}
+	const h = Math.floor(sec / 3600);
+	const m = Math.floor((sec % 3600) / 60);
+	return `${h}h ${m}m`;
+}
+
 export function shortHash(head: string | null): string {
 	return head ? head.slice(0, 7) : "—";
 }

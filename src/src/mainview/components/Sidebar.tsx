@@ -5,6 +5,7 @@ import type { Project, Worktree } from "../../shared/types";
 import { api, onDataChanged } from "../rpc";
 import { relativeTime } from "../lib/format";
 import {
+	ActivityIcon,
 	ChevronIcon,
 	ClockIcon,
 	PlusIcon,
@@ -25,6 +26,7 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 	const [notice, setNotice] = useState<string | null>(null);
 
 	const { sessions } = useTerminals();
+	const runningCount = sessions.filter((s) => s.running).length;
 	const runningWorktrees = new Set(
 		sessions.filter((s) => s.running).map((s) => s.worktreeId),
 	);
@@ -86,6 +88,15 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 				activeProps={{ className: styles.recentLinkActive }}
 			>
 				<ClockIcon /> Recent worktrees
+			</Link>
+
+			<Link
+				to="/activity"
+				className={styles.recentLink}
+				activeProps={{ className: styles.recentLinkActive }}
+			>
+				<ActivityIcon /> Activity
+				{runningCount > 0 && <span className={styles.navBadge}>{runningCount}</span>}
 			</Link>
 
 			{notice && <div className={styles.notice}>{notice}</div>}

@@ -7,16 +7,17 @@
 
 .workarea {
 	display: flex;
+	flex-direction: column;
 	min-width: 0;
 	min-height: 0;
 	height: 100%;
 	overflow: hidden;
 }
-.workarea[data-dock="bottom"] {
-	flex-direction: column;
-}
-.workarea[data-dock="side"] {
-	flex-direction: row;
+
+/* Full-width titlebar row — views portal their <Titlebar> here so the title
+   always spans the top, above both the main content and the side dock. */
+.titlebarSlot {
+	flex-shrink: 0;
 }
 
 .main {

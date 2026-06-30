@@ -44,6 +44,12 @@ db.exec(`
 		sort       INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS integrations (
+		type    TEXT PRIMARY KEY,
+		enabled INTEGER NOT NULL DEFAULT 0,
+		config  TEXT NOT NULL DEFAULT '{}'
+	);
 `);
 
 // Migrate older DBs that predate added columns.
@@ -98,6 +104,12 @@ export type CommandRow = {
 	run_target: string;
 	sort: number;
 	created_at: number;
+};
+
+export type IntegrationRow = {
+	type: string;
+	enabled: number;
+	config: string;
 };
 
 // --- prepared statements ---
@@ -158,6 +170,15 @@ const stmts = {
 		"UPDATE project_commands SET label = $label, command = $command, dir = $dir, run_target = $runTarget WHERE id = $id",
 	),
 	deleteCommand: db.query("DELETE FROM project_commands WHERE id = $id"),
+
+	listIntegrations: db.query<IntegrationRow, []>("SELECT * FROM integrations"),
+	getIntegration: db.query<IntegrationRow, [string]>(
+		"SELECT * FROM integrations WHERE type = ?",
+	),
+	upsertIntegration: db.query(
+		`INSERT INTO integrations (type, enabled, config) VALUES ($type, $enabled, $config)
+		 ON CONFLICT(type) DO UPDATE SET enabled = $enabled, config = $config`,
+	),
 };
 
 export const projectsRepo = {
@@ -242,4 +263,15 @@ export const commandsRepo = {
 			$runTarget: runTarget,
 		} as never),
 	remove: (id: string) => stmts.deleteCommand.run({ $id: id } as never),
+};
+
+export const integrationsRepo = {
+	list: () => stmts.listIntegrations.all(),
+	get: (type: string) => stmts.getIntegration.get(type) ?? null,
+	upsert: (type: string, enabled: boolean, config: string) =>
+		stmts.upsertIntegration.run({
+			$type: type,
+			$enabled: enabled ? 1 : 0,
+			$config: config,
+		} as never),
 };

@@ -31,7 +31,7 @@ export function MenuItem({
 	onClick,
 	danger,
 }: {
-	icon: ReactNode;
+	icon?: ReactNode;
 	label: string;
 	onClick: () => void;
 	danger?: boolean;

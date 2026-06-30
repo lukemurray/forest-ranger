@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { api } from "../rpc";
-import { useAgents, type Agent } from "../lib/agents";
 import { tildePath } from "../lib/format";
 import { BranchCombobox } from "./BranchCombobox";
 import { Modal, ModalClose, ModalTitle } from "./ui/Modal";
@@ -17,14 +16,13 @@ export function NewWorktreeDialog({
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	projectId: string;
-	onCreated: (worktreeId: string, path: string, agent: Agent | null) => void;
+	onCreated: (worktreeId: string, path: string, startChat: boolean) => void;
 }) {
-	const agents = useAgents();
 	const [branches, setBranches] = useState<string[]>([]);
 	const [name, setName] = useState("");
 	const [base, setBase] = useState("");
 	const [location, setLocation] = useState("");
-	const [agentId, setAgentId] = useState("");
+	const [startChat, setStartChat] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -33,14 +31,12 @@ export function NewWorktreeDialog({
 		setName("");
 		setError(null);
 		setBusy(false);
-		setAgentId(agents[0]?.id ?? "");
+		setStartChat(false);
 		api.projectBranches({ projectId }).then((r) => {
 			setBranches(r.branches);
 			setBase(r.base ?? "");
 			setLocation(tildePath(r.worktreeDir));
 		});
-		// agents read once on open; intentionally not a dep
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, projectId]);
 
 	async function create() {
@@ -57,11 +53,7 @@ export function NewWorktreeDialog({
 			setError(res.error ?? "Failed to create worktree");
 			return;
 		}
-		onCreated(
-			res.worktreeId,
-			res.path ?? "",
-			agents.find((a) => a.id === agentId) ?? null,
-		);
+		onCreated(res.worktreeId, res.path ?? "", startChat);
 		onOpenChange(false);
 	}
 
@@ -101,20 +93,13 @@ export function NewWorktreeDialog({
 					placeholder="~/path/to/worktrees"
 				/>
 
-				<label className={styles.field}>
-					<span className={styles.label}>Launch agent</span>
-					<select
-						className={styles.select}
-						value={agentId}
-						onChange={(e) => setAgentId(e.target.value)}
-					>
-						<option value="">None</option>
-						{agents.map((a) => (
-							<option key={a.id} value={a.id}>
-								{a.label}
-							</option>
-						))}
-					</select>
+				<label className={styles.check}>
+					<input
+						type="checkbox"
+						checked={startChat}
+						onChange={(e) => setStartChat(e.target.checked)}
+					/>
+					Start a Claude chat in the new worktree
 				</label>
 			</div>
 

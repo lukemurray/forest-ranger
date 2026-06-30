@@ -7,6 +7,7 @@ import { api } from "./rpc";
 import { ErrorView } from "./components/ErrorView";
 import { RootLayout } from "./routes/RootLayout";
 import { RecentView } from "./routes/RecentView";
+import { ActivityView } from "./routes/ActivityView";
 import { ProjectView } from "./routes/ProjectView";
 import { WorktreeView } from "./routes/WorktreeView";
 
@@ -20,6 +21,12 @@ export const indexRoute = createRoute({
 	path: "/",
 	loader: () => api.recentWorktrees({ limit: 50 }),
 	component: RecentView,
+});
+
+export const activityRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/activity",
+	component: ActivityView,
 });
 
 export const projectRoute = createRoute({
@@ -43,6 +50,7 @@ export const worktreeRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
 	indexRoute,
+	activityRoute,
 	projectRoute,
 	worktreeRoute,
 ]);

@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useTitlebarSlot } from "../lib/titlebarSlot";
 import styles from "./Titlebar.module.css";
 
 /**
@@ -16,7 +18,8 @@ export function Titlebar({
 	actions?: ReactNode;
 	title?: string;
 }) {
-	return (
+	const slot = useTitlebarSlot();
+	const bar = (
 		<div className={`${styles.bar} electrobun-webkit-app-region-drag`}>
 			<div className={styles.left} title={title}>
 				{children}
@@ -28,4 +31,7 @@ export function Titlebar({
 			)}
 		</div>
 	);
+	// Hoist into the layout's full-width titlebar row so it spans the top above
+	// the side dock; fall back to inline if the slot isn't mounted yet.
+	return slot ? createPortal(bar, slot) : bar;
 }

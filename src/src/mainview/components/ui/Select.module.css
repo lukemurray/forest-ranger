@@ -1,0 +1,62 @@
+.trigger {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	width: 100%;
+	padding: 7px 10px;
+	font-size: 13px;
+	color: var(--text);
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	text-align: left;
+}
+.trigger:hover {
+	background: var(--bg-hover);
+}
+.trigger[data-popup-open] {
+	border-color: var(--accent);
+}
+.icon {
+	display: grid;
+	place-items: center;
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+
+.positioner {
+	z-index: 110;
+}
+.popup {
+	max-height: 280px;
+	overflow-y: auto;
+	min-width: var(--anchor-width);
+	padding: 4px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+	outline: none;
+}
+.item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 7px 9px;
+	border-radius: var(--radius-sm);
+	font-size: 13px;
+	color: var(--text);
+	cursor: pointer;
+	outline: none;
+	user-select: none;
+}
+.item[data-highlighted] {
+	background: var(--bg-hover);
+}
+.indicator {
+	display: grid;
+	place-items: center;
+	color: var(--accent);
+}

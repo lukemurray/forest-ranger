@@ -14,11 +14,11 @@ bun run dev
 # Development with HMR (recommended)
 bun run dev:hmr
 
-# Build for production
-bun run build
+# Build a canary (pre-release) package
+bun run build:canary
 
-# Build for production release
-bun run build:prod
+# Build a stable production package
+bun run build:stable
 ```
 
 ## How HMR Works
