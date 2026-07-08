@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import type { Worktree } from "../../shared/types";
+import type { ProjectCommand, Worktree } from "../../shared/types";
 import { api, emitDataChanged } from "../rpc";
 import { relativeTime, shortHash, tildePath } from "../lib/format";
-import { GitBranchIcon, RevealIcon, TrashIcon } from "./icons";
+import { openInEditor, openInTerminal, runProjectCommand } from "../lib/openTargets";
+import { FolderIcon, GitBranchIcon, PlayIcon, RevealIcon, TerminalIcon, TrashIcon } from "./icons";
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { RemoveWorktreeDialog } from "./RemoveWorktreeDialog";
 import styles from "./WorktreeCard.module.css";
@@ -11,9 +12,12 @@ import styles from "./WorktreeCard.module.css";
 export function WorktreeCard({
 	worktree,
 	projectName,
+	commands = [],
 }: {
 	worktree: Worktree;
 	projectName?: string;
+	/** Project commands to expose as run-buttons on the card (project view). */
+	commands?: ProjectCommand[];
 }) {
 	const navigate = useNavigate();
 	const [removeOpen, setRemoveOpen] = useState(false);
@@ -38,13 +42,47 @@ export function WorktreeCard({
 		api.revealInFinder({ path: worktree.path });
 	}
 
+	/** Wrap an action so clicking it doesn't also trigger the card's navigate. */
+	const act = (fn: () => void) => (e: React.MouseEvent) => {
+		e.stopPropagation();
+		fn();
+	};
+
 	return (
 		<>
 			<RowMenu
 				trigger={
-					<button className={styles.card} onClick={open} title="View worktree">
-						<CardBody worktree={worktree} projectName={projectName} goToProject={goToProject} reveal={reveal} />
-					</button>
+					<div className={styles.card}>
+						<button className={styles.body} onClick={open} title="View worktree">
+							<CardBody worktree={worktree} projectName={projectName} goToProject={goToProject} reveal={reveal} />
+						</button>
+						<div className={styles.actions}>
+							<button
+								className={styles.actionBtn}
+								onClick={act(() => openInEditor(worktree.path))}
+								title="Open in editor"
+							>
+								<FolderIcon size={14} /> Editor
+							</button>
+							<button
+								className={styles.actionBtn}
+								onClick={act(() => openInTerminal(worktree.path))}
+								title="Open in terminal"
+							>
+								<TerminalIcon size={14} /> Terminal
+							</button>
+							{commands.map((c) => (
+								<button
+									key={c.id}
+									className={styles.cmdBtn}
+									onClick={act(() => runProjectCommand(c.id, worktree.path))}
+									title={c.command}
+								>
+									<PlayIcon size={12} /> {c.label}
+								</button>
+							))}
+						</div>
+					</div>
 				}
 			>
 				<OpenItems path={worktree.path} />

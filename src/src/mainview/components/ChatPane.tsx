@@ -777,6 +777,7 @@ function ElicitationCard({
 						{f.description && <span className={styles.elicitDesc}>{f.description}</span>}
 						<ElicitationInput
 							field={f}
+							name={`${item.id}-${f.key}`}
 							value={values[f.key]}
 							disabled={item.done}
 							onChange={(v) => set(f.key, v)}
@@ -805,11 +806,14 @@ function ElicitationCard({
 
 function ElicitationInput({
 	field,
+	name,
 	value,
 	disabled,
 	onChange,
 }: {
 	field: ElicitationField;
+	/** Radio-group name, unique per field within the chat. */
+	name: string;
 	value: ElicitationValue | undefined;
 	disabled: boolean;
 	onChange: (v: ElicitationValue) => void;
@@ -826,22 +830,22 @@ function ElicitationInput({
 		);
 	}
 	if (field.input === "select") {
+		// Radio group: every option visible inline, not hidden in a dropdown.
 		return (
-			<select
-				className={styles.elicitSelect}
-				disabled={disabled}
-				value={typeof value === "string" ? value : ""}
-				onChange={(e) => onChange(e.target.value)}
-			>
-				<option value="" disabled>
-					Choose…
-				</option>
+			<div className={styles.elicitRadios} role="radiogroup">
 				{field.options?.map((o) => (
-					<option key={o.value} value={o.value}>
+					<label key={o.value} className={styles.elicitRadio}>
+						<input
+							type="radio"
+							name={name}
+							disabled={disabled}
+							checked={value === o.value}
+							onChange={() => onChange(o.value)}
+						/>
 						{o.label}
-					</option>
+					</label>
 				))}
-			</select>
+			</div>
 		);
 	}
 	if (field.input === "multiselect") {

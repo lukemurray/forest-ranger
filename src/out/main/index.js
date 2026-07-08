@@ -9894,6 +9894,57 @@ async function listBranches(repoPath) {
 	const remoteOnly = (remoteRes.ok ? remoteRes.stdout : "").split("\n").map((b) => b.trim()).filter((b) => b && !b.includes("->") && b.startsWith("origin/")).filter((b) => !localSet.has(b.slice(7)));
 	return [...local, ...remoteOnly];
 }
+async function branchGraph(repoPath) {
+	const base = await resolveBaseBranch(repoPath, null);
+	const res = await git(repoPath, [
+		"for-each-ref",
+		`--format=%(refname)|%(committerdate:unix)|${base ? `%(ahead-behind:${base})` : ""}`,
+		"refs/heads/",
+		"refs/remotes/origin/"
+	]);
+	if (!res.ok) return [];
+	const map = /* @__PURE__ */ new Map();
+	for (const raw of res.stdout.split("\n")) {
+		const line = raw.trimEnd();
+		if (!line) continue;
+		const [refname, dateStr, abStr] = line.split("|");
+		let name;
+		let isLocal;
+		if (refname.startsWith("refs/heads/")) {
+			name = refname.slice(11);
+			isLocal = true;
+		} else if (refname.startsWith("refs/remotes/origin/")) {
+			name = refname.slice(20);
+			if (name === "HEAD") continue;
+			isLocal = false;
+		} else continue;
+		const cur = map.get(name) ?? {
+			local: false,
+			remote: false,
+			lastCommitAt: null,
+			ahead: null,
+			behind: null
+		};
+		if (isLocal) cur.local = true;
+		else cur.remote = true;
+		const ts = Number(dateStr);
+		const ms = Number.isFinite(ts) ? ts * 1e3 : null;
+		if (ms != null && (cur.lastCommitAt == null || ms > cur.lastCommitAt)) cur.lastCommitAt = ms;
+		const ab = (abStr ?? "").trim().split(/\s+/);
+		const a = Number(ab[0]);
+		const b = Number(ab[1]);
+		if ((isLocal || cur.ahead == null) && Number.isFinite(a) && Number.isFinite(b)) {
+			cur.ahead = a;
+			cur.behind = b;
+		}
+		map.set(name, cur);
+	}
+	return [...map.entries()].map(([name, v]) => ({
+		name,
+		...v,
+		base
+	}));
+}
 /** Pick a base branch: the preferred one if it's a real ref, else main/master. */
 async function resolveBaseBranch(repoPath, preferred) {
 	if (preferred) {
@@ -10275,10 +10326,10 @@ function parseRemote(url) {
 	return null;
 }
 /** Force-delete a local branch. */
-async function deleteBranch(repoPath, branch) {
+async function deleteBranch(repoPath, branch, force = false) {
 	const r = await git(repoPath, [
 		"branch",
-		"-D",
+		force ? "-D" : "-d",
 		branch
 	]);
 	return r.ok ? { ok: true } : {
@@ -10717,7 +10768,7 @@ var handlers = {
 		const branch = (await listWorktrees(project.path)).find((e) => e.path === row.path)?.branch;
 		const rem = await removeWorktree(project.path, row.path, force);
 		if (!rem.ok) return rem;
-		if (deleteBranch$1 && branch) await deleteBranch(project.path, branch);
+		if (deleteBranch$1 && branch) await deleteBranch(project.path, branch, true);
 		return { ok: true };
 	},
 	branchStatus: async ({ projectId }) => {
@@ -10760,6 +10811,63 @@ var handlers = {
 			branches,
 			base,
 			worktreeDir
+		};
+	},
+	projectBranchGraph: async ({ projectId }) => {
+		const project = projectsRepo.get(projectId);
+		if (!project) return [];
+		const [graph, worktrees] = await Promise.all([branchGraph(project.path), listWorktrees(project.path)]);
+		const byBranch = /* @__PURE__ */ new Map();
+		for (const w of worktrees) {
+			if (w.isBare || !w.branch) continue;
+			const list = byBranch.get(w.branch) ?? [];
+			list.push({
+				id: worktreeId(projectId, w.path),
+				path: w.path
+			});
+			byBranch.set(w.branch, list);
+		}
+		return graph.map((b) => ({
+			name: b.name,
+			local: b.local,
+			remote: b.remote,
+			worktrees: byBranch.get(b.name) ?? [],
+			lastCommitAt: b.lastCommitAt,
+			ahead: b.ahead,
+			behind: b.behind,
+			base: b.base
+		}));
+	},
+	deleteBranch: async ({ projectId, branch, force }) => {
+		const project = projectsRepo.get(projectId);
+		if (!project) return {
+			ok: false,
+			error: "Project not found"
+		};
+		return deleteBranch(project.path, branch, force);
+	},
+	deleteBranches: async ({ projectId, branches, force }) => {
+		const project = projectsRepo.get(projectId);
+		if (!project) return {
+			deleted: [],
+			failed: branches.map((branch) => ({
+				branch,
+				error: "Project not found"
+			}))
+		};
+		const deleted = [];
+		const failed = [];
+		for (const branch of branches) {
+			const r = await deleteBranch(project.path, branch, force);
+			if (r.ok) deleted.push(branch);
+			else failed.push({
+				branch,
+				error: r.error ?? "delete failed"
+			});
+		}
+		return {
+			deleted,
+			failed
 		};
 	},
 	createWorktree: async ({ projectId, name, base, location }) => {
@@ -10996,6 +11104,7 @@ function broadcast(event) {
 }
 electron.ipcMain.handle("rpc", (_event, method, params) => {
 	const handler = handlers[method];
+	if (typeof handler !== "function") throw new Error(`No RPC handler for "${String(method)}" (restart the app if this is dev).`);
 	return handler(params);
 });
 electron.ipcMain.on("message", (_event, msg) => dispatchMessage(msg));
@@ -11033,7 +11142,15 @@ function createWindow() {
 	if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL);
 	else win.loadFile((0, node_path.join)(__dirname, "../renderer/index.html"));
 }
+electron.app.setName("Forest Ranger");
+electron.app.setAboutPanelOptions({
+	applicationName: "Forest Ranger",
+	applicationVersion: electron.app.getVersion()
+});
 electron.app.whenReady().then(() => {
+	if (!electron.app.isPackaged && process.platform === "darwin") try {
+		electron.app.dock?.setIcon((0, node_path.join)(__dirname, "../../build/icon.png"));
+	} catch {}
 	electron.Menu.setApplicationMenu(electron.Menu.buildFromTemplate([
 		{ role: "appMenu" },
 		{ role: "editMenu" },

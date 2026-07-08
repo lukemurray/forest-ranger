@@ -52,7 +52,8 @@
 		"files": ["out/**/*", "package.json"],
 		"mac": {
 			"category": "public.app-category.developer-tools",
-			"target": "dmg"
+			"target": "dmg",
+			"icon": "build/icon.icns"
 		}
 	}
 }

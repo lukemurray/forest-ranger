@@ -1,17 +1,67 @@
 .card {
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
-	text-align: left;
-	padding: 14px;
 	background: var(--bg-elevated);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
+	overflow: hidden;
 	transition: border-color 0.12s ease, background 0.12s ease;
 }
 .card:hover {
 	border-color: var(--border-strong);
+}
+
+/* Clickable main area (navigates to the worktree). */
+.body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	text-align: left;
+	padding: 14px;
+	background: transparent;
+	border: none;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+.body:hover {
 	background: var(--bg-hover);
+}
+
+/* Inline action footer: editor / terminal / command run-buttons. */
+.actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 9px 12px;
+	border-top: 1px solid var(--border);
+}
+.actionBtn,
+.cmdBtn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 12px;
+	padding: 4px 9px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-strong);
+	color: var(--text-muted);
+	background: transparent;
+	cursor: pointer;
+}
+.actionBtn:hover,
+.cmdBtn:hover {
+	background: var(--bg-active);
+	color: var(--text);
+}
+.cmdBtn {
+	color: var(--accent);
+	border-color: color-mix(in srgb, var(--accent) 35%, var(--border-strong));
+}
+.actionBtn svg,
+.cmdBtn svg {
+	flex-shrink: 0;
 }
 
 .top {

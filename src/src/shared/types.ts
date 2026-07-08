@@ -96,6 +96,25 @@ export type WorktreeDetail = {
 /** Raw unified diff for a file; the view parses & renders it. */
 export type FileDiff = { path: string; binary: boolean; diff: string };
 
+/** A branch across the repo + origin, with any worktrees that have it checked out. */
+export type BranchSummary = {
+	/** Short branch name (e.g. "feature/foo"). */
+	name: string;
+	/** Exists as a local branch. */
+	local: boolean;
+	/** Exists on origin. */
+	remote: boolean;
+	/** Worktrees that currently have this branch checked out (0..n). */
+	worktrees: { id: string; path: string }[];
+	/** Most recent commit time (ms), for sorting; null if unknown. */
+	lastCommitAt: number | null;
+	/** Commits ahead / behind the base branch; null if not computable. */
+	ahead: number | null;
+	behind: number | null;
+	/** The base branch ahead/behind are measured against (e.g. "master"). */
+	base: string | null;
+};
+
 // --- native chat agents ---
 
 /**
@@ -308,6 +327,21 @@ export type RpcRequests = {
 					base: string | null;
 					worktreeDir: string;
 				};
+			};
+			/** All branches (local + origin) with worktree linkage, for the project view. */
+			projectBranchGraph: {
+				params: { projectId: string };
+				response: BranchSummary[];
+			};
+			/** Delete a local branch (force = discard unmerged work). */
+			deleteBranch: {
+				params: { projectId: string; branch: string; force: boolean };
+				response: { ok: boolean; error?: string };
+			};
+			/** Delete several local branches; reports which succeeded and which were skipped. */
+			deleteBranches: {
+				params: { projectId: string; branches: string[]; force: boolean };
+				response: { deleted: string[]; failed: { branch: string; error: string }[] };
 			};
 			/**
 			 * Create a worktree (new branch off base). name="" auto-generates.

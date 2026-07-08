@@ -270,17 +270,30 @@ details.tool[open] > .toolHeader {
 	width: 15px;
 	height: 15px;
 }
-.elicitChecks {
+.elicitChecks,
+.elicitRadios {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
 }
-.elicitCheck {
+.elicitCheck,
+.elicitRadio {
 	display: flex;
 	align-items: center;
-	gap: 7px;
-	font-size: 12.5px;
+	gap: 8px;
+	font-size: 13px;
 	color: var(--text-muted);
+	cursor: pointer;
+	padding: 4px 8px;
+	border-radius: var(--radius-sm);
+}
+.elicitRadio:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.elicitRadio input,
+.elicitCheck input {
+	flex-shrink: 0;
 }
 .elicitActions {
 	display: flex;

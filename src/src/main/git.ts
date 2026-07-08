@@ -271,6 +271,86 @@ export async function listBranches(repoPath: string): Promise<string[]> {
 	return [...local, ...remoteOnly];
 }
 
+/**
+ * Every branch across local refs and origin, with whether it exists in each and
+ * its most recent commit time. One `for-each-ref` covers both; a branch present
+ * in both places is merged into a single entry.
+ */
+export type BranchGraphEntry = {
+	name: string;
+	local: boolean;
+	remote: boolean;
+	lastCommitAt: number | null;
+	/** Commits ahead / behind the base branch (master/main); null if unknown. */
+	ahead: number | null;
+	behind: number | null;
+	/** The base branch these counts are measured against. */
+	base: string | null;
+};
+
+export async function branchGraph(repoPath: string): Promise<BranchGraphEntry[]> {
+	const base = await resolveBaseBranch(repoPath, null);
+	// git 2.41+ computes ahead/behind per-ref in one pass; `|`-delimited so a
+	// missing/older ahead-behind field just parses as empty.
+	const abField = base ? `%(ahead-behind:${base})` : "";
+	const res = await git(repoPath, [
+		"for-each-ref",
+		`--format=%(refname)|%(committerdate:unix)|${abField}`,
+		"refs/heads/",
+		"refs/remotes/origin/",
+	]);
+	if (!res.ok) return [];
+	type Acc = {
+		local: boolean;
+		remote: boolean;
+		lastCommitAt: number | null;
+		ahead: number | null;
+		behind: number | null;
+	};
+	const map = new Map<string, Acc>();
+	for (const raw of res.stdout.split("\n")) {
+		const line = raw.trimEnd();
+		if (!line) continue;
+		const [refname, dateStr, abStr] = line.split("|");
+		let name: string;
+		let isLocal: boolean;
+		if (refname.startsWith("refs/heads/")) {
+			name = refname.slice("refs/heads/".length);
+			isLocal = true;
+		} else if (refname.startsWith("refs/remotes/origin/")) {
+			name = refname.slice("refs/remotes/origin/".length);
+			if (name === "HEAD") continue; // origin/HEAD is a symref, not a branch
+			isLocal = false;
+		} else {
+			continue;
+		}
+		const cur = map.get(name) ?? {
+			local: false,
+			remote: false,
+			lastCommitAt: null,
+			ahead: null,
+			behind: null,
+		};
+		if (isLocal) cur.local = true;
+		else cur.remote = true;
+		const ts = Number(dateStr);
+		const ms = Number.isFinite(ts) ? ts * 1000 : null;
+		if (ms != null && (cur.lastCommitAt == null || ms > cur.lastCommitAt)) {
+			cur.lastCommitAt = ms;
+		}
+		// Prefer the local ref's divergence; fall back to origin's if local-absent.
+		const ab = (abStr ?? "").trim().split(/\s+/);
+		const a = Number(ab[0]);
+		const b = Number(ab[1]);
+		if ((isLocal || cur.ahead == null) && Number.isFinite(a) && Number.isFinite(b)) {
+			cur.ahead = a;
+			cur.behind = b;
+		}
+		map.set(name, cur);
+	}
+	return [...map.entries()].map(([name, v]) => ({ name, ...v, base }));
+}
+
 /** Pick a base branch: the preferred one if it's a real ref, else main/master. */
 export async function resolveBaseBranch(
 	repoPath: string,
@@ -616,8 +696,10 @@ export function parseRemote(url: string): { host: string; path: string } | null 
 export async function deleteBranch(
 	repoPath: string,
 	branch: string,
+	force = false,
 ): Promise<{ ok: boolean; error?: string }> {
-	const r = await git(repoPath, ["branch", "-D", branch]);
+	// -d refuses to delete a branch not merged into its upstream/HEAD; -D forces.
+	const r = await git(repoPath, ["branch", force ? "-D" : "-d", branch]);
 	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() };
 }
 

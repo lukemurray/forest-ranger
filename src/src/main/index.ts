@@ -53,6 +53,7 @@ import {
 } from "./gitlab";
 import {
 	addWorktree as gitAddWorktree,
+	branchGraph,
 	branchTracking,
 	branchUpstream,
 	deleteBranch as gitDeleteBranch,
@@ -419,7 +420,7 @@ const handlers: RpcHandlers = {
 				const rem = await gitRemoveWorktree(project.path, row.path, force);
 				if (!rem.ok) return rem;
 				if (deleteBranch && branch) {
-					await gitDeleteBranch(project.path, branch); // best-effort
+					await gitDeleteBranch(project.path, branch, true); // best-effort, force
 				}
 				return { ok: true };
 			},
@@ -453,6 +454,55 @@ const handlers: RpcHandlers = {
 					worktreeParentFor(project),
 				]);
 				return { branches, base, worktreeDir };
+			},
+
+			projectBranchGraph: async ({ projectId }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return [];
+				const [graph, worktrees] = await Promise.all([
+					branchGraph(project.path),
+					gitListWorktrees(project.path),
+				]);
+				// branch (short name) -> worktrees that have it checked out.
+				const byBranch = new Map<string, { id: string; path: string }[]>();
+				for (const w of worktrees) {
+					if (w.isBare || !w.branch) continue;
+					const list = byBranch.get(w.branch) ?? [];
+					list.push({ id: worktreeId(projectId, w.path), path: w.path });
+					byBranch.set(w.branch, list);
+				}
+				return graph.map((b) => ({
+					name: b.name,
+					local: b.local,
+					remote: b.remote,
+					worktrees: byBranch.get(b.name) ?? [],
+					lastCommitAt: b.lastCommitAt,
+					ahead: b.ahead,
+					behind: b.behind,
+					base: b.base,
+				}));
+			},
+
+			deleteBranch: async ({ projectId, branch, force }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return { ok: false, error: "Project not found" };
+				return gitDeleteBranch(project.path, branch, force);
+			},
+
+			deleteBranches: async ({ projectId, branches, force }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) {
+					return { deleted: [], failed: branches.map((branch) => ({ branch, error: "Project not found" })) };
+				}
+				const deleted: string[] = [];
+				const failed: { branch: string; error: string }[] = [];
+				// Sequential: `git branch -d` is fast and avoids index-lock contention.
+				for (const branch of branches) {
+					const r = await gitDeleteBranch(project.path, branch, force);
+					if (r.ok) deleted.push(branch);
+					else failed.push({ branch, error: r.error ?? "delete failed" });
+				}
+				return { deleted, failed };
 			},
 
 			createWorktree: async ({ projectId, name, base, location }) => {
@@ -685,7 +735,12 @@ function broadcast(event: MainEvent): void {
 
 // One request channel (invoke→response) and one message channel (fire-and-forget).
 ipcMain.handle("rpc", (_event, method: keyof RpcRequests, params: unknown) => {
-	const handler = handlers[method] as (p: unknown) => unknown;
+	const handler = handlers[method] as ((p: unknown) => unknown) | undefined;
+	if (typeof handler !== "function") {
+		// Usually a stale main process in dev (renderer hot-reloaded with a new RPC
+		// call, but main didn't restart) — surface it clearly instead of crashing.
+		throw new Error(`No RPC handler for "${String(method)}" (restart the app if this is dev).`);
+	}
 	return handler(params);
 });
 ipcMain.on("message", (_event, msg: ViewMessage) => dispatchMessage(msg));
@@ -725,7 +780,26 @@ function createWindow(): void {
 	}
 }
 
+// Unpackaged, Electron reports its own binary's name ("Electron") in the menu
+// bar, About panel, and notifications. A packaged build gets the name from
+// `productName`; set it here so dev matches.
+app.setName("Forest Ranger");
+app.setAboutPanelOptions({
+	applicationName: "Forest Ranger",
+	applicationVersion: app.getVersion(),
+});
+
 app.whenReady().then(() => {
+	// In dev the dock shows the default Electron icon (the app bundle's icon only
+	// applies to the packaged build) — set ours so dev matches.
+	if (!app.isPackaged && process.platform === "darwin") {
+		try {
+			app.dock?.setIcon(join(__dirname, "../../build/icon.png"));
+		} catch {
+			// non-fatal
+		}
+	}
+
 	// Standard app/edit/window menus give us the native clipboard + selection
 	// shortcuts (⌘A/⌘C/⌘X/⌘V/⌘Z) wired to whatever field has focus.
 	Menu.setApplicationMenu(

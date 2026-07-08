@@ -6,6 +6,7 @@ import { Titlebar } from "../components/Titlebar";
 import { Button } from "../components/ui/Button";
 import { BranchSyncBar } from "../components/BranchSyncBar";
 import { WorktreeCard } from "../components/WorktreeCard";
+import { ProjectBranches } from "../components/ProjectBranches";
 import { CommandDialog } from "../components/CommandDialog";
 import { NewWorktreeDialog } from "../components/NewWorktreeDialog";
 import {
@@ -188,11 +189,13 @@ export function ProjectView() {
 						) : (
 							<div className={styles.grid}>
 								{worktrees.map((wt) => (
-									<WorktreeCard key={wt.id} worktree={wt} />
+									<WorktreeCard key={wt.id} worktree={wt} commands={commands} />
 								))}
 							</div>
 						)}
 					</section>
+
+					<ProjectBranches projectId={projectId} onCreated={onWorktreeCreated} />
 				</div>
 			</div>
 
