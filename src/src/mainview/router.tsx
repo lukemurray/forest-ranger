@@ -1,4 +1,5 @@
 import {
+	createHashHistory,
 	createRootRoute,
 	createRoute,
 	createRouter,
@@ -57,6 +58,10 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
 	routeTree,
+	// Hash history keeps routing independent of the URL path, which under a
+	// packaged build is the on-disk `file://…/index.html` path (no route matches
+	// it → "Not Found" on launch). Works identically on the dev server.
+	history: createHashHistory(),
 	defaultPreload: false,
 	defaultPendingMs: 0,
 	defaultErrorComponent: ErrorView,

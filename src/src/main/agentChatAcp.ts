@@ -1,0 +1,492 @@
+/**
+ * ACP-backed chat driver. Instead of speaking each CLI's bespoke protocol, this
+ * talks the Agent Client Protocol (ACP) to an agent adapter subprocess — so the
+ * same code drives Claude, Codex, etc. via their adapters. It implements the
+ * {@link AgentDriver} contract, slotting in behind the buffer/persist/replay
+ * machinery in agentChat.ts.
+ *
+ * Each provider maps to an adapter that reuses the user's existing login for that
+ * tool (no API keys): Claude via `@agentclientprotocol/claude-agent-acp` (drives
+ * the local `claude` CLI), Codex via `@agentclientprotocol/codex-acp` (bundles
+ * `@openai/codex`).
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { homedir } from "node:os";
+import { Readable, Writable } from "node:stream";
+import {
+	ClientSideConnection,
+	ndJsonStream,
+	PROTOCOL_VERSION,
+	type Client,
+} from "@agentclientprotocol/sdk";
+import type {
+	AgentPermissionMode,
+	AgentProvider,
+	ChatAttachment,
+	ElicitationField,
+	ElicitationValue,
+} from "../shared/types";
+import type { AgentDriver, Emit, StartOpts } from "./agentChat";
+
+// A GUI app inherits the minimal launchd PATH; augment it so the adapters and the
+// CLIs they spawn resolve when launched as a bundled app.
+const AUGMENTED_PATH = [
+	process.env.PATH ?? "",
+	`${homedir()}/.local/bin`,
+	`${homedir()}/.claude/local`,
+	"/opt/homebrew/bin",
+	"/usr/local/bin",
+	"/usr/bin",
+	"/bin",
+]
+	.filter(Boolean)
+	.join(":");
+
+/** Per-provider adapter wiring: which stdio entrypoint to spawn and its env. */
+type ProviderSpec = {
+	/** Resolve the adapter's stdio entrypoint (external — run as a subprocess). */
+	entry: () => string;
+	/** Extra env carrying model/mode config for that adapter. */
+	env: (opts: StartOpts) => Record<string, string>;
+};
+
+/** Map our permission modes onto Codex's initial agent mode. */
+function codexMode(mode: AgentPermissionMode): string {
+	if (mode === "bypassPermissions") return "agent-full-access";
+	if (mode === "plan") return "read-only";
+	return "agent";
+}
+
+const PROVIDERS: Record<AgentProvider, ProviderSpec> = {
+	claude: {
+		entry: () =>
+			require.resolve("@agentclientprotocol/claude-agent-acp/dist/index.js"),
+		env: (opts) => {
+			const env: Record<string, string> = {};
+			if (opts.model) env.ANTHROPIC_MODEL = opts.model;
+			return env;
+		},
+	},
+	codex: {
+		entry: () => require.resolve("@agentclientprotocol/codex-acp/dist/index.js"),
+		env: (opts) => {
+			const env: Record<string, string> = {
+				INITIAL_AGENT_MODE: codexMode(opts.permissionMode),
+			};
+			if (opts.model) env.CODEX_CONFIG = JSON.stringify({ model: opts.model });
+			return env;
+		},
+	},
+};
+
+/** Build the user turn's ACP content blocks (text + attachments). */
+function promptBlocks(text: string, attachments: ChatAttachment[]) {
+	const blocks: Array<
+		| { type: "text"; text: string }
+		| { type: "image"; data: string; mimeType: string }
+	> = [];
+	if (text) blocks.push({ type: "text", text });
+	for (const a of attachments) {
+		if (a.mediaType.startsWith("image/")) {
+			blocks.push({ type: "image", data: a.data, mimeType: a.mediaType });
+		} else {
+			const decoded = decodeTextFile(a.data);
+			blocks.push({
+				type: "text",
+				text:
+					decoded != null
+						? `Attached file \`${a.name}\`:\n\`\`\`\n${decoded}\n\`\`\``
+						: `Attached file \`${a.name}\` (binary, not included).`,
+			});
+		}
+	}
+	if (blocks.length === 0) blocks.push({ type: "text", text: "" });
+	return blocks;
+}
+
+/** Decode a base64 file to UTF-8 text, or null if it looks binary. */
+function decodeTextFile(b64: string): string | null {
+	try {
+		const s = Buffer.from(b64, "base64").toString("utf8");
+		return s.includes("�") ? null : s;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Flatten ACP tool-call content into display text, preserving newlines so the
+ * UI can render it as Markdown. Capped so a huge output can't bloat the
+ * persisted buffer.
+ */
+function toolContentText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	const text = content
+		.map((c) => {
+			if (c && typeof c === "object") {
+				const block = c as { content?: { text?: unknown }; text?: unknown };
+				if (block.content && typeof block.content.text === "string") {
+					return block.content.text;
+				}
+				if (typeof block.text === "string") return block.text;
+			}
+			return "";
+		})
+		.join("\n")
+		.trim();
+	return text.length > 4000 ? `${text.slice(0, 4000)}\n…(truncated)` : text;
+}
+
+/** Turn ACP `enum` / `oneOf` into {value,label} options. */
+function enumOptions(
+	enumValues?: string[] | null,
+	oneOf?: Array<{ const: string; title: string }> | null,
+): { value: string; label: string }[] {
+	if (oneOf?.length) return oneOf.map((o) => ({ value: o.const, label: o.title }));
+	if (enumValues?.length) return enumValues.map((v) => ({ value: v, label: v }));
+	return [];
+}
+
+/** Normalize an ACP elicitation form schema into flat fields the UI can render. */
+function normalizeSchema(schema: unknown): ElicitationField[] {
+	const s = (schema ?? {}) as {
+		properties?: Record<string, Record<string, unknown>>;
+		required?: string[];
+	};
+	const required = new Set(s.required ?? []);
+	return Object.entries(s.properties ?? {}).map(([key, p]) => {
+		const base = {
+			key,
+			label: (p.title as string) || key,
+			description: (p.description as string) ?? undefined,
+			required: required.has(key),
+			default: p.default as ElicitationField["default"],
+		};
+		switch (p.type) {
+			case "boolean":
+				return { ...base, input: "boolean" as const };
+			case "number":
+				return { ...base, input: "number" as const };
+			case "integer":
+				return { ...base, input: "integer" as const };
+			case "array": {
+				const items = (p.items ?? {}) as {
+					enum?: string[];
+					oneOf?: { const: string; title: string }[];
+				};
+				return {
+					...base,
+					input: "multiselect" as const,
+					options: enumOptions(items.enum, items.oneOf),
+				};
+			}
+			default: {
+				const opts = enumOptions(
+					p.enum as string[] | undefined,
+					p.oneOf as { const: string; title: string }[] | undefined,
+				);
+				return opts.length
+					? { ...base, input: "select" as const, options: opts }
+					: { ...base, input: "text" as const };
+			}
+		}
+	});
+}
+
+/** Map a user's elicitation answer onto the ACP response shape. */
+function elicitResponse(
+	action: "accept" | "decline" | "cancel",
+	content?: Record<string, ElicitationValue>,
+) {
+	if (action === "accept") return { action: "accept" as const, content: content ?? {} };
+	if (action === "decline") return { action: "decline" as const };
+	return { action: "cancel" as const };
+}
+
+export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
+	const spec = PROVIDERS[opts.provider];
+	let proc: ChildProcess | null = null;
+	let conn: ClientSideConnection | null = null;
+	let sessionId: string | null = null;
+	let closed = false;
+	// Mutable so the UI can change it live (client-side enforcement) without a relaunch.
+	let permissionMode = opts.permissionMode;
+	// While true, swallow session updates (used during loadSession's history
+	// replay so we don't duplicate the buffer we already restored from disk).
+	let suppressReplay = false;
+	// Resolvers for permission requests we've surfaced to the UI, keyed by id.
+	const pendingPerms = new Map<string, (allow: boolean) => void>();
+	// Resolvers for structured elicitations awaiting the user's answer, keyed by id.
+	const pendingElicits = new Map<
+		string,
+		(action: "accept" | "decline" | "cancel", content?: Record<string, ElicitationValue>) => void
+	>();
+
+	// The connection/session come up asynchronously; queue sends until ready.
+	let readyResolve: () => void;
+	const ready = new Promise<void>((r) => {
+		readyResolve = r;
+	});
+
+	const clientImpl: Client = {
+		async requestPermission(params) {
+			const options = params.options ?? [];
+			const allow =
+				options.find((o) => o.kind === "allow_once") ??
+				options.find((o) => o.kind === "allow_always");
+			const reject =
+				options.find((o) => o.kind === "reject_once") ??
+				options.find((o) => o.kind === "reject_always");
+
+			const decide = (yes: boolean) =>
+				yes && allow
+					? { outcome: { outcome: "selected" as const, optionId: allow.optionId } }
+					: !yes && reject
+						? { outcome: { outcome: "selected" as const, optionId: reject.optionId } }
+						: { outcome: { outcome: "cancelled" as const } };
+
+			// Honor auto-permission modes without bothering the user.
+			if (permissionMode === "bypassPermissions") return decide(true);
+			if (
+				permissionMode === "acceptEdits" &&
+				params.toolCall?.kind &&
+				["edit", "delete", "move"].includes(params.toolCall.kind)
+			) {
+				return decide(true);
+			}
+
+			const id = String(params.toolCall?.toolCallId ?? crypto.randomUUID());
+			emit({
+				type: "permission",
+				id,
+				toolName: params.toolCall?.title ?? "tool",
+				input: params.toolCall?.rawInput,
+			});
+			return new Promise((resolve) => {
+				pendingPerms.set(id, (yes) => resolve(decide(yes)));
+			});
+		},
+
+		async sessionUpdate(params) {
+			if (suppressReplay) return;
+			const u = params.update;
+			switch (u.sessionUpdate) {
+				case "agent_message_chunk":
+					if (u.content.type === "text") {
+						emit({ type: "assistant_text", text: u.content.text });
+					}
+					break;
+				case "agent_thought_chunk":
+					if (u.content.type === "text") {
+						emit({ type: "thinking", text: u.content.text });
+					}
+					break;
+				case "tool_call":
+					emit({
+						type: "tool_use",
+						id: String(u.toolCallId),
+						name: u.title || u.kind || "tool",
+						input: u.rawInput,
+					});
+					break;
+				case "tool_call_update":
+					if (u.status === "completed" || u.status === "failed") {
+						emit({
+							type: "tool_result",
+							id: String(u.toolCallId),
+							ok: u.status === "completed",
+							summary: toolContentText(u.content),
+						});
+					}
+					break;
+				default:
+					// plan / user_message_chunk / mode / usage: ignored for now.
+					break;
+			}
+		},
+
+		// The agent asks the user for structured input (a form) or to visit a URL.
+		// We surface it and resolve when the user answers (or the agent completes it).
+		async unstable_createElicitation(params) {
+			const message = params.message;
+			if (params.mode === "url") {
+				const id = params.elicitationId;
+				emit({ type: "elicitation", id, mode: "url", message, fields: [], url: params.url });
+				return new Promise((resolve) => {
+					pendingElicits.set(id, (action, content) =>
+						resolve(elicitResponse(action, content)),
+					);
+				});
+			}
+			const id = crypto.randomUUID();
+			emit({
+				type: "elicitation",
+				id,
+				mode: "form",
+				message,
+				fields: normalizeSchema(params.requestedSchema),
+			});
+			return new Promise((resolve) => {
+				pendingElicits.set(id, (action, content) =>
+					resolve(elicitResponse(action, content)),
+				);
+			});
+		},
+
+		// URL-based elicitation finished on the agent's side — resolve if still open.
+		async unstable_completeElicitation(params) {
+			const id = (params as { elicitationId?: string }).elicitationId;
+			if (id) {
+				const r = pendingElicits.get(id);
+				if (r) {
+					pendingElicits.delete(id);
+					r("accept");
+				}
+				emit({ type: "elicitation_resolved", id });
+			}
+		},
+	};
+
+	async function init(): Promise<void> {
+		const env: NodeJS.ProcessEnv = {
+			...process.env,
+			PATH: AUGMENTED_PATH,
+			// Run the adapter's Node script under Electron acting as plain Node,
+			// so we don't depend on a system `node` being installed.
+			ELECTRON_RUN_AS_NODE: "1",
+			...spec.env(opts),
+		};
+
+		proc = spawn(process.execPath, [spec.entry()], {
+			cwd: opts.cwd,
+			stdio: ["pipe", "pipe", "pipe"],
+			env,
+		});
+		proc.on("error", (err) => {
+			if (closed) return;
+			emit({ type: "error", message: `Failed to launch ${opts.provider} adapter: ${err.message}` });
+		});
+		proc.stderr?.setEncoding("utf8");
+		proc.stderr?.on("data", (chunk: string) => {
+			const t = chunk.trim();
+			if (t) console.error(`[agentChatAcp:${opts.provider}] ${t}`);
+		});
+		proc.on("exit", (code) => {
+			if (closed) return;
+			const exitCode = code ?? 0;
+			if (code != null && code !== 0) {
+				emit({ type: "error", message: `${opts.provider} adapter exited with code ${code}` });
+			}
+			emit({ type: "exited", code: exitCode });
+		});
+
+		const input = Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>;
+		const output = Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>;
+		conn = new ClientSideConnection(() => clientImpl, ndJsonStream(input, output));
+
+		const initRes = await conn.initialize({
+			protocolVersion: PROTOCOL_VERSION,
+			clientCapabilities: {
+				fs: { readTextFile: false, writeTextFile: false },
+				// Advertise structured elicitation so the agent can ask the user for
+				// form input or send them to a URL.
+				elicitation: { form: {}, url: {} },
+			},
+		});
+
+		// Resume the agent's own context when we can (loadSession replays history
+		// silently so it doesn't duplicate the buffer we already restored).
+		const canLoad = !!initRes.agentCapabilities?.loadSession;
+		if (opts.resume && opts.acpResumeId && canLoad) {
+			try {
+				suppressReplay = true;
+				await conn.loadSession({
+					sessionId: opts.acpResumeId,
+					cwd: opts.cwd,
+					mcpServers: [],
+				});
+				sessionId = opts.acpResumeId;
+			} catch {
+				sessionId = null; // stale/expired — fall through to a fresh session
+			} finally {
+				suppressReplay = false;
+			}
+		}
+		if (!sessionId) {
+			const res = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
+			sessionId = res.sessionId;
+		}
+		// ACP doesn't report a resolved model id, and the picker already shows the
+		// chosen model — so don't emit an alias here (it would surface as a bogus
+		// "resolved model" chip next to the picker).
+		emit({ type: "system", sessionId, model: null });
+		readyResolve();
+	}
+
+	init().catch((err) => {
+		emit({ type: "error", message: `ACP init failed: ${err?.message ?? err}` });
+		readyResolve();
+	});
+
+	return {
+		send(text: string, attachments: ChatAttachment[] = []) {
+			ready
+				.then(() => {
+					if (closed || !conn || !sessionId) return;
+					return conn
+						.prompt({ sessionId, prompt: promptBlocks(text, attachments) })
+						.then((res) => {
+							emit({
+								type: "result",
+								ok: res.stopReason !== "refusal",
+								durationMs: null,
+							});
+						});
+				})
+				.catch((err) => {
+					// A restart/stop tears down the connection intentionally — the
+					// in-flight prompt rejects, but that's not a failure to report.
+					if (closed) return;
+					emit({ type: "error", message: `Send failed: ${err?.message ?? err}` });
+				});
+		},
+		respond(requestId: string, allow: boolean) {
+			const resolver = pendingPerms.get(requestId);
+			if (resolver) {
+				pendingPerms.delete(requestId);
+				resolver(allow);
+			}
+			emit({ type: "permission_resolved", id: requestId, allow });
+		},
+		resolveElicit(id, action, content) {
+			const r = pendingElicits.get(id);
+			if (r) {
+				pendingElicits.delete(id);
+				r(action, content);
+			}
+			emit({ type: "elicitation_resolved", id });
+		},
+		setPermissionMode(mode) {
+			permissionMode = mode;
+		},
+		cancel() {
+			// Cancel the current turn but keep the process/session alive so the user
+			// can keep chatting. The agent responds to the pending prompt with a
+			// "cancelled" stop reason, which resolves the turn normally.
+			if (conn && sessionId) conn.cancel({ sessionId }).catch(() => {});
+		},
+		stop() {
+			closed = true;
+			// Best-effort cancel the in-flight turn, then kill the adapter.
+			if (conn && sessionId) {
+				conn.cancel({ sessionId }).catch(() => {});
+			}
+			try {
+				proc?.kill();
+			} catch {
+				// already gone
+			}
+		},
+	};
+}

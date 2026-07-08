@@ -9,7 +9,7 @@ import {
 	useTerminals,
 	type TermSession,
 } from "../lib/terminalStore";
-import { useChatConfig } from "../lib/chatConfig";
+import { providerLabel, useChatConfig } from "../lib/chatConfig";
 import { bus } from "../rpc";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
@@ -66,6 +66,7 @@ export function SessionWorkspace({
 	}, [worktreeId]);
 
 	function startChat() {
+		const agent = providerLabel(config.defaultProvider);
 		openSession({
 			worktreeId,
 			projectId,
@@ -74,11 +75,12 @@ export function SessionWorkspace({
 			command: null,
 			resumeCommand: null,
 			sessionId: crypto.randomUUID(),
+			provider: config.defaultProvider,
 			permissionMode: config.defaultPermissionMode,
 			model: config.defaultModel,
-			agentLabel: "Claude",
+			agentLabel: agent,
 			name: "New chat",
-			title: `${label} · Claude`,
+			title: `${label} · ${agent}`,
 		});
 	}
 
@@ -181,6 +183,7 @@ export function SessionWorkspace({
 									dockId={s.id}
 									chatId={s.sessionId ?? s.id}
 									worktreeId={s.worktreeId}
+									provider={s.provider ?? "claude"}
 									resume={s.resume ?? false}
 									permissionMode={s.permissionMode ?? "default"}
 									model={s.model ?? null}

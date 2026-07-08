@@ -1,24 +1,45 @@
 import { useSyncExternalStore } from "react";
-import type { AgentPermissionMode } from "../../shared/types";
+import type { AgentPermissionMode, AgentProvider } from "../../shared/types";
 
 /**
- * Chat is driven by a provider (Claude today). The model and permission mode are
- * chosen inside the chat, not pre-baked as separate agents — this holds the
- * defaults new chats start with and the option lists the in-chat pickers show.
+ * Chat is driven by a provider (Claude or Codex) and a model, both switchable
+ * inside the chat. This holds the defaults new chats start with and the option
+ * lists the in-chat pickers show.
  */
 export type ChatConfig = {
-	/** Model alias; "default" means the provider's own default (no --model). */
+	defaultProvider: AgentProvider;
+	/** Model alias; "default" means the provider's own default (no override). */
 	defaultModel: string;
 	defaultPermissionMode: AgentPermissionMode;
 };
 
+type ModelOption = { value: string; label: string };
+
 // Concrete models the user picks from. Versions are best-effort labels (they
 // shift as new models ship); the chat also shows the model the agent actually
 // resolved to if it differs, which is the ground truth.
-export const CLAUDE_MODELS: { value: string; label: string }[] = [
+export const CLAUDE_MODELS: ModelOption[] = [
 	{ value: "opus", label: "Opus 4.8" },
 	{ value: "sonnet", label: "Sonnet 4.6" },
 	{ value: "haiku", label: "Haiku 4.5" },
+];
+
+// Codex model ids are best-effort; "default" lets Codex use its configured model.
+export const CODEX_MODELS: ModelOption[] = [
+	{ value: "default", label: "Default" },
+	{ value: "gpt-5-codex", label: "GPT-5 Codex" },
+];
+
+type ProviderSpec = {
+	value: AgentProvider;
+	label: string;
+	models: ModelOption[];
+	defaultModel: string;
+};
+
+export const PROVIDERS: ProviderSpec[] = [
+	{ value: "claude", label: "Claude", models: CLAUDE_MODELS, defaultModel: "opus" },
+	{ value: "codex", label: "Codex", models: CODEX_MODELS, defaultModel: "default" },
 ];
 
 export const PERMISSION_MODES: { value: AgentPermissionMode; label: string }[] = [
@@ -28,30 +49,85 @@ export const PERMISSION_MODES: { value: AgentPermissionMode; label: string }[] =
 	{ value: "bypassPermissions", label: "Bypass permissions" },
 ];
 
+function providerSpec(provider: AgentProvider): ProviderSpec {
+	return PROVIDERS.find((p) => p.value === provider) ?? PROVIDERS[0];
+}
+
+/** Models available for a provider. */
+export function modelsFor(provider: AgentProvider): ModelOption[] {
+	return providerSpec(provider).models;
+}
+
+/** Human label for a provider. */
+export function providerLabel(provider: AgentProvider): string {
+	return providerSpec(provider).label;
+}
+
 /** Convert a model-picker value into the launch argument (null = provider default). */
 export function modelArg(model: string | null | undefined): string | null {
 	return !model || model === "default" ? null : model;
 }
 
-/** Label for a model value (falls back to the raw value). */
-export function modelLabel(model: string | null | undefined): string {
+/** Label for a model value within a provider (falls back to the raw value). */
+export function modelLabel(provider: AgentProvider, model: string | null | undefined): string {
 	const v = model || "default";
-	return CLAUDE_MODELS.find((m) => m.value === v)?.label ?? v;
+	return modelsFor(provider).find((m) => m.value === v)?.label ?? v;
 }
 
-const DEFAULTS: ChatConfig = { defaultModel: "opus", defaultPermissionMode: "default" };
+/** Coerce an unknown/legacy model value to one valid for the provider. */
+export function coerceModel(provider: AgentProvider, model: string | null | undefined): string {
+	const spec = providerSpec(provider);
+	return spec.models.some((m) => m.value === model) ? (model as string) : spec.defaultModel;
+}
+
+/** Coerce an unknown provider value to a supported one. */
+export function coerceProvider(provider: string | null | undefined): AgentProvider {
+	return PROVIDERS.some((p) => p.value === provider)
+		? (provider as AgentProvider)
+		: PROVIDERS[0].value;
+}
+
+// --- combined provider·model picker (single clickable control) ---
+
+/** Compose a provider+model into one picker value. */
+export function composeChoice(provider: AgentProvider, model: string): string {
+	return `${provider}:${model}`;
+}
+
+/** Parse a combined picker value back into provider + model. */
+export function parseChoice(value: string): { provider: AgentProvider; model: string } {
+	const [p, ...rest] = value.split(":");
+	const provider = coerceProvider(p);
+	return { provider, model: coerceModel(provider, rest.join(":")) };
+}
+
+/** Flat option list for the combined provider·model control. */
+export function choiceOptions(): { value: string; label: string }[] {
+	return PROVIDERS.flatMap((p) =>
+		p.models.map((m) => ({
+			value: composeChoice(p.value, m.value),
+			label: `${p.label} · ${m.label}`,
+		})),
+	);
+}
+
+const DEFAULTS: ChatConfig = {
+	defaultProvider: "claude",
+	defaultModel: "opus",
+	defaultPermissionMode: "default",
+};
 const KEY = "forest-ranger:chat-config";
-
-/** Coerce an unknown/legacy model value (e.g. the old opaque "default") to a real one. */
-export function coerceModel(model: string | null | undefined): string {
-	return CLAUDE_MODELS.some((m) => m.value === model) ? (model as string) : DEFAULTS.defaultModel;
-}
 
 function read(): ChatConfig {
 	try {
 		const raw = localStorage.getItem(KEY);
 		const cfg = raw ? { ...DEFAULTS, ...JSON.parse(raw) } : DEFAULTS;
-		return { ...cfg, defaultModel: coerceModel(cfg.defaultModel) };
+		const defaultProvider = coerceProvider(cfg.defaultProvider);
+		return {
+			...cfg,
+			defaultProvider,
+			defaultModel: coerceModel(defaultProvider, cfg.defaultModel),
+		};
 	} catch {
 		return DEFAULTS;
 	}

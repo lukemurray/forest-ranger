@@ -29,6 +29,9 @@ import {
 import {
 	killAll as agentChatKillAll,
 	respondPermission as agentChatRespond,
+	resolveElicit as agentChatElicit,
+	setPermissionMode as agentChatSetMode,
+	cancel as agentChatCancel,
 	restart as agentChatRestart,
 	send as agentChatSend,
 	setAgentChatCallback,
@@ -611,12 +614,13 @@ const handlers: RpcHandlers = {
 				return { ok: true };
 			},
 
-			agentChatStart: ({ sessionId, worktreeId, resume, permissionMode, model }) => {
+			agentChatStart: ({ sessionId, worktreeId, provider, resume, permissionMode, model }) => {
 				const row = worktreesRepo.get(worktreeId);
 				if (!row) return { ok: false, error: "Worktree not found" };
 				const ok = agentChatStart({
 					sessionId,
 					cwd: row.path,
+					provider,
 					resume,
 					permissionMode,
 					model,
@@ -624,10 +628,17 @@ const handlers: RpcHandlers = {
 				return ok ? { ok: true } : { ok: false, error: "Session already running" };
 			},
 
-			agentChatRestart: ({ sessionId, worktreeId, permissionMode, model }) => {
+			agentChatRestart: ({ sessionId, worktreeId, provider, permissionMode, model }) => {
 				const row = worktreesRepo.get(worktreeId);
 				if (!row) return { ok: false, error: "Worktree not found" };
-				agentChatRestart({ sessionId, cwd: row.path, resume: true, permissionMode, model });
+				agentChatRestart({
+					sessionId,
+					cwd: row.path,
+					provider,
+					resume: true,
+					permissionMode,
+					model,
+				});
 				return { ok: true };
 			},
 };
@@ -649,6 +660,15 @@ function dispatchMessage(msg: ViewMessage): void {
 			break;
 		case "agentChatPermission":
 			agentChatRespond(msg.sessionId, msg.requestId, msg.allow);
+			break;
+		case "agentChatElicit":
+			agentChatElicit(msg.sessionId, msg.id, msg.action, msg.content);
+			break;
+		case "agentChatSetMode":
+			agentChatSetMode(msg.sessionId, msg.permissionMode);
+			break;
+		case "agentChatCancel":
+			agentChatCancel(msg.sessionId);
 			break;
 		case "agentChatStop":
 			agentChatStop(msg.sessionId);

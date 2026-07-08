@@ -2,11 +2,24 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
 	AgentChatEvent,
 	AgentPermissionMode,
+	AgentProvider,
 	ChatAttachment,
+	ElicitationField,
+	ElicitationValue,
 } from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
 import { markExited, updateSession } from "../lib/terminalStore";
-import { CLAUDE_MODELS, PERMISSION_MODES, coerceModel, modelArg } from "../lib/chatConfig";
+import {
+	PERMISSION_MODES,
+	choiceOptions,
+	coerceModel,
+	coerceProvider,
+	composeChoice,
+	modelArg,
+	modelLabel,
+	parseChoice,
+	providerLabel,
+} from "../lib/chatConfig";
 import { Select } from "./ui/Select";
 import { Markdown } from "./Markdown";
 import { CloseIcon, PlusIcon, SparkleIcon } from "./icons";
@@ -42,6 +55,15 @@ type ChatItem =
 			input: unknown;
 			decided: "allow" | "deny" | null;
 	  }
+	| {
+			kind: "elicitation";
+			id: string;
+			mode: "form" | "url";
+			message: string;
+			fields: ElicitationField[];
+			url?: string;
+			done: boolean;
+	  }
 	| { kind: "error"; text: string };
 
 type Status = "starting" | "idle" | "working" | "ended";
@@ -55,6 +77,7 @@ export function ChatPane({
 	dockId,
 	chatId,
 	worktreeId,
+	provider,
 	resume,
 	permissionMode,
 	model,
@@ -64,6 +87,7 @@ export function ChatPane({
 	dockId: string;
 	chatId: string;
 	worktreeId: string;
+	provider: AgentProvider;
 	resume: boolean;
 	permissionMode: AgentPermissionMode;
 	model: string | null;
@@ -72,15 +96,19 @@ export function ChatPane({
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
 	const [status, setStatus] = useState<Status>("starting");
-	const [modelValue, setModelValue] = useState(() => coerceModel(model));
+	const [providerValue, setProviderValue] = useState(() => coerceProvider(provider));
+	const [modelValue, setModelValue] = useState(() =>
+		coerceModel(coerceProvider(provider), model),
+	);
 	const [mode, setMode] = useState<AgentPermissionMode>(permissionMode);
 	const [input, setInput] = useState("");
 	const [queue, setQueue] = useState<Outgoing[]>([]);
-	const [resolvedModel, setResolvedModel] = useState<string | null>(null);
 	const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
 	const [viewing, setViewing] = useState<string | null>(null);
 	const [dragOver, setDragOver] = useState(false);
 	const dragDepth = useRef(0);
+	// A provider/model switch requested mid-turn, applied once the turn ends.
+	const pendingRelaunch = useRef<{ provider: AgentProvider; model: string } | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -92,14 +120,12 @@ export function ChatPane({
 	useEffect(() => {
 		setItems([]);
 		setStatus("starting");
-		setResolvedModel(null);
 		setAttachments([]);
 		setQueue([]);
 
 		function apply(event: AgentChatEvent) {
 			switch (event.type) {
 				case "system":
-					if (event.model) setResolvedModel(event.model);
 					setStatus((s) => (s === "starting" || s === "ended" ? "idle" : s));
 					break;
 				case "user_text":
@@ -160,6 +186,28 @@ export function ChatPane({
 						),
 					);
 					break;
+				case "elicitation":
+					setStatus("working");
+					setItems((it) => [
+						...it,
+						{
+							kind: "elicitation",
+							id: event.id,
+							mode: event.mode,
+							message: event.message,
+							fields: event.fields,
+							url: event.url,
+							done: false,
+						},
+					]);
+					break;
+				case "elicitation_resolved":
+					setItems((it) =>
+						it.map((x) =>
+							x.kind === "elicitation" && x.id === event.id ? { ...x, done: true } : x,
+						),
+					);
+					break;
 				case "result":
 					setStatus("idle");
 					break;
@@ -179,9 +227,10 @@ export function ChatPane({
 			.agentChatStart({
 				sessionId: chatId,
 				worktreeId,
+				provider: coerceProvider(provider),
 				resume,
 				permissionMode,
-				model: modelArg(coerceModel(model)),
+				model: modelArg(coerceModel(coerceProvider(provider), model)),
 			})
 			.then((res) => {
 				if (!res.ok) {
@@ -212,26 +261,48 @@ export function ChatPane({
 		el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
 	}, [input]);
 
-	// Switch model/mode mid-conversation: persist on the tab and relaunch with
-	// --resume so context carries over.
-	function applyModelMode(nextModel: string, nextMode: AgentPermissionMode) {
-		updateSession(dockId, { model: nextModel, permissionMode: nextMode });
+	// Provider/model need a fresh agent process, so switching them relaunches
+	// (resuming the session so context carries over). We never relaunch mid-turn —
+	// see the deferral below — so a running task is never interrupted.
+	function relaunch(nextProvider: AgentProvider, nextModel: string) {
 		setStatus("idle");
 		api.agentChatRestart({
 			sessionId: chatId,
 			worktreeId,
-			permissionMode: nextMode,
+			provider: nextProvider,
+			permissionMode: mode,
 			model: modelArg(nextModel),
 		});
 	}
-	function changeModel(v: string) {
-		setModelValue(v);
-		applyModelMode(v, mode);
+	function changeChoice(value: string) {
+		const { provider: p, model: m } = parseChoice(value);
+		if (p === providerValue && m === modelValue) return;
+		setProviderValue(p);
+		setModelValue(m);
+		updateSession(dockId, { provider: p, model: m });
+		// Don't cut off a streaming reply: if a turn is in flight, apply on the
+		// next idle (the current task finishes on the old model, the next uses the
+		// new one). Otherwise relaunch now.
+		if (status === "working") pendingRelaunch.current = { provider: p, model: m };
+		else relaunch(p, m);
 	}
 	function changeMode(v: AgentPermissionMode) {
 		setMode(v);
-		applyModelMode(modelValue, v);
+		updateSession(dockId, { permissionMode: v });
+		// Permission mode is enforced client-side in the driver — change it live,
+		// no relaunch, no interruption of the current turn.
+		bus.agentChatSetMode({ sessionId: chatId, permissionMode: v });
 	}
+
+	// Apply a deferred provider/model switch once the in-flight turn completes.
+	useEffect(() => {
+		if (status === "idle" && pendingRelaunch.current) {
+			const { provider: p, model: m } = pendingRelaunch.current;
+			pendingRelaunch.current = null;
+			relaunch(p, m);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [status]);
 
 	function addFiles(files: FileList | File[]) {
 		for (const file of Array.from(files)) {
@@ -324,10 +395,11 @@ export function ChatPane({
 	}, [status, queue, chatId]);
 
 	function stop() {
-		bus.agentChatStop({ sessionId: chatId });
+		// Cancel the running turn but keep the session alive so the user can keep
+		// chatting (the agent resolves the turn with a "cancelled" stop reason).
+		bus.agentChatCancel({ sessionId: chatId });
 		setQueue([]);
-		markExited(dockId);
-		setStatus("ended");
+		setStatus("idle");
 	}
 	function respondPermission(requestId: string, allow: boolean) {
 		bus.agentChatPermission({ sessionId: chatId, requestId, allow });
@@ -337,6 +409,16 @@ export function ChatPane({
 					? { ...x, decided: allow ? "allow" : "deny" }
 					: x,
 			),
+		);
+	}
+	function submitElicit(
+		id: string,
+		action: "accept" | "decline" | "cancel",
+		content?: Record<string, ElicitationValue>,
+	) {
+		bus.agentChatElicit({ sessionId: chatId, id, action, content });
+		setItems((it) =>
+			it.map((x) => (x.kind === "elicitation" && x.id === id ? { ...x, done: true } : x)),
 		);
 	}
 	function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -350,8 +432,6 @@ export function ChatPane({
 	const working = status === "working";
 	// Surface the resolved model only when it disagrees with the picked label
 	// (e.g. a stale version label) — otherwise the picker already shows it.
-	const pickedLabel = CLAUDE_MODELS.find((m) => m.value === modelValue)?.label;
-	const showResolved = !!resolvedModel && friendlyModel(resolvedModel) !== pickedLabel;
 	// With nothing to send while working, the button stops the turn; otherwise it
 	// sends (queuing if a turn is in flight).
 	const showStop = working && !hasContent;
@@ -376,7 +456,12 @@ export function ChatPane({
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
 				{items.map((item, i) => (
-					<ChatRow key={i} item={item} onPermission={respondPermission} />
+					<ChatRow
+						key={i}
+						item={item}
+						onPermission={respondPermission}
+						onElicit={submitElicit}
+					/>
 				))}
 				{queue.map((q, i) => (
 					<div key={`q${i}`} className={styles.user} data-queued>
@@ -425,7 +510,11 @@ export function ChatPane({
 					onChange={(e) => setInput(e.target.value)}
 					onKeyDown={onKeyDown}
 					onPaste={onPaste}
-					placeholder={status === "ended" ? "Session ended" : "Message Claude…  (Enter to send, paste images)"}
+					placeholder={
+						status === "ended"
+							? "Session ended"
+							: `Message ${providerLabel(providerValue)}…  (Enter to send, paste images)`
+					}
 					disabled={status === "ended"}
 					rows={1}
 					spellCheck={false}
@@ -452,23 +541,24 @@ export function ChatPane({
 					/>
 					<div className={styles.composerSelect}>
 						<Select
-							value={modelValue}
-							onValueChange={changeModel}
-							options={CLAUDE_MODELS}
+							value={composeChoice(providerValue, modelValue)}
+							onValueChange={changeChoice}
+							options={choiceOptions()}
 							ariaLabel="Provider and model"
 							leading={
 								<span className={styles.provider} data-working={working || undefined}>
 									<SparkleIcon size={13} />
-									{agentLabel ?? "Claude"}
+									{agentLabel ?? providerLabel(providerValue)}
 								</span>
 							}
+							// The provider is already shown in the leading label, so the
+							// trigger only needs the model (dropdown items keep the prefix).
+							renderValue={(v) => {
+								const { provider: p, model: m } = parseChoice(v);
+								return modelLabel(p, m);
+							}}
 						/>
 					</div>
-					{showResolved && (
-						<span className={styles.resolvedModel} title={resolvedModel ?? undefined}>
-							{friendlyModel(resolvedModel as string)}
-						</span>
-					)}
 					<div className={styles.composerSelectWide}>
 						<Select value={mode} onValueChange={changeMode} options={PERMISSION_MODES} ariaLabel="Permission mode" />
 					</div>
@@ -493,13 +583,6 @@ export function ChatPane({
 	);
 }
 
-/** Turn a resolved model id (claude-opus-4-8-…) into a friendly label (Opus 4.8). */
-function friendlyModel(id: string): string {
-	const m = /claude-(opus|sonnet|haiku)-(\d+)-(\d+)/.exec(id);
-	if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
-	return id.replace(/^claude-/, "");
-}
-
 /** A short tab name derived from the first user message. */
 function deriveName(text: string): string {
 	const line = text.replace(/\s+/g, " ").trim();
@@ -517,9 +600,15 @@ function mergeText(items: ChatItem[], kind: "assistant" | "thinking", text: stri
 function ChatRow({
 	item,
 	onPermission,
+	onElicit,
 }: {
 	item: ChatItem;
 	onPermission: (id: string, allow: boolean) => void;
+	onElicit: (
+		id: string,
+		action: "accept" | "decline" | "cancel",
+		content?: Record<string, ElicitationValue>,
+	) => void;
 }) {
 	if (item.kind === "user") {
 		return (
@@ -557,6 +646,9 @@ function ChatRow({
 	if (item.kind === "error") {
 		return <div className={styles.error}>{item.text}</div>;
 	}
+	if (item.kind === "elicitation") {
+		return <ElicitationCard item={item} onElicit={onElicit} />;
+	}
 	if (item.kind === "permission") {
 		return (
 			<div className={styles.permission} data-decided={item.decided ?? undefined}>
@@ -587,12 +679,205 @@ function ChatRow({
 			</div>
 		);
 	}
+	// With output, the tool is an expandable disclosure: a one-line header with the
+	// full result rendered as Markdown inside. Without output (still running), just
+	// the header.
+	if (!item.summary) {
+		return (
+			<div className={styles.tool} data-status={item.status}>
+				<div className={styles.toolHeader}>
+					<span className={styles.toolDot} />
+					<span className={styles.toolName}>{item.name}</span>
+				</div>
+			</div>
+		);
+	}
 	return (
-		<div className={styles.tool} data-status={item.status} title={item.summary}>
-			<span className={styles.toolDot} />
-			<span className={styles.toolName}>{item.name}</span>
-			{item.summary && <span className={styles.toolSummary}>{item.summary}</span>}
+		<details className={styles.tool} data-status={item.status}>
+			<summary className={styles.toolHeader}>
+				<span className={styles.toolDot} />
+				<span className={styles.toolName}>{item.name}</span>
+				<span className={styles.toolSummary}>{toolPreview(item.summary)}</span>
+			</summary>
+			<div className={styles.toolBody}>
+				<Markdown text={item.summary} />
+			</div>
+		</details>
+	);
+}
+
+/** First meaningful line of tool output, for the collapsed header. */
+function toolPreview(s: string): string {
+	const line =
+		s
+			.split("\n")
+			.map((l) => l.trim())
+			.find((l) => l && !l.startsWith("```")) ?? "";
+	return line.length > 100 ? `${line.slice(0, 100)}…` : line;
+}
+
+/** A structured elicitation from the agent: a form to fill in, or a URL to open. */
+function ElicitationCard({
+	item,
+	onElicit,
+}: {
+	item: Extract<ChatItem, { kind: "elicitation" }>;
+	onElicit: (
+		id: string,
+		action: "accept" | "decline" | "cancel",
+		content?: Record<string, ElicitationValue>,
+	) => void;
+}) {
+	const [values, setValues] = useState<Record<string, ElicitationValue>>(() => {
+		const init: Record<string, ElicitationValue> = {};
+		for (const f of item.fields) {
+			if (f.default !== undefined) init[f.key] = f.default;
+			else if (f.input === "boolean") init[f.key] = false;
+			else if (f.input === "multiselect") init[f.key] = [];
+			else init[f.key] = "";
+		}
+		return init;
+	});
+	const set = (key: string, v: ElicitationValue) =>
+		setValues((s) => ({ ...s, [key]: v }));
+
+	if (item.mode === "url") {
+		return (
+			<div className={styles.elicit} data-done={item.done || undefined}>
+				<div className={styles.elicitMsg}>{item.message}</div>
+				{item.done ? (
+					<div className={styles.permDecided}>Done</div>
+				) : (
+					<div className={styles.elicitActions}>
+						<button
+							className={styles.permAllow}
+							onClick={() => item.url && api.openUrl({ url: item.url })}
+						>
+							Open link
+						</button>
+						<button className={styles.permDeny} onClick={() => onElicit(item.id, "cancel")}>
+							Dismiss
+						</button>
+					</div>
+				)}
+			</div>
+		);
+	}
+
+	return (
+		<div className={styles.elicit} data-done={item.done || undefined}>
+			<div className={styles.elicitMsg}>{item.message}</div>
+			<div className={styles.elicitFields}>
+				{item.fields.map((f) => (
+					<label key={f.key} className={styles.elicitField}>
+						<span className={styles.elicitFieldLabel}>
+							{f.label}
+							{f.required && <span className={styles.elicitReq}> *</span>}
+						</span>
+						{f.description && <span className={styles.elicitDesc}>{f.description}</span>}
+						<ElicitationInput
+							field={f}
+							value={values[f.key]}
+							disabled={item.done}
+							onChange={(v) => set(f.key, v)}
+						/>
+					</label>
+				))}
+			</div>
+			{item.done ? (
+				<div className={styles.permDecided}>Submitted</div>
+			) : (
+				<div className={styles.elicitActions}>
+					<button
+						className={styles.permAllow}
+						onClick={() => onElicit(item.id, "accept", values)}
+					>
+						Submit
+					</button>
+					<button className={styles.permDeny} onClick={() => onElicit(item.id, "decline")}>
+						Decline
+					</button>
+				</div>
+			)}
 		</div>
+	);
+}
+
+function ElicitationInput({
+	field,
+	value,
+	disabled,
+	onChange,
+}: {
+	field: ElicitationField;
+	value: ElicitationValue | undefined;
+	disabled: boolean;
+	onChange: (v: ElicitationValue) => void;
+}) {
+	if (field.input === "boolean") {
+		return (
+			<input
+				type="checkbox"
+				className={styles.elicitCheckbox}
+				checked={value === true}
+				disabled={disabled}
+				onChange={(e) => onChange(e.target.checked)}
+			/>
+		);
+	}
+	if (field.input === "select") {
+		return (
+			<select
+				className={styles.elicitSelect}
+				disabled={disabled}
+				value={typeof value === "string" ? value : ""}
+				onChange={(e) => onChange(e.target.value)}
+			>
+				<option value="" disabled>
+					Choose…
+				</option>
+				{field.options?.map((o) => (
+					<option key={o.value} value={o.value}>
+						{o.label}
+					</option>
+				))}
+			</select>
+		);
+	}
+	if (field.input === "multiselect") {
+		const arr = Array.isArray(value) ? value : [];
+		return (
+			<div className={styles.elicitChecks}>
+				{field.options?.map((o) => (
+					<label key={o.value} className={styles.elicitCheck}>
+						<input
+							type="checkbox"
+							disabled={disabled}
+							checked={arr.includes(o.value)}
+							onChange={(e) =>
+								onChange(
+									e.target.checked ? [...arr, o.value] : arr.filter((x) => x !== o.value),
+								)
+							}
+						/>
+						{o.label}
+					</label>
+				))}
+			</div>
+		);
+	}
+	const isNum = field.input === "number" || field.input === "integer";
+	return (
+		<input
+			className={styles.elicitInput}
+			type={isNum ? "number" : "text"}
+			step={field.input === "integer" ? 1 : undefined}
+			disabled={disabled}
+			value={typeof value === "string" || typeof value === "number" ? String(value) : ""}
+			onChange={(e) =>
+				onChange(isNum ? (e.target.value === "" ? "" : Number(e.target.value)) : e.target.value)
+			}
+		/>
 	);
 }
 

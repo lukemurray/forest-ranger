@@ -4,7 +4,10 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
 	main: {
-		plugins: [externalizeDepsPlugin()],
+		// The ACP SDK is ESM-only; bundle it into the CJS main output rather than
+		// externalizing it (a CJS `require` of an ESM-only package fails at runtime).
+		// The Claude adapter stays external — it's spawned as a subprocess, never imported.
+		plugins: [externalizeDepsPlugin({ exclude: ["@agentclientprotocol/sdk"] })],
 		build: {
 			outDir: "out/main",
 			lib: { entry: resolve(__dirname, "src/main/index.ts") },

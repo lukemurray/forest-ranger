@@ -1,0 +1,9 @@
+.DS_Store
+
+src/node_modules/
+src/build/
+src/dist/
+src/artifacts/
+src/*.tsbuildinfo
+src/out/
+src/release/

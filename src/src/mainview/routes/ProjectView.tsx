@@ -17,7 +17,7 @@ import {
 } from "../components/icons";
 import { api, emitDataChanged } from "../rpc";
 import { openSession } from "../lib/terminalStore";
-import { getChatConfig } from "../lib/chatConfig";
+import { getChatConfig, providerLabel } from "../lib/chatConfig";
 import tb from "../components/Titlebar.module.css";
 import styles from "./Page.module.css";
 
@@ -41,6 +41,7 @@ export function ProjectView() {
 		});
 		if (startChat) {
 			const config = getChatConfig();
+			const agent = providerLabel(config.defaultProvider);
 			openSession({
 				worktreeId,
 				projectId,
@@ -49,11 +50,12 @@ export function ProjectView() {
 				command: null,
 				resumeCommand: null,
 				sessionId: crypto.randomUUID(),
+				provider: config.defaultProvider,
 				permissionMode: config.defaultPermissionMode,
 				model: config.defaultModel,
-				agentLabel: "Claude",
+				agentLabel: agent,
 				name: "New chat",
-				title: "Claude",
+				title: agent,
 			});
 		}
 	}

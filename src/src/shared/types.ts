@@ -106,6 +106,21 @@ export type FileDiff = { path: string; binary: boolean; diff: string };
 /** A file/image the user attaches to a chat message (data is base64, no prefix). */
 export type ChatAttachment = { name: string; mediaType: string; data: string };
 
+/** One field in a structured elicitation form (normalized from ACP's schema). */
+export type ElicitationField = {
+	key: string;
+	label: string;
+	description?: string;
+	required: boolean;
+	input: "text" | "number" | "integer" | "boolean" | "select" | "multiselect";
+	/** For select/multiselect. */
+	options?: { value: string; label: string }[];
+	default?: string | number | boolean | string[];
+};
+
+/** A value the user provides for an elicitation field. */
+export type ElicitationValue = string | number | boolean | string[];
+
 export type AgentChatEvent =
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
@@ -125,6 +140,17 @@ export type AgentChatEvent =
 	| { type: "permission"; id: string; toolName: string; input: unknown }
 	/** A pending permission request was answered (for replay/UI state). */
 	| { type: "permission_resolved"; id: string; allow: boolean }
+	/** The agent is asking the user for structured input (a form) or to visit a URL. */
+	| {
+			type: "elicitation";
+			id: string;
+			mode: "form" | "url";
+			message: string;
+			fields: ElicitationField[];
+			url?: string;
+	  }
+	/** A pending elicitation was answered/dismissed (for replay/UI state). */
+	| { type: "elicitation_resolved"; id: string }
 	/** Something went wrong (spawn failure, bad output, process died). */
 	| { type: "error"; message: string }
 	/** The underlying process exited; the session is no longer running. */
@@ -136,6 +162,9 @@ export type AgentPermissionMode =
 	| "acceptEdits"
 	| "plan"
 	| "bypassPermissions";
+
+/** Which agent backend drives a chat (each maps to an ACP adapter). */
+export type AgentProvider = "claude" | "codex";
 
 /** Apps a worktree can be opened in. */
 export type AppId =
@@ -399,6 +428,8 @@ export type RpcRequests = {
 				params: {
 					sessionId: string;
 					worktreeId: string;
+					/** Which agent backend drives this chat. */
+					provider: AgentProvider;
 					/** Resume the prior conversation under this session id. */
 					resume: boolean;
 					permissionMode: AgentPermissionMode;
@@ -415,6 +446,7 @@ export type RpcRequests = {
 				params: {
 					sessionId: string;
 					worktreeId: string;
+					provider: AgentProvider;
 					permissionMode: AgentPermissionMode;
 					model: string | null;
 				};
@@ -432,7 +464,19 @@ export type ViewMessage =
 	| { type: "agentChatSend"; sessionId: string; text: string; attachments?: ChatAttachment[] }
 	/** Answer a pending tool-permission request (allow or deny). */
 	| { type: "agentChatPermission"; sessionId: string; requestId: string; allow: boolean }
-	/** Stop (kill) a chat agent session. */
+	/** Answer a pending elicitation (submit form values, decline, or cancel). */
+	| {
+			type: "agentChatElicit";
+			sessionId: string;
+			id: string;
+			action: "accept" | "decline" | "cancel";
+			content?: Record<string, ElicitationValue>;
+	  }
+	/** Change a live session's permission mode without relaunching the agent. */
+	| { type: "agentChatSetMode"; sessionId: string; permissionMode: AgentPermissionMode }
+	/** Cancel the in-flight turn but keep the session alive (the Stop button). */
+	| { type: "agentChatCancel"; sessionId: string }
+	/** Stop (kill) a chat agent session. History on disk is preserved for reopen. */
 	| { type: "agentChatStop"; sessionId: string };
 
 /** Push events from the main process to the renderer. */

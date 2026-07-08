@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { AgentPermissionMode } from "../../shared/types";
+import type { AgentPermissionMode, AgentProvider } from "../../shared/types";
 
 export type TermSession = {
 	id: string;
@@ -17,6 +17,8 @@ export type TermSession = {
 	sessionId: string | null;
 	/** chat only: resume the prior conversation by sessionId rather than start fresh. */
 	resume?: boolean;
+	/** chat only: which agent backend drives this chat. */
+	provider?: AgentProvider;
 	/** chat only: tool-permission mode to launch the agent with. */
 	permissionMode?: AgentPermissionMode;
 	/** chat only: model alias to launch with (null = agent default). */
@@ -44,6 +46,7 @@ export type RestorableSession = Pick<
 	| "command"
 	| "resumeCommand"
 	| "sessionId"
+	| "provider"
 	| "permissionMode"
 	| "model"
 	| "agentLabel"
@@ -107,6 +110,7 @@ function persist() {
 		command: s.command,
 		resumeCommand: s.resumeCommand,
 		sessionId: s.sessionId,
+		provider: s.provider,
 		permissionMode: s.permissionMode,
 		model: s.model,
 		agentLabel: s.agentLabel,
@@ -139,6 +143,7 @@ export function reopenSessions(items: RestorableSession[]) {
 				resumeCommand: null,
 				sessionId: it.sessionId,
 				resume: !!it.sessionId,
+				provider: it.provider,
 				permissionMode: it.permissionMode,
 				model: it.model ?? null,
 				agentLabel: it.agentLabel,

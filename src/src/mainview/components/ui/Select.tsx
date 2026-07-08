@@ -11,6 +11,7 @@ export function Select<T extends string>({
 	ariaLabel,
 	className,
 	leading,
+	renderValue,
 }: {
 	value: T;
 	onValueChange: (value: T) => void;
@@ -19,6 +20,8 @@ export function Select<T extends string>({
 	className?: string;
 	/** Optional content rendered inside the trigger, before the selected value. */
 	leading?: ReactNode;
+	/** Customize the selected value shown in the trigger (list items are unaffected). */
+	renderValue?: (value: T) => ReactNode;
 }) {
 	const items = Object.fromEntries(options.map((o) => [o.value, o.label]));
 	return (
@@ -32,7 +35,11 @@ export function Select<T extends string>({
 				aria-label={ariaLabel}
 			>
 				{leading}
-				<BaseSelect.Value />
+				{renderValue ? (
+					<BaseSelect.Value>{(v: T) => renderValue(v)}</BaseSelect.Value>
+				) : (
+					<BaseSelect.Value />
+				)}
 				<BaseSelect.Icon className={styles.icon}>
 					<ChevronUpDownIcon size={14} />
 				</BaseSelect.Icon>
