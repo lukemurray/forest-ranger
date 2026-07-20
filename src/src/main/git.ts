@@ -93,6 +93,28 @@ function git(
 	});
 }
 
+/** The most recent commits on `ref` (newest first): short hash, subject, relative time. */
+export async function recentCommits(
+	repoPath: string,
+	ref: string,
+	limit: number,
+): Promise<{ hash: string; subject: string; author: string; relative: string }[]> {
+	const res = await git(repoPath, [
+		"log",
+		`-n${limit}`,
+		"--format=%h%x00%s%x00%an%x00%cr",
+		ref,
+	]);
+	if (!res.ok) return [];
+	return res.stdout
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			const [hash, subject, author, relative] = line.split("\0");
+			return { hash, subject, author, relative };
+		});
+}
+
 /** Returns the git version string, or null if the git binary can't be run. */
 export async function gitVersion(): Promise<string | null> {
 	const res = await git(process.cwd(), ["--version"]);
@@ -693,6 +715,15 @@ export function parseRemote(url: string): { host: string; path: string } | null 
 }
 
 /** Force-delete a local branch. */
+export async function renameBranch(
+	repoPath: string,
+	from: string,
+	to: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const r = await git(repoPath, ["branch", "-m", from, to]);
+	return r.ok ? { ok: true } : { ok: false, error: r.stderr.trim() || "rename failed" };
+}
+
 export async function deleteBranch(
 	repoPath: string,
 	branch: string,

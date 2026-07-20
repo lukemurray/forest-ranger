@@ -212,11 +212,18 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 	let closed = false;
 	// Mutable so the UI can change it live (client-side enforcement) without a relaunch.
 	let permissionMode = opts.permissionMode;
+	// Agent-advertised session modes, retained so current_mode_update (which carries
+	// only the new id) can re-emit the full list.
+	let availableModes: { id: string; name: string; description?: string }[] = [];
 	// While true, swallow session updates (used during loadSession's history
 	// replay so we don't duplicate the buffer we already restored from disk).
 	let suppressReplay = false;
-	// Resolvers for permission requests we've surfaced to the UI, keyed by id.
-	const pendingPerms = new Map<string, (allow: boolean) => void>();
+	// Pending permission requests surfaced to the UI, keyed by id. `labels` maps
+	// optionId → human label so a resolved request can show what was chosen.
+	const pendingPerms = new Map<
+		string,
+		{ resolve: (optionId: string | null) => void; labels: Record<string, string> }
+	>();
 	// Resolvers for structured elicitations awaiting the user's answer, keyed by id.
 	const pendingElicits = new Map<
 		string,
@@ -229,42 +236,71 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		readyResolve = r;
 	});
 
+	// Normalize the agent's ACP config options (model/mode/effort/…) for the UI.
+	// Only "select" options are surfaced (the Claude adapter uses select for all).
+	type AcpConfigOption = {
+		type?: string;
+		id: string;
+		name: string;
+		category?: string | null;
+		currentValue: string;
+		options: { value: string; name: string; description?: string | null }[];
+	};
+	const emitConfig = (opts: readonly unknown[] | null | undefined) => {
+		if (!opts) return;
+		const mapped = (opts as AcpConfigOption[])
+			.filter((o) => o.type === "select")
+			.map((o) => ({
+				id: o.id,
+				name: o.name,
+				category: o.category ?? undefined,
+				currentValue: o.currentValue,
+				options: o.options.map((v) => ({
+					value: v.value,
+					label: v.name,
+					description: v.description ?? undefined,
+				})),
+			}));
+		emit({ type: "configOptions", options: mapped });
+	};
+
 	const clientImpl: Client = {
 		async requestPermission(params) {
 			const options = params.options ?? [];
 			const allow =
 				options.find((o) => o.kind === "allow_once") ??
 				options.find((o) => o.kind === "allow_always");
-			const reject =
-				options.find((o) => o.kind === "reject_once") ??
-				options.find((o) => o.kind === "reject_always");
 
-			const decide = (yes: boolean) =>
-				yes && allow
-					? { outcome: { outcome: "selected" as const, optionId: allow.optionId } }
-					: !yes && reject
-						? { outcome: { outcome: "selected" as const, optionId: reject.optionId } }
-						: { outcome: { outcome: "cancelled" as const } };
-
-			// Honor auto-permission modes without bothering the user.
-			if (permissionMode === "bypassPermissions") return decide(true);
-			if (
-				permissionMode === "acceptEdits" &&
-				params.toolCall?.kind &&
-				["edit", "delete", "move"].includes(params.toolCall.kind)
-			) {
-				return decide(true);
+			// Auto-permission modes resolve without bothering the user.
+			const autoAllow =
+				permissionMode === "bypassPermissions" ||
+				(permissionMode === "acceptEdits" &&
+					!!params.toolCall?.kind &&
+					["edit", "delete", "move"].includes(params.toolCall.kind));
+			if (autoAllow && allow) {
+				return { outcome: { outcome: "selected" as const, optionId: allow.optionId } };
 			}
 
+			// Surface every option the agent offered (Yes / Yes & always / No / …) and
+			// resolve with whichever the user picks.
 			const id = String(params.toolCall?.toolCallId ?? crypto.randomUUID());
 			emit({
 				type: "permission",
 				id,
 				toolName: params.toolCall?.title ?? "tool",
 				input: params.toolCall?.rawInput,
+				options: options.map((o) => ({ id: o.optionId, label: o.name, kind: o.kind })),
 			});
 			return new Promise((resolve) => {
-				pendingPerms.set(id, (yes) => resolve(decide(yes)));
+				pendingPerms.set(id, {
+					resolve: (optionId) =>
+						resolve(
+							optionId
+								? { outcome: { outcome: "selected" as const, optionId } }
+								: { outcome: { outcome: "cancelled" as const } },
+						),
+					labels: Object.fromEntries(options.map((o) => [o.optionId, o.name])),
+				});
 			});
 		},
 
@@ -300,8 +336,29 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 						});
 					}
 					break;
+				case "plan":
+					emit({
+						type: "plan",
+						entries: (u.entries ?? []).map((e) => ({ content: e.content, status: e.status })),
+					});
+					break;
+				case "available_commands_update":
+					emit({
+						type: "commands",
+						commands: (u.availableCommands ?? []).map((c) => ({
+							name: c.name,
+							description: c.description,
+						})),
+					});
+					break;
+				case "current_mode_update":
+					emit({ type: "modes", current: u.currentModeId, available: availableModes });
+					break;
+				case "config_option_update":
+					emitConfig(u.configOptions);
+					break;
 				default:
-					// plan / user_message_chunk / mode / usage: ignored for now.
+					// user_message_chunk / config / usage: ignored for now.
 					break;
 			}
 		},
@@ -397,16 +454,32 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 
 		// Resume the agent's own context when we can (loadSession replays history
 		// silently so it doesn't duplicate the buffer we already restored).
+		type ModeState = {
+			currentModeId: string;
+			availableModes: { id: string; name: string; description?: string | null }[];
+		};
+		const emitModes = (modes: ModeState | null | undefined) => {
+			if (!modes) return;
+			availableModes = modes.availableModes.map((m) => ({
+				id: m.id,
+				name: m.name,
+				description: m.description ?? undefined,
+			}));
+			emit({ type: "modes", current: modes.currentModeId, available: availableModes });
+		};
+
 		const canLoad = !!initRes.agentCapabilities?.loadSession;
 		if (opts.resume && opts.acpResumeId && canLoad) {
 			try {
 				suppressReplay = true;
-				await conn.loadSession({
+				const res = await conn.loadSession({
 					sessionId: opts.acpResumeId,
 					cwd: opts.cwd,
 					mcpServers: [],
 				});
 				sessionId = opts.acpResumeId;
+				emitModes(res?.modes);
+				emitConfig(res?.configOptions);
 			} catch {
 				sessionId = null; // stale/expired — fall through to a fresh session
 			} finally {
@@ -416,6 +489,8 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		if (!sessionId) {
 			const res = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
 			sessionId = res.sessionId;
+			emitModes(res.modes);
+			emitConfig(res.configOptions);
 		}
 		// ACP doesn't report a resolved model id, and the picker already shows the
 		// chosen model — so don't emit an alias here (it would surface as a bogus
@@ -451,13 +526,12 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 					emit({ type: "error", message: `Send failed: ${err?.message ?? err}` });
 				});
 		},
-		respond(requestId: string, allow: boolean) {
-			const resolver = pendingPerms.get(requestId);
-			if (resolver) {
-				pendingPerms.delete(requestId);
-				resolver(allow);
-			}
-			emit({ type: "permission_resolved", id: requestId, allow });
+		respond(requestId: string, optionId: string) {
+			const p = pendingPerms.get(requestId);
+			if (!p) return;
+			pendingPerms.delete(requestId);
+			p.resolve(optionId);
+			emit({ type: "permission_resolved", id: requestId, label: p.labels[optionId] ?? optionId });
 		},
 		resolveElicit(id, action, content) {
 			const r = pendingElicits.get(id);
@@ -469,6 +543,19 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		},
 		setPermissionMode(mode) {
 			permissionMode = mode;
+		},
+		setSessionMode(modeId) {
+			if (conn && sessionId) conn.setSessionMode({ sessionId, modeId }).catch(() => {});
+		},
+		setConfigOption(configId, value) {
+			if (!conn || !sessionId) return;
+			// The response returns the full, refreshed option set (options can depend
+			// on each other — e.g. fast-mode availability changes with the model), so
+			// re-emit it as the authoritative state.
+			conn
+				.setSessionConfigOption({ sessionId, configId, value })
+				.then((res) => emitConfig((res as { configOptions?: unknown[] })?.configOptions))
+				.catch(() => {});
 		},
 		cancel() {
 			// Cancel the current turn but keep the process/session alive so the user

@@ -10,8 +10,8 @@ type Info = {
 	path: string;
 	isPrimary: boolean;
 	uncommitted: number;
-	unmerged: number;
-	base: string | null;
+	unpushed: number;
+	hasUpstream: boolean;
 };
 
 export function RemoveWorktreeDialog({
@@ -41,8 +41,12 @@ export function RemoveWorktreeDialog({
 		api.worktreeRemovalInfo({ id: worktreeId }).then(setInfo);
 	}, [open, worktreeId]);
 
-	const dirty = !!info && (info.uncommitted > 0 || info.unmerged > 0);
+	// Force is only about uncommitted changes (git's actual constraint). Removing a
+	// worktree keeps the branch + its commits, so committed work is never lost here.
+	const dirty = !!info && info.uncommitted > 0;
 	const blocked = !info || info.isPrimary || (dirty && !force);
+	// Deleting the branch is the only thing that loses commits — and only unpushed ones.
+	const branchRisk = !!info && (info.unpushed > 0 || !info.hasUpstream);
 
 	async function remove() {
 		setBusy(true);
@@ -86,15 +90,17 @@ export function RemoveWorktreeDialog({
 							) : (
 								<li className={styles.ok}>No uncommitted changes</li>
 							)}
-							{info.base &&
-								(info.unmerged > 0 ? (
+							{info.hasUpstream ? (
+								info.unpushed > 0 ? (
 									<li className={styles.bad}>
-										{info.unmerged} commit{info.unmerged === 1 ? "" : "s"} not in{" "}
-										{info.base}
+										{info.unpushed} commit{info.unpushed === 1 ? "" : "s"} not pushed to origin
 									</li>
 								) : (
-									<li className={styles.ok}>Merged into {info.base}</li>
-								))}
+									<li className={styles.ok}>Pushed to origin</li>
+								)
+							) : (
+								<li className={styles.bad}>Not pushed to any remote</li>
+							)}
 						</ul>
 					)}
 
@@ -107,7 +113,7 @@ export function RemoveWorktreeDialog({
 										checked={force}
 										onChange={(e) => setForce(e.target.checked)}
 									/>
-									Force remove — discards the changes above
+									Force remove — discards uncommitted changes
 								</label>
 							)}
 							{info.branch && (
@@ -119,6 +125,13 @@ export function RemoveWorktreeDialog({
 									/>
 									Also delete branch <code>{info.branch}</code>
 								</label>
+							)}
+							{deleteBranch && branchRisk && (
+								<p className={styles.warn}>
+									{info.hasUpstream
+										? `Discards ${info.unpushed} commit${info.unpushed === 1 ? "" : "s"} not on origin.`
+										: "This branch isn't on any remote — deleting it discards its commits."}
+								</p>
 							)}
 						</div>
 					)}

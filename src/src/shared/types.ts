@@ -79,6 +79,9 @@ export type WorktreeDetail = {
 	branch: string | null;
 	/** The upstream/tracking branch (e.g. `origin/foo`), or null if not tracking. */
 	upstream: string | null;
+	/** Commits the local branch is ahead / behind its tracking branch. */
+	upstreamAhead: number;
+	upstreamBehind: number;
 	/** The base branch changes are computed against (null if none available). */
 	base: string | null;
 	/** Local branches selectable as the base. */
@@ -95,6 +98,9 @@ export type WorktreeDetail = {
 
 /** Raw unified diff for a file; the view parses & renders it. */
 export type FileDiff = { path: string; binary: boolean; diff: string };
+
+/** A one-line commit summary for the recent-activity list. */
+export type CommitSummary = { hash: string; subject: string; author: string; relative: string };
 
 /** A branch across the repo + origin, with any worktrees that have it checked out. */
 export type BranchSummary = {
@@ -140,6 +146,29 @@ export type ElicitationField = {
 /** A value the user provides for an elicitation field. */
 export type ElicitationValue = string | number | boolean | string[];
 
+/** Status of a plan entry (mirrors ACP). */
+export type PlanEntryStatus = "pending" | "in_progress" | "completed";
+
+/** A session mode the agent advertises (e.g. Claude's permission modes). */
+export type AgentMode = { id: string; name: string; description?: string };
+
+/** A live, agent-advertised session setting (model, mode, effort, …) — ACP config option. */
+export type ConfigOption = {
+	id: string;
+	name: string;
+	/** UX grouping hint from the agent (e.g. "model", "mode", "thought_level"). */
+	category?: string;
+	currentValue: string;
+	options: { value: string; label: string; description?: string }[];
+};
+
+/** One choice offered for a tool-permission request (mirrors ACP option kinds). */
+export type PermissionOption = {
+	id: string;
+	label: string;
+	kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+};
+
 export type AgentChatEvent =
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
@@ -155,10 +184,16 @@ export type AgentChatEvent =
 	| { type: "tool_result"; id: string; ok: boolean; summary: string }
 	/** The turn finished (agent is idle, awaiting the next user message). */
 	| { type: "result"; ok: boolean; durationMs: number | null }
-	/** The agent needs permission to run a tool; the user must allow or deny. */
-	| { type: "permission"; id: string; toolName: string; input: unknown }
+	/** The agent needs permission to run a tool; the user picks one of the options. */
+	| {
+			type: "permission";
+			id: string;
+			toolName: string;
+			input: unknown;
+			options: PermissionOption[];
+	  }
 	/** A pending permission request was answered (for replay/UI state). */
-	| { type: "permission_resolved"; id: string; allow: boolean }
+	| { type: "permission_resolved"; id: string; label: string }
 	/** The agent is asking the user for structured input (a form) or to visit a URL. */
 	| {
 			type: "elicitation";
@@ -170,6 +205,14 @@ export type AgentChatEvent =
 	  }
 	/** A pending elicitation was answered/dismissed (for replay/UI state). */
 	| { type: "elicitation_resolved"; id: string }
+	/** The agent's current task plan (replaces any prior plan). */
+	| { type: "plan"; entries: { content: string; status: PlanEntryStatus }[] }
+	/** Slash commands the agent currently supports. */
+	| { type: "commands"; commands: { name: string; description: string }[] }
+	/** The agent's session modes (advertised) + which is current. */
+	| { type: "modes"; current: string | null; available: AgentMode[] }
+	/** Live agent-advertised settings (model/mode/effort/…); full set each time. */
+	| { type: "configOptions"; options: ConfigOption[] }
 	/** Something went wrong (spawn failure, bad output, process died). */
 	| { type: "error"; message: string }
 	/** The underlying process exited; the session is no longer running. */
@@ -293,8 +336,10 @@ export type RpcRequests = {
 					path: string;
 					isPrimary: boolean;
 					uncommitted: number;
-					unmerged: number;
-					base: string | null;
+					/** Commits that exist only locally (ahead of upstream, or of base if no remote). */
+					unpushed: number;
+					/** Whether the branch has an upstream/tracking branch. */
+					hasUpstream: boolean;
 				} | null;
 			};
 			/** Remove a worktree; optionally force and delete its branch. */
@@ -311,6 +356,8 @@ export type RpcRequests = {
 					ahead: number;
 					behind: number;
 					hasRemote: boolean;
+					/** The most recent commits on the base branch (newest first). */
+					recent: CommitSummary[];
 				};
 			};
 			/** Fetch origin and fast-forward the default branch. */
@@ -332,6 +379,11 @@ export type RpcRequests = {
 			projectBranchGraph: {
 				params: { projectId: string };
 				response: BranchSummary[];
+			};
+			/** Rename a local branch (git branch -m). Leaves the worktree path alone. */
+			renameBranch: {
+				params: { projectId: string; from: string; to: string };
+				response: { ok: boolean; error?: string };
 			};
 			/** Delete a local branch (force = discard unmerged work). */
 			deleteBranch: {
@@ -496,8 +548,8 @@ export type ViewMessage =
 	| { type: "termKill"; sessionId: string }
 	/** Send a user turn to a chat agent session, with optional attachments. */
 	| { type: "agentChatSend"; sessionId: string; text: string; attachments?: ChatAttachment[] }
-	/** Answer a pending tool-permission request (allow or deny). */
-	| { type: "agentChatPermission"; sessionId: string; requestId: string; allow: boolean }
+	/** Answer a pending tool-permission request with the chosen option. */
+	| { type: "agentChatPermission"; sessionId: string; requestId: string; optionId: string }
 	/** Answer a pending elicitation (submit form values, decline, or cancel). */
 	| {
 			type: "agentChatElicit";
@@ -508,6 +560,10 @@ export type ViewMessage =
 	  }
 	/** Change a live session's permission mode without relaunching the agent. */
 	| { type: "agentChatSetMode"; sessionId: string; permissionMode: AgentPermissionMode }
+	/** Switch the agent's advertised session mode (ACP session/set_mode). */
+	| { type: "agentChatSetSessionMode"; sessionId: string; modeId: string }
+	/** Set a live agent config option (model/mode/effort/…) via ACP. */
+	| { type: "agentChatSetConfigOption"; sessionId: string; configId: string; value: string }
 	/** Cancel the in-flight turn but keep the session alive (the Stop button). */
 	| { type: "agentChatCancel"; sessionId: string }
 	/** Stop (kill) a chat agent session. History on disk is preserved for reopen. */

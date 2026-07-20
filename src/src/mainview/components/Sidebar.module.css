@@ -142,6 +142,23 @@
 .projectRow[data-within] {
 	box-shadow: inset 2px 0 0 color-mix(in srgb, var(--green) 55%, transparent);
 }
+.projectRefresh {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	flex-shrink: 0;
+	border-radius: var(--radius-sm);
+	color: var(--text-faint);
+	opacity: 0;
+}
+.projectRow:hover .projectRefresh {
+	opacity: 1;
+}
+.projectRefresh:hover {
+	background: var(--bg-active);
+	color: var(--text);
+}
 
 .chevron {
 	display: grid;

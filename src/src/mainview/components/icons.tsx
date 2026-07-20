@@ -71,6 +71,9 @@ export const ChevronUpDownIcon = ({ size = 16 }: Props) =>
 export const DownloadIcon = ({ size = 15 }: Props) =>
 	svg(size, <><path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" /></>);
 
+export const RefreshIcon = ({ size = 15 }: Props) =>
+	svg(size, <><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v5h-5" /></>);
+
 export const SparkleIcon = ({ size = 15 }: Props) =>
 	svg(
 		size,

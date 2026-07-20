@@ -31,6 +31,8 @@ import {
 	respondPermission as agentChatRespond,
 	resolveElicit as agentChatElicit,
 	setPermissionMode as agentChatSetMode,
+	setSessionMode as agentChatSetSessionMode,
+	setConfigOption as agentChatSetConfigOption,
 	cancel as agentChatCancel,
 	restart as agentChatRestart,
 	send as agentChatSend,
@@ -57,8 +59,10 @@ import {
 	branchTracking,
 	branchUpstream,
 	deleteBranch as gitDeleteBranch,
+	renameBranch as gitRenameBranch,
 	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
+	recentCommits,
 	gitVersion,
 	removeWorktree as gitRemoveWorktree,
 	listWorktrees as gitListWorktrees,
@@ -339,11 +343,16 @@ const handlers: RpcHandlers = {
 				const resolvedBase = await resolveBaseBranch(project.path, preferred);
 				const usableBase = resolvedBase === entry.branch ? null : resolvedBase;
 
-				const [activity, branches, changes, upstream] = await Promise.all([
+				const [activity, branches, changes, upstream, tracking] = await Promise.all([
 					worktreeActivity(row.path),
 					listBranches(project.path),
 					worktreeChanges(row.path, usableBase),
 					entry.branch ? branchUpstream(row.path, entry.branch) : Promise.resolve(null),
+					// ponytail: compares vs origin/<branch>; wrong only for a non-origin
+					// upstream (rare). Upgrade to compare vs the actual upstream ref if needed.
+					entry.branch
+						? branchTracking(row.path, entry.branch)
+						: Promise.resolve({ ahead: 0, behind: 0, hasRemote: false }),
 				]);
 
 				const committed = changes.committed.map(toChangedFile);
@@ -368,6 +377,8 @@ const handlers: RpcHandlers = {
 					projectName: project.name,
 					branch: entry.branch,
 					upstream,
+					upstreamAhead: tracking.ahead,
+					upstreamBehind: tracking.behind,
 					base: changes.base,
 					branches,
 					ahead: changes.ahead,
@@ -396,13 +407,20 @@ const handlers: RpcHandlers = {
 				const base = await resolveBaseBranch(project.path, null);
 				const usableBase = base && base !== entry?.branch ? base : null;
 				const changes = await worktreeChanges(row.path, usableBase);
+				// "Unpushed" = commits that would actually be lost if the branch were
+				// deleted: ahead of the tracking branch, or (with no remote) ahead of base.
+				const upstream = entry?.branch ? await branchUpstream(row.path, entry.branch) : null;
+				const unpushed =
+					upstream && entry?.branch
+						? (await branchTracking(row.path, entry.branch)).ahead
+						: changes.ahead;
 				return {
 					branch: entry?.branch ?? null,
 					path: row.path,
 					isPrimary,
 					uncommitted: changes.uncommitted.length,
-					unmerged: changes.ahead,
-					base: usableBase,
+					unpushed,
+					hasUpstream: !!upstream,
 				};
 			},
 
@@ -431,10 +449,13 @@ const handlers: RpcHandlers = {
 					? await resolveBaseBranch(project.path, null)
 					: null;
 				if (!project || !base) {
-					return { branch: base, ahead: 0, behind: 0, hasRemote: false };
+					return { branch: base, ahead: 0, behind: 0, hasRemote: false, recent: [] };
 				}
-				const t = await branchTracking(project.path, base);
-				return { branch: base, ...t };
+				const [t, recent] = await Promise.all([
+					branchTracking(project.path, base),
+					recentCommits(project.path, base, 20),
+				]);
+				return { branch: base, ...t, recent };
 			},
 
 			fetchProject: async ({ projectId }) => {
@@ -481,6 +502,12 @@ const handlers: RpcHandlers = {
 					behind: b.behind,
 					base: b.base,
 				}));
+			},
+
+			renameBranch: async ({ projectId, from, to }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return { ok: false, error: "Project not found" };
+				return gitRenameBranch(project.path, from, to);
 			},
 
 			deleteBranch: async ({ projectId, branch, force }) => {
@@ -709,13 +736,19 @@ function dispatchMessage(msg: ViewMessage): void {
 			agentChatSend(msg.sessionId, msg.text, msg.attachments);
 			break;
 		case "agentChatPermission":
-			agentChatRespond(msg.sessionId, msg.requestId, msg.allow);
+			agentChatRespond(msg.sessionId, msg.requestId, msg.optionId);
 			break;
 		case "agentChatElicit":
 			agentChatElicit(msg.sessionId, msg.id, msg.action, msg.content);
 			break;
 		case "agentChatSetMode":
 			agentChatSetMode(msg.sessionId, msg.permissionMode);
+			break;
+		case "agentChatSetSessionMode":
+			agentChatSetSessionMode(msg.sessionId, msg.modeId);
+			break;
+		case "agentChatSetConfigOption":
+			agentChatSetConfigOption(msg.sessionId, msg.configId, msg.value);
 			break;
 		case "agentChatCancel":
 			agentChatCancel(msg.sessionId);

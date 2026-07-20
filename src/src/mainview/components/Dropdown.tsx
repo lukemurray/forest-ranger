@@ -23,16 +23,19 @@ export function Dropdown({
 }
 
 export function DropdownItem({
+	icon,
 	label,
 	onClick,
 	danger,
 }: {
+	icon?: ReactNode;
 	label: string;
 	onClick: () => void;
 	danger?: boolean;
 }) {
 	return (
 		<Menu.Item className={styles.item} data-danger={danger || undefined} onClick={onClick}>
+			{icon}
 			{label}
 		</Menu.Item>
 	);

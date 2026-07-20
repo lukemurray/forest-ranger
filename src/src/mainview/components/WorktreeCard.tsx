@@ -4,9 +4,10 @@ import type { ProjectCommand, Worktree } from "../../shared/types";
 import { api, emitDataChanged } from "../rpc";
 import { relativeTime, shortHash, tildePath } from "../lib/format";
 import { openInEditor, openInTerminal, runProjectCommand } from "../lib/openTargets";
-import { FolderIcon, GitBranchIcon, PlayIcon, RevealIcon, TerminalIcon, TrashIcon } from "./icons";
+import { FolderIcon, GitBranchIcon, PencilIcon, PlayIcon, RevealIcon, TerminalIcon, TrashIcon } from "./icons";
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { RemoveWorktreeDialog } from "./RemoveWorktreeDialog";
+import { RenameBranchDialog } from "./RenameBranchDialog";
 import styles from "./WorktreeCard.module.css";
 
 export function WorktreeCard({
@@ -21,6 +22,7 @@ export function WorktreeCard({
 }) {
 	const navigate = useNavigate();
 	const [removeOpen, setRemoveOpen] = useState(false);
+	const [renameOpen, setRenameOpen] = useState(false);
 
 	function open() {
 		navigate({
@@ -86,6 +88,16 @@ export function WorktreeCard({
 				}
 			>
 				<OpenItems path={worktree.path} />
+				{worktree.branch && !worktree.isDetached && (
+					<>
+						<Separator />
+						<MenuItem
+							icon={<PencilIcon size={15} />}
+							label="Rename branch…"
+							onClick={() => setRenameOpen(true)}
+						/>
+					</>
+				)}
 				{!worktree.isPrimary && (
 					<>
 						<Separator />
@@ -98,6 +110,15 @@ export function WorktreeCard({
 					</>
 				)}
 			</RowMenu>
+			{worktree.branch && (
+				<RenameBranchDialog
+					open={renameOpen}
+					onOpenChange={setRenameOpen}
+					projectId={worktree.projectId}
+					branch={worktree.branch}
+					onRenamed={() => emitDataChanged("worktrees")}
+				/>
+			)}
 			<RemoveWorktreeDialog
 				open={removeOpen}
 				onOpenChange={setRemoveOpen}

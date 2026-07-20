@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import type { CommandRunTarget, ProjectCommand } from "../../shared/types";
 import { projectRoute, rootRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
@@ -13,6 +13,7 @@ import {
 	FolderIcon,
 	PencilIcon,
 	PlusIcon,
+	RefreshIcon,
 	RevealIcon,
 	TrashIcon,
 } from "../components/icons";
@@ -28,6 +29,7 @@ export function ProjectView() {
 	const projects = rootRoute.useLoaderData();
 	const project = projects.find((p) => p.id === projectId);
 	const navigate = useNavigate();
+	const router = useRouter();
 
 	const [commands, setCommands] = useState<ProjectCommand[]>([]);
 	const [dialogOpen, setDialogOpen] = useState(false);
@@ -113,12 +115,24 @@ export function ProjectView() {
 			<Titlebar
 				title={project.path}
 				actions={
-					<button
-						className={tb.actionButton}
-						onClick={() => api.revealInFinder({ path: project.path })}
-					>
-						<RevealIcon /> Reveal
-					</button>
+					<>
+						<button
+							className={tb.actionButton}
+							onClick={() => {
+								emitDataChanged("worktrees"); // branches + sync bar
+								router.invalidate(); // worktree grid loader
+							}}
+							title="Rescan worktrees"
+						>
+							<RefreshIcon /> Refresh
+						</button>
+						<button
+							className={tb.actionButton}
+							onClick={() => api.revealInFinder({ path: project.path })}
+						>
+							<RevealIcon /> Reveal
+						</button>
+					</>
 				}
 			>
 				<FolderIcon size={16} /> {project.name}

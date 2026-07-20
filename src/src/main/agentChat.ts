@@ -77,16 +77,20 @@ function lastAcpSessionId(events: AgentChatEvent[] | null): string | null {
 export type AgentDriver = {
 	/** Send a user turn, with optional file/image attachments. */
 	send(text: string, attachments?: ChatAttachment[]): void;
-	/** Answer a pending tool-permission request. */
-	respond(requestId: string, allow: boolean): void;
+	/** Answer a pending tool-permission request with the chosen option id. */
+	respond(requestId: string, optionId: string): void;
 	/** Answer a pending structured elicitation. */
 	resolveElicit(
 		id: string,
 		action: "accept" | "decline" | "cancel",
 		content?: Record<string, ElicitationValue>,
 	): void;
-	/** Change the permission mode live (no relaunch). */
+	/** Change the client-side permission mode live (no relaunch). */
 	setPermissionMode(mode: AgentPermissionMode): void;
+	/** Switch the agent's advertised session mode (ACP session/set_mode). */
+	setSessionMode(modeId: string): void;
+	/** Set a live agent config option (model/mode/effort/…). */
+	setConfigOption(configId: string, value: string): void;
 	/** Cancel the in-flight turn, keeping the session alive to continue. */
 	cancel(): void;
 	/** Kill the underlying process. */
@@ -199,13 +203,23 @@ export function send(sessionId: string, text: string, attachments?: ChatAttachme
 }
 
 /** Answer a pending tool-permission request for a session. */
-export function respondPermission(sessionId: string, requestId: string, allow: boolean): void {
-	sessions.get(sessionId)?.respond(requestId, allow);
+export function respondPermission(sessionId: string, requestId: string, optionId: string): void {
+	sessions.get(sessionId)?.respond(requestId, optionId);
 }
 
 /** Change a live session's permission mode without relaunching the agent. */
 export function setPermissionMode(sessionId: string, mode: AgentPermissionMode): void {
 	sessions.get(sessionId)?.setPermissionMode(mode);
+}
+
+/** Switch the agent's advertised session mode. */
+export function setSessionMode(sessionId: string, modeId: string): void {
+	sessions.get(sessionId)?.setSessionMode(modeId);
+}
+
+/** Set a live agent config option (model/mode/effort/…). */
+export function setConfigOption(sessionId: string, configId: string, value: string): void {
+	sessions.get(sessionId)?.setConfigOption(configId, value);
 }
 
 /** Answer a pending structured elicitation for a session. */

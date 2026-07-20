@@ -2,13 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
 import type { Project, Worktree } from "../../shared/types";
-import { api, onDataChanged } from "../rpc";
+import { api, emitDataChanged, onDataChanged } from "../rpc";
 import { relativeTime } from "../lib/format";
 import {
 	ActivityIcon,
 	ChevronIcon,
 	ClockIcon,
 	PlusIcon,
+	RefreshIcon,
 	RevealIcon,
 	TreeIcon,
 	TrashIcon,
@@ -208,6 +209,17 @@ function ProjectNode({
 							title={project.path}
 						>
 							{project.name}
+						</button>
+						<button
+							className={styles.projectRefresh}
+							onClick={(e) => {
+								e.stopPropagation();
+								emitDataChanged("worktrees"); // reloads sidebar list, branches, sync bar
+								router.invalidate(); // reloads the project view's worktree grid
+							}}
+							title="Rescan worktrees"
+						>
+							<RefreshIcon size={13} />
 						</button>
 						{runningProjects.has(project.id) && (
 							<span className={styles.runningDot} title="task running" />

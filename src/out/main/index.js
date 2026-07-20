@@ -9141,6 +9141,7 @@ function startAcpDriver(opts, emit) {
 	let sessionId = null;
 	let closed = false;
 	let permissionMode = opts.permissionMode;
+	let availableModes = [];
 	let suppressReplay = false;
 	const pendingPerms = /* @__PURE__ */ new Map();
 	const pendingElicits = /* @__PURE__ */ new Map();
@@ -9148,33 +9149,55 @@ function startAcpDriver(opts, emit) {
 	const ready = new Promise((r) => {
 		readyResolve = r;
 	});
+	const emitConfig = (opts) => {
+		if (!opts) return;
+		emit({
+			type: "configOptions",
+			options: opts.filter((o) => o.type === "select").map((o) => ({
+				id: o.id,
+				name: o.name,
+				category: o.category ?? void 0,
+				currentValue: o.currentValue,
+				options: o.options.map((v) => ({
+					value: v.value,
+					label: v.name,
+					description: v.description ?? void 0
+				}))
+			}))
+		});
+	};
 	const clientImpl = {
 		async requestPermission(params) {
 			const options = params.options ?? [];
 			const allow = options.find((o) => o.kind === "allow_once") ?? options.find((o) => o.kind === "allow_always");
-			const reject = options.find((o) => o.kind === "reject_once") ?? options.find((o) => o.kind === "reject_always");
-			const decide = (yes) => yes && allow ? { outcome: {
-				outcome: "selected",
-				optionId: allow.optionId
-			} } : !yes && reject ? { outcome: {
-				outcome: "selected",
-				optionId: reject.optionId
-			} } : { outcome: { outcome: "cancelled" } };
-			if (permissionMode === "bypassPermissions") return decide(true);
-			if (permissionMode === "acceptEdits" && params.toolCall?.kind && [
+			if ((permissionMode === "bypassPermissions" || permissionMode === "acceptEdits" && !!params.toolCall?.kind && [
 				"edit",
 				"delete",
 				"move"
-			].includes(params.toolCall.kind)) return decide(true);
+			].includes(params.toolCall.kind)) && allow) return { outcome: {
+				outcome: "selected",
+				optionId: allow.optionId
+			} };
 			const id = String(params.toolCall?.toolCallId ?? crypto.randomUUID());
 			emit({
 				type: "permission",
 				id,
 				toolName: params.toolCall?.title ?? "tool",
-				input: params.toolCall?.rawInput
+				input: params.toolCall?.rawInput,
+				options: options.map((o) => ({
+					id: o.optionId,
+					label: o.name,
+					kind: o.kind
+				}))
 			});
 			return new Promise((resolve) => {
-				pendingPerms.set(id, (yes) => resolve(decide(yes)));
+				pendingPerms.set(id, {
+					resolve: (optionId) => resolve(optionId ? { outcome: {
+						outcome: "selected",
+						optionId
+					} } : { outcome: { outcome: "cancelled" } }),
+					labels: Object.fromEntries(options.map((o) => [o.optionId, o.name]))
+				});
 			});
 		},
 		async sessionUpdate(params) {
@@ -9208,6 +9231,34 @@ function startAcpDriver(opts, emit) {
 						ok: u.status === "completed",
 						summary: toolContentText(u.content)
 					});
+					break;
+				case "plan":
+					emit({
+						type: "plan",
+						entries: (u.entries ?? []).map((e) => ({
+							content: e.content,
+							status: e.status
+						}))
+					});
+					break;
+				case "available_commands_update":
+					emit({
+						type: "commands",
+						commands: (u.availableCommands ?? []).map((c) => ({
+							name: c.name,
+							description: c.description
+						}))
+					});
+					break;
+				case "current_mode_update":
+					emit({
+						type: "modes",
+						current: u.currentModeId,
+						available: availableModes
+					});
+					break;
+				case "config_option_update":
+					emitConfig(u.configOptions);
 					break;
 				default: break;
 			}
@@ -9296,7 +9347,7 @@ function startAcpDriver(opts, emit) {
 			});
 		});
 		conn = new ClientSideConnection(() => clientImpl, ndJsonStream(node_stream.Writable.toWeb(proc.stdin), node_stream.Readable.toWeb(proc.stdout)));
-		const canLoad = !!(await conn.initialize({
+		const initRes = await conn.initialize({
 			protocolVersion: 1,
 			clientCapabilities: {
 				fs: {
@@ -9308,24 +9359,45 @@ function startAcpDriver(opts, emit) {
 					url: {}
 				}
 			}
-		})).agentCapabilities?.loadSession;
+		});
+		const emitModes = (modes) => {
+			if (!modes) return;
+			availableModes = modes.availableModes.map((m) => ({
+				id: m.id,
+				name: m.name,
+				description: m.description ?? void 0
+			}));
+			emit({
+				type: "modes",
+				current: modes.currentModeId,
+				available: availableModes
+			});
+		};
+		const canLoad = !!initRes.agentCapabilities?.loadSession;
 		if (opts.resume && opts.acpResumeId && canLoad) try {
 			suppressReplay = true;
-			await conn.loadSession({
+			const res = await conn.loadSession({
 				sessionId: opts.acpResumeId,
 				cwd: opts.cwd,
 				mcpServers: []
 			});
 			sessionId = opts.acpResumeId;
+			emitModes(res?.modes);
+			emitConfig(res?.configOptions);
 		} catch {
 			sessionId = null;
 		} finally {
 			suppressReplay = false;
 		}
-		if (!sessionId) sessionId = (await conn.newSession({
-			cwd: opts.cwd,
-			mcpServers: []
-		})).sessionId;
+		if (!sessionId) {
+			const res = await conn.newSession({
+				cwd: opts.cwd,
+				mcpServers: []
+			});
+			sessionId = res.sessionId;
+			emitModes(res.modes);
+			emitConfig(res.configOptions);
+		}
 		emit({
 			type: "system",
 			sessionId,
@@ -9362,16 +9434,15 @@ function startAcpDriver(opts, emit) {
 				});
 			});
 		},
-		respond(requestId, allow) {
-			const resolver = pendingPerms.get(requestId);
-			if (resolver) {
-				pendingPerms.delete(requestId);
-				resolver(allow);
-			}
+		respond(requestId, optionId) {
+			const p = pendingPerms.get(requestId);
+			if (!p) return;
+			pendingPerms.delete(requestId);
+			p.resolve(optionId);
 			emit({
 				type: "permission_resolved",
 				id: requestId,
-				allow
+				label: p.labels[optionId] ?? optionId
 			});
 		},
 		resolveElicit(id, action, content) {
@@ -9387,6 +9458,20 @@ function startAcpDriver(opts, emit) {
 		},
 		setPermissionMode(mode) {
 			permissionMode = mode;
+		},
+		setSessionMode(modeId) {
+			if (conn && sessionId) conn.setSessionMode({
+				sessionId,
+				modeId
+			}).catch(() => {});
+		},
+		setConfigOption(configId, value) {
+			if (!conn || !sessionId) return;
+			conn.setSessionConfigOption({
+				sessionId,
+				configId,
+				value
+			}).then((res) => emitConfig(res?.configOptions)).catch(() => {});
 		},
 		cancel() {
 			if (conn && sessionId) conn.cancel({ sessionId }).catch(() => {});
@@ -9535,12 +9620,20 @@ function send(sessionId, text, attachments) {
 	driver.send(text, attachments);
 }
 /** Answer a pending tool-permission request for a session. */
-function respondPermission(sessionId, requestId, allow) {
-	sessions.get(sessionId)?.respond(requestId, allow);
+function respondPermission(sessionId, requestId, optionId) {
+	sessions.get(sessionId)?.respond(requestId, optionId);
 }
 /** Change a live session's permission mode without relaunching the agent. */
 function setPermissionMode(sessionId, mode) {
 	sessions.get(sessionId)?.setPermissionMode(mode);
+}
+/** Switch the agent's advertised session mode. */
+function setSessionMode(sessionId, modeId) {
+	sessions.get(sessionId)?.setSessionMode(modeId);
+}
+/** Set a live agent config option (model/mode/effort/…). */
+function setConfigOption(sessionId, configId, value) {
+	sessions.get(sessionId)?.setConfigOption(configId, value);
 }
 /** Answer a pending structured elicitation for a session. */
 function resolveElicit(sessionId, id, action, content) {
@@ -9803,6 +9896,25 @@ function git(cwd, args, opts) {
 				exitCode
 			});
 		});
+	});
+}
+/** The most recent commits on `ref` (newest first): short hash, subject, relative time. */
+async function recentCommits(repoPath, ref, limit) {
+	const res = await git(repoPath, [
+		"log",
+		`-n${limit}`,
+		"--format=%h%x00%s%x00%an%x00%cr",
+		ref
+	]);
+	if (!res.ok) return [];
+	return res.stdout.split("\n").filter(Boolean).map((line) => {
+		const [hash, subject, author, relative] = line.split("\0");
+		return {
+			hash,
+			subject,
+			author,
+			relative
+		};
 	});
 }
 /** Returns the git version string, or null if the git binary can't be run. */
@@ -10326,6 +10438,18 @@ function parseRemote(url) {
 	return null;
 }
 /** Force-delete a local branch. */
+async function renameBranch(repoPath, from, to) {
+	const r = await git(repoPath, [
+		"branch",
+		"-m",
+		from,
+		to
+	]);
+	return r.ok ? { ok: true } : {
+		ok: false,
+		error: r.stderr.trim() || "rename failed"
+	};
+}
 async function deleteBranch(repoPath, branch, force = false) {
 	const r = await git(repoPath, [
 		"branch",
@@ -10683,11 +10807,16 @@ var handlers = {
 		const preferred = base && base !== entry.branch ? base : null;
 		const resolvedBase = await resolveBaseBranch(project.path, preferred);
 		const usableBase = resolvedBase === entry.branch ? null : resolvedBase;
-		const [activity, branches, changes, upstream] = await Promise.all([
+		const [activity, branches, changes, upstream, tracking] = await Promise.all([
 			worktreeActivity(row.path),
 			listBranches(project.path),
 			worktreeChanges(row.path, usableBase),
-			entry.branch ? branchUpstream(row.path, entry.branch) : Promise.resolve(null)
+			entry.branch ? branchUpstream(row.path, entry.branch) : Promise.resolve(null),
+			entry.branch ? branchTracking(row.path, entry.branch) : Promise.resolve({
+				ahead: 0,
+				behind: 0,
+				hasRemote: false
+			})
 		]);
 		const committed = changes.committed.map(toChangedFile);
 		const uncommitted = changes.uncommitted.map(toChangedFile);
@@ -10708,6 +10837,8 @@ var handlers = {
 			projectName: project.name,
 			branch: entry.branch,
 			upstream,
+			upstreamAhead: tracking.ahead,
+			upstreamBehind: tracking.behind,
 			base: changes.base,
 			branches,
 			ahead: changes.ahead,
@@ -10741,13 +10872,15 @@ var handlers = {
 		const base = await resolveBaseBranch(project.path, null);
 		const usableBase = base && base !== entry?.branch ? base : null;
 		const changes = await worktreeChanges(row.path, usableBase);
+		const upstream = entry?.branch ? await branchUpstream(row.path, entry.branch) : null;
+		const unpushed = upstream && entry?.branch ? (await branchTracking(row.path, entry.branch)).ahead : changes.ahead;
 		return {
 			branch: entry?.branch ?? null,
 			path: row.path,
 			isPrimary,
 			uncommitted: changes.uncommitted.length,
-			unmerged: changes.ahead,
-			base: usableBase
+			unpushed,
+			hasUpstream: !!upstream
 		};
 	},
 	removeWorktree: async ({ id, force, deleteBranch: deleteBranch$1 }) => {
@@ -10778,11 +10911,14 @@ var handlers = {
 			branch: base,
 			ahead: 0,
 			behind: 0,
-			hasRemote: false
+			hasRemote: false,
+			recent: []
 		};
+		const [t, recent] = await Promise.all([branchTracking(project.path, base), recentCommits(project.path, base, 20)]);
 		return {
 			branch: base,
-			...await branchTracking(project.path, base)
+			...t,
+			recent
 		};
 	},
 	fetchProject: async ({ projectId }) => {
@@ -10837,6 +10973,14 @@ var handlers = {
 			behind: b.behind,
 			base: b.base
 		}));
+	},
+	renameBranch: async ({ projectId, from, to }) => {
+		const project = projectsRepo.get(projectId);
+		if (!project) return {
+			ok: false,
+			error: "Project not found"
+		};
+		return renameBranch(project.path, from, to);
 	},
 	deleteBranch: async ({ projectId, branch, force }) => {
 		const project = projectsRepo.get(projectId);
@@ -11083,13 +11227,19 @@ function dispatchMessage(msg) {
 			send(msg.sessionId, msg.text, msg.attachments);
 			break;
 		case "agentChatPermission":
-			respondPermission(msg.sessionId, msg.requestId, msg.allow);
+			respondPermission(msg.sessionId, msg.requestId, msg.optionId);
 			break;
 		case "agentChatElicit":
 			resolveElicit(msg.sessionId, msg.id, msg.action, msg.content);
 			break;
 		case "agentChatSetMode":
 			setPermissionMode(msg.sessionId, msg.permissionMode);
+			break;
+		case "agentChatSetSessionMode":
+			setSessionMode(msg.sessionId, msg.modeId);
+			break;
+		case "agentChatSetConfigOption":
+			setConfigOption(msg.sessionId, msg.configId, msg.value);
 			break;
 		case "agentChatCancel":
 			cancel(msg.sessionId);

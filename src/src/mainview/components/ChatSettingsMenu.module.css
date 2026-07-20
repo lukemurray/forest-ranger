@@ -1,0 +1,61 @@
+.trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 7px;
+	border-radius: var(--radius-sm);
+	border: none;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 12px;
+	cursor: pointer;
+}
+.trigger:hover,
+.trigger[data-popup-open] {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.provider {
+	display: inline-flex;
+	align-items: center;
+}
+.provider svg {
+	color: var(--accent);
+}
+.provider[data-working] svg {
+	animation: providerPulse 1.4s ease-in-out infinite;
+}
+.summary {
+	font-weight: 500;
+	color: var(--text);
+	white-space: nowrap;
+}
+
+/* Parent row: "Label   value ›" */
+.settingRow {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	min-width: 200px;
+}
+.settingLabel {
+	flex: 1;
+}
+.settingValue {
+	color: var(--text-muted);
+	font-size: 12.5px;
+}
+
+/* Option row inside a submenu: "[✓] label" */
+.radio {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 160px;
+}
+.check {
+	display: inline-flex;
+	width: 14px;
+	flex-shrink: 0;
+	color: var(--accent);
+}

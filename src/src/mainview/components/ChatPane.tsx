@@ -1,28 +1,29 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
 	AgentChatEvent,
+	AgentMode,
 	AgentPermissionMode,
 	AgentProvider,
 	ChatAttachment,
+	ConfigOption,
 	ElicitationField,
 	ElicitationValue,
+	PermissionOption,
+	PlanEntryStatus,
 } from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
 import { markExited, updateSession } from "../lib/terminalStore";
 import {
 	PERMISSION_MODES,
-	choiceOptions,
 	coerceModel,
 	coerceProvider,
-	composeChoice,
 	modelArg,
-	modelLabel,
-	parseChoice,
 	providerLabel,
 } from "../lib/chatConfig";
 import { Select } from "./ui/Select";
+import { ChatSettingsMenu } from "./ChatSettingsMenu";
 import { Markdown } from "./Markdown";
-import { CloseIcon, PlusIcon, SparkleIcon } from "./icons";
+import { CloseIcon, PlusIcon } from "./icons";
 import styles from "./ChatPane.module.css";
 
 /** A pending attachment held in the composer (with a preview URL). */
@@ -53,7 +54,9 @@ type ChatItem =
 			id: string;
 			toolName: string;
 			input: unknown;
-			decided: "allow" | "deny" | null;
+			options: PermissionOption[];
+			/** The label of the chosen option once answered, else null. */
+			decided: string | null;
 	  }
 	| {
 			kind: "elicitation";
@@ -81,7 +84,6 @@ export function ChatPane({
 	resume,
 	permissionMode,
 	model,
-	agentLabel,
 	renamed,
 }: {
 	dockId: string;
@@ -101,6 +103,12 @@ export function ChatPane({
 		coerceModel(coerceProvider(provider), model),
 	);
 	const [mode, setMode] = useState<AgentPermissionMode>(permissionMode);
+	// Agent-driven surfaces (from ACP session updates). Empty when unsupported.
+	const [plan, setPlan] = useState<{ content: string; status: PlanEntryStatus }[]>([]);
+	const [commands, setCommands] = useState<{ name: string; description: string }[]>([]);
+	const [agentModes, setAgentModes] = useState<AgentMode[]>([]);
+	const [agentModeId, setAgentModeId] = useState<string | null>(null);
+	const [configOptions, setConfigOptions] = useState<ConfigOption[]>([]);
 	const [input, setInput] = useState("");
 	const [queue, setQueue] = useState<Outgoing[]>([]);
 	const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
@@ -122,6 +130,11 @@ export function ChatPane({
 		setStatus("starting");
 		setAttachments([]);
 		setQueue([]);
+		setPlan([]);
+		setCommands([]);
+		setAgentModes([]);
+		setAgentModeId(null);
+		setConfigOptions([]);
 
 		function apply(event: AgentChatEvent) {
 			switch (event.type) {
@@ -173,6 +186,7 @@ export function ChatPane({
 							id: event.id,
 							toolName: event.toolName,
 							input: event.input,
+							options: event.options,
 							decided: null,
 						},
 					]);
@@ -181,7 +195,7 @@ export function ChatPane({
 					setItems((it) =>
 						it.map((x) =>
 							x.kind === "permission" && x.id === event.id
-								? { ...x, decided: event.allow ? "allow" : "deny" }
+								? { ...x, decided: event.label }
 								: x,
 						),
 					);
@@ -207,6 +221,19 @@ export function ChatPane({
 							x.kind === "elicitation" && x.id === event.id ? { ...x, done: true } : x,
 						),
 					);
+					break;
+				case "plan":
+					setPlan(event.entries);
+					break;
+				case "commands":
+					setCommands(event.commands);
+					break;
+				case "modes":
+					setAgentModes(event.available);
+					setAgentModeId(event.current);
+					break;
+				case "configOptions":
+					setConfigOptions(event.options);
 					break;
 				case "result":
 					setStatus("idle");
@@ -274,17 +301,31 @@ export function ChatPane({
 			model: modelArg(nextModel),
 		});
 	}
-	function changeChoice(value: string) {
-		const { provider: p, model: m } = parseChoice(value);
-		if (p === providerValue && m === modelValue) return;
+	// Switching provider needs a different adapter → relaunch (deferred if a turn
+	// is streaming). Model within a provider is a live config option (below).
+	function changeProvider(p: AgentProvider) {
+		if (p === providerValue) return;
+		const m = coerceModel(p, modelValue);
 		setProviderValue(p);
 		setModelValue(m);
 		updateSession(dockId, { provider: p, model: m });
-		// Don't cut off a streaming reply: if a turn is in flight, apply on the
-		// next idle (the current task finishes on the old model, the next uses the
-		// new one). Otherwise relaunch now.
 		if (status === "working") pendingRelaunch.current = { provider: p, model: m };
 		else relaunch(p, m);
+	}
+	// Live agent setting (model/mode/effort/…) — no relaunch, applies to this session.
+	function changeConfig(configId: string, value: string) {
+		setConfigOptions((opts) =>
+			opts.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)),
+		);
+		bus.agentChatSetConfigOption({ sessionId: chatId, configId, value });
+	}
+	// Fallback model picker (agents that don't expose config options) → relaunch.
+	function changeModel(m: string) {
+		if (m === modelValue) return;
+		setModelValue(m);
+		updateSession(dockId, { model: m });
+		if (status === "working") pendingRelaunch.current = { provider: providerValue, model: m };
+		else relaunch(providerValue, m);
 	}
 	function changeMode(v: AgentPermissionMode) {
 		setMode(v);
@@ -292,6 +333,10 @@ export function ChatPane({
 		// Permission mode is enforced client-side in the driver — change it live,
 		// no relaunch, no interruption of the current turn.
 		bus.agentChatSetMode({ sessionId: chatId, permissionMode: v });
+	}
+	function changeSessionMode(modeId: string) {
+		setAgentModeId(modeId);
+		bus.agentChatSetSessionMode({ sessionId: chatId, modeId });
 	}
 
 	// Apply a deferred provider/model switch once the in-flight turn completes.
@@ -401,13 +446,11 @@ export function ChatPane({
 		setQueue([]);
 		setStatus("idle");
 	}
-	function respondPermission(requestId: string, allow: boolean) {
-		bus.agentChatPermission({ sessionId: chatId, requestId, allow });
+	function respondPermission(requestId: string, optionId: string, label: string) {
+		bus.agentChatPermission({ sessionId: chatId, requestId, optionId });
 		setItems((it) =>
 			it.map((x) =>
-				x.kind === "permission" && x.id === requestId
-					? { ...x, decided: allow ? "allow" : "deny" }
-					: x,
+				x.kind === "permission" && x.id === requestId ? { ...x, decided: label } : x,
 			),
 		);
 	}
@@ -430,6 +473,14 @@ export function ChatPane({
 
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
+	// Slash-command autocomplete: match while the input is a bare "/name" prefix.
+	const slashQuery = /^\/(\S*)$/.exec(input);
+	const slashMatches = slashQuery
+		? commands.filter((c) => c.name.toLowerCase().startsWith(slashQuery[1].toLowerCase())).slice(0, 6)
+		: [];
+	const planDone = plan.filter((e) => e.status === "completed").length;
+	// The permission/edit mode config option (kept inline, not in the settings popup).
+	const modeOption = configOptions.find((o) => o.id === "mode" || o.category === "mode");
 	// Surface the resolved model only when it disagrees with the picked label
 	// (e.g. a stale version label) — otherwise the picker already shows it.
 	// With nothing to send while working, the button stops the turn; otherwise it
@@ -472,7 +523,43 @@ export function ChatPane({
 				))}
 			</div>
 
+			{plan.length > 0 && (
+				<details className={styles.plan}>
+					<summary className={styles.planHead}>
+						Plan · {planDone}/{plan.length} done
+					</summary>
+					<ul className={styles.planList}>
+						{plan.map((e, i) => (
+							<li key={i} className={styles.planItem} data-status={e.status}>
+								<span className={styles.planMark}>
+									{e.status === "completed" ? "●" : e.status === "in_progress" ? "◐" : "○"}
+								</span>
+								{e.content}
+							</li>
+						))}
+					</ul>
+				</details>
+			)}
+
 			<div className={styles.composer}>
+				{slashMatches.length > 0 && (
+					<div className={styles.slashMenu}>
+						{slashMatches.map((c) => (
+							<button
+								key={c.name}
+								type="button"
+								className={styles.slashItem}
+								onClick={() => {
+									setInput(`/${c.name} `);
+									inputRef.current?.focus();
+								}}
+							>
+								<span className={styles.slashName}>/{c.name}</span>
+								<span className={styles.slashDesc}>{c.description}</span>
+							</button>
+						))}
+					</div>
+				)}
 				{attachments.length > 0 && (
 					<div className={styles.attachments}>
 						{attachments.map((a) => (
@@ -539,28 +626,37 @@ export function ChatPane({
 							e.target.value = "";
 						}}
 					/>
-					<div className={styles.composerSelect}>
-						<Select
-							value={composeChoice(providerValue, modelValue)}
-							onValueChange={changeChoice}
-							options={choiceOptions()}
-							ariaLabel="Provider and model"
-							leading={
-								<span className={styles.provider} data-working={working || undefined}>
-									<SparkleIcon size={13} />
-									{agentLabel ?? providerLabel(providerValue)}
-								</span>
-							}
-							// The provider is already shown in the leading label, so the
-							// trigger only needs the model (dropdown items keep the prefix).
-							renderValue={(v) => {
-								const { provider: p, model: m } = parseChoice(v);
-								return modelLabel(p, m);
-							}}
-						/>
-					</div>
-					<div className={styles.composerSelectWide}>
-						<Select value={mode} onValueChange={changeMode} options={PERMISSION_MODES} ariaLabel="Permission mode" />
+					<ChatSettingsMenu
+						provider={providerValue}
+						onProvider={changeProvider}
+						configOptions={configOptions}
+						onConfig={changeConfig}
+						model={modelValue}
+						onModel={changeModel}
+						working={working}
+					/>
+					{/* Permission/edit mode stays inline as a quick toggle, pinned right. */}
+					<div className={styles.modeGroup}>
+						<span className={styles.modeLabel}>Mode</span>
+						<div className={styles.composerSelectWide}>
+							{modeOption ? (
+								<Select
+									value={modeOption.currentValue}
+									onValueChange={(v) => changeConfig(modeOption.id, v)}
+									options={modeOption.options.map((x) => ({ value: x.value, label: x.label }))}
+									ariaLabel="Mode"
+								/>
+							) : agentModes.length > 0 ? (
+								<Select
+									value={agentModeId ?? agentModes[0].id}
+									onValueChange={changeSessionMode}
+									options={agentModes.map((m) => ({ value: m.id, label: m.name }))}
+									ariaLabel="Agent mode"
+								/>
+							) : (
+								<Select value={mode} onValueChange={changeMode} options={PERMISSION_MODES} ariaLabel="Permission mode" />
+							)}
+						</div>
 					</div>
 					{showStop ? (
 						<button className={styles.stopBtn} onClick={stop}>
@@ -603,7 +699,7 @@ function ChatRow({
 	onElicit,
 }: {
 	item: ChatItem;
-	onPermission: (id: string, allow: boolean) => void;
+	onPermission: (id: string, optionId: string, label: string) => void;
 	onElicit: (
 		id: string,
 		action: "accept" | "decline" | "cancel",
@@ -657,23 +753,18 @@ function ChatRow({
 				</div>
 				<div className={styles.permInput}>{describeInput(item.input)}</div>
 				{item.decided ? (
-					<div className={styles.permDecided}>
-						{item.decided === "allow" ? "Allowed" : "Denied"}
-					</div>
+					<div className={styles.permDecided}>{item.decided}</div>
 				) : (
 					<div className={styles.permActions}>
-						<button
-							className={styles.permAllow}
-							onClick={() => onPermission(item.id, true)}
-						>
-							Allow
-						</button>
-						<button
-							className={styles.permDeny}
-							onClick={() => onPermission(item.id, false)}
-						>
-							Deny
-						</button>
+						{item.options.map((o) => (
+							<button
+								key={o.id}
+								className={o.kind.startsWith("allow") ? styles.permAllow : styles.permDeny}
+								onClick={() => onPermission(item.id, o.id, o.label)}
+							>
+								{o.label}
+							</button>
+						))}
 					</div>
 				)}
 			</div>

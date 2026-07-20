@@ -52,7 +52,7 @@ export function ReviewPanel({
 	projectId: string;
 	onSelectBase: (base: string) => void;
 }) {
-	const { worktree, branch, upstream, base, branches, ahead, behind, committed, uncommitted } =
+	const { worktree, branch, upstream, upstreamAhead, upstreamBehind, base, branches, ahead, behind, committed, uncommitted } =
 		detail;
 	const router = useRouter();
 	const [optimistic, setOptimistic] = useState<Map<string, boolean>>(new Map());
@@ -142,6 +142,16 @@ export function ReviewPanel({
 							<div className={styles.stat}>
 								<span className={styles.statValue}>{upstream}</span>
 								<span className={styles.statLabel}>tracking</span>
+							</div>
+						)}
+						{upstream && (
+							<div className={styles.stat}>
+								<span className={styles.statValue}>
+									{upstreamAhead === 0 && upstreamBehind === 0
+										? "in sync"
+										: `↑${upstreamAhead} ↓${upstreamBehind}`}
+								</span>
+								<span className={styles.statLabel}>vs tracking</span>
 							</div>
 						)}
 						<div className={styles.badges}>
