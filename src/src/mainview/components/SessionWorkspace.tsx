@@ -189,6 +189,7 @@ export function SessionWorkspace({
 									model={s.model ?? null}
 									agentLabel={s.agentLabel}
 									renamed={s.renamed}
+									initialPrompt={s.initialPrompt}
 								/>
 							) : (
 								<TerminalPane

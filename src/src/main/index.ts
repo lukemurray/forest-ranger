@@ -1,10 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from "electron";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
-	BranchIntegrations,
+	AgentChatEvent,
 	ChangedFile,
 	ChangeKind,
 	IntegrationStatus,
@@ -54,12 +54,19 @@ import {
 	type GitLabConfig,
 } from "./gitlab";
 import {
+	branchStatus as githubBranchStatus,
+	createRequest as githubCreateRequest,
+	testConnection as githubTest,
+} from "./github";
+import { createRequest as gitlabCreateRequest } from "./gitlab";
+import {
 	addWorktree as gitAddWorktree,
 	branchGraph,
 	branchTracking,
 	branchUpstream,
 	deleteBranch as gitDeleteBranch,
 	renameBranch as gitRenameBranch,
+	updateFromBase as gitUpdateFromBase,
 	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
 	recentCommits,
@@ -70,6 +77,8 @@ import {
 	stageFiles as gitStage,
 	unstageFiles as gitUnstage,
 	commit as gitCommit,
+	pushBranch as gitPushBranch,
+	worktreeStatus as gitWorktreeStatus,
 	resolveBaseBranch,
 	resolveRepoToplevel,
 	worktreeActivity,
@@ -109,9 +118,10 @@ function toCommand(row: CommandRow): ProjectCommand {
 }
 
 
-const KNOWN_INTEGRATIONS: IntegrationType[] = ["gitlab"];
+const KNOWN_INTEGRATIONS: IntegrationType[] = ["github", "gitlab"];
 const DEFAULT_HOST: Record<IntegrationType, string> = {
 	gitlab: "https://gitlab.com",
+	github: "github.com",
 };
 
 function integrationConfig(type: IntegrationType): { host: string; token: string } {
@@ -163,6 +173,7 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 				projectId: project.id,
 				path: entry.path,
 				branch: entry.branch,
+				name: row?.name ?? null,
 				head: entry.head,
 				isPrimary: entry.path === project.path,
 				isDetached: entry.isDetached,
@@ -363,6 +374,7 @@ const handlers: RpcHandlers = {
 					projectId: project.id,
 					path: row.path,
 					branch: entry.branch,
+					name: row.name ?? null,
 					head: entry.head,
 					isPrimary: entry.path === project.path,
 					isDetached: entry.isDetached,
@@ -504,10 +516,21 @@ const handlers: RpcHandlers = {
 				}));
 			},
 
+			updateWorktree: async ({ id, base, mode }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				return gitUpdateFromBase(row.path, base, mode);
+			},
+
 			renameBranch: async ({ projectId, from, to }) => {
 				const project = projectsRepo.get(projectId);
 				if (!project) return { ok: false, error: "Project not found" };
 				return gitRenameBranch(project.path, from, to);
+			},
+
+			renameWorktree: ({ id, name }) => {
+				worktreesRepo.setName(id, name);
+				return { ok: true };
 			},
 
 			deleteBranch: async ({ projectId, branch, force }) => {
@@ -532,7 +555,7 @@ const handlers: RpcHandlers = {
 				return { deleted, failed };
 			},
 
-			createWorktree: async ({ projectId, name, base, location }) => {
+			createWorktree: async ({ projectId, name, base, location, detach }) => {
 				const project = projectsRepo.get(projectId);
 				if (!project) return { ok: false, error: "Project not found" };
 
@@ -540,7 +563,10 @@ const handlers: RpcHandlers = {
 				// out that branch (named `foo`) so the worktree reflects it; otherwise
 				// fall back to a generated name.
 				const remoteBase = base && /^origin\//.test(base) ? base.slice("origin/".length) : null;
+				// Detached review: the dir is named after the reviewed ref (base), prefixed.
+				const reviewName = detach && base ? `review-${remoteBase ?? base}` : null;
 				const branch =
+					reviewName ||
 					name.trim() ||
 					remoteBase ||
 					`worktree-${Math.random().toString(36).slice(2, 8)}`;
@@ -562,12 +588,14 @@ const handlers: RpcHandlers = {
 					wtPath = join(parent, `${dirName}-${n}`);
 				}
 
-				const resolvedBase = await resolveBaseBranch(project.path, base);
+				// Detached review checks out `base` (the ref to review) directly.
+				const resolvedBase = detach ? null : await resolveBaseBranch(project.path, base);
 				const res = await gitAddWorktree(
 					project.path,
 					wtPath,
-					branch,
+					detach && base ? base : branch,
 					resolvedBase,
+					!!detach,
 				);
 				if (!res.ok) return { ok: false, error: res.error };
 
@@ -578,6 +606,11 @@ const handlers: RpcHandlers = {
 					path: wtPath,
 					createdAt: now(),
 				});
+				// A review worktree is detached (no branch label), so name it after the
+				// branch under review — otherwise it shows as "detached" everywhere.
+				if (detach && base) {
+					worktreesRepo.setName(id, `review/${remoteBase ?? base}`);
+				}
 				console.log(`[createWorktree] ${branch} -> ${wtPath}`);
 				return { ok: true, worktreeId: id, path: wtPath };
 			},
@@ -641,6 +674,34 @@ const handlers: RpcHandlers = {
 				if (!row) return { ok: false, error: "Worktree not found" };
 				return gitCommit(row.path, message);
 			},
+			pushBranch: ({ id }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				return gitPushBranch(row.path);
+			},
+			createReviewRequest: async ({ id, base, title }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				const project = projectsRepo.get(row.project_id);
+				if (!project) return { ok: false, error: "Project not found" };
+				const { branch } = await gitWorktreeStatus(row.path);
+				if (!branch) return { ok: false, error: "Worktree has no branch (detached HEAD)" };
+				// The remote branch must exist first; push before opening the request.
+				const pushed = await gitPushBranch(row.path);
+				if (!pushed.ok) return { ok: false, error: `Push failed: ${pushed.error}` };
+				for (const type of KNOWN_INTEGRATIONS) {
+					const intRow = integrationsRepo.get(type);
+					if (!intRow?.enabled) continue;
+					const cfg = integrationConfig(type);
+					if (!cfg.token) continue;
+					const res =
+						type === "github"
+							? await githubCreateRequest(cfg, project.path, branch, base, title)
+							: await gitlabCreateRequest(cfg, project.path, branch, base, title);
+					if (res) return res; // null = repo not on this host; keep looking
+				}
+				return { ok: false, error: "No integration matches this repo's remote" };
+			},
 
 			listIntegrations: () => KNOWN_INTEGRATIONS.map(integrationStatus),
 
@@ -657,22 +718,26 @@ const handlers: RpcHandlers = {
 				const useHost = host.trim() || cfg.host;
 				const useToken = token !== null ? token : cfg.token;
 				if (!useToken) return { ok: false, error: "No token provided" };
-				return gitlabTest({ host: useHost, token: useToken });
+				const conn = { host: useHost, token: useToken };
+				return type === "github" ? githubTest(conn) : gitlabTest(conn);
 			},
 
 			branchIntegrations: async ({ projectId, branch }) => {
-				const out: BranchIntegrations = {};
 				const project = projectsRepo.get(projectId);
-				if (!project || !branch) return out;
-				const row = integrationsRepo.get("gitlab");
-				if (row?.enabled) {
-					const cfg = integrationConfig("gitlab");
-					if (cfg.token) {
-						const status = await gitlabBranchStatus(cfg, project.path, branch);
-						if (status) out.gitlab = status;
-					}
+				if (!project || !branch) return null;
+				// Try each enabled integration; the repo's remote host picks the match.
+				for (const type of KNOWN_INTEGRATIONS) {
+					const row = integrationsRepo.get(type);
+					if (!row?.enabled) continue;
+					const cfg = integrationConfig(type);
+					if (!cfg.token) continue;
+					const status =
+						type === "github"
+							? await githubBranchStatus(cfg, project.path, branch)
+							: await gitlabBranchStatus(cfg, project.path, branch);
+					if (status) return status;
 				}
-				return out;
+				return null;
 			},
 
 			termStart: ({ sessionId, worktreeId, commandId, command, cols, rows }) => {
@@ -785,10 +850,54 @@ setTerminalCallbacks({
 		broadcast({ type: "termExit", sessionId, exitCode }),
 });
 
+// Attention routing: a dock badge + OS notification when an agent needs input
+// (permission / elicitation) or finishes a turn while the app is in the background,
+// so parallel agents across worktrees don't need babysitting.
+const pendingAttention = new Set<string>();
+function focused(): boolean {
+	return BrowserWindow.getAllWindows().some((w) => w.isFocused());
+}
+function notifyUser(title: string, body: string): void {
+	if (!Notification.isSupported()) return;
+	const n = new Notification({ title, body });
+	n.on("click", () => {
+		const win = BrowserWindow.getAllWindows()[0];
+		if (!win) return;
+		if (win.isMinimized()) win.restore();
+		win.show();
+		win.focus();
+	});
+	n.show();
+}
+function handleAttention(sessionId: string, event: AgentChatEvent): void {
+	switch (event.type) {
+		case "permission":
+			pendingAttention.add(`${sessionId}:p:${event.id}`);
+			app.setBadgeCount(pendingAttention.size);
+			if (!focused()) notifyUser("Permission needed", `Allow ${event.toolName}?`);
+			break;
+		case "elicitation":
+			pendingAttention.add(`${sessionId}:e:${event.id}`);
+			app.setBadgeCount(pendingAttention.size);
+			if (!focused()) notifyUser("Input needed", event.message);
+			break;
+		case "permission_resolved":
+		case "elicitation_resolved":
+			pendingAttention.delete(`${sessionId}:p:${event.id}`);
+			pendingAttention.delete(`${sessionId}:e:${event.id}`);
+			app.setBadgeCount(pendingAttention.size);
+			break;
+		case "result":
+			if (!focused()) notifyUser("Chat finished", "The agent finished its turn.");
+			break;
+	}
+}
+
 // Stream normalized chat-agent events from the main process to the renderer.
-setAgentChatCallback((sessionId, event) =>
-	broadcast({ type: "agentChatEvent", sessionId, event }),
-);
+setAgentChatCallback((sessionId, event) => {
+	handleAttention(sessionId, event);
+	broadcast({ type: "agentChatEvent", sessionId, event });
+});
 
 function createWindow(): void {
 	const win = new BrowserWindow({

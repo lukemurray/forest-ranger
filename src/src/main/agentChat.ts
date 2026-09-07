@@ -128,6 +128,10 @@ function emitterFor(sessionId: string): Emit {
 function replay(sessionId: string): void {
 	const buf = buffers.get(sessionId);
 	if (!buf) return;
+	// Bracket the replay with a reset so the view starts from a clean transcript.
+	// If two reattaches race and both replay, each reset wipes the prior copy, so
+	// the view ends with exactly one — not a duplicated conversation.
+	emitGlobal?.(sessionId, { type: "history_reset" });
 	for (const event of buf) emitGlobal?.(sessionId, event);
 }
 

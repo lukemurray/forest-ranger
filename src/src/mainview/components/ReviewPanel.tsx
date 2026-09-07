@@ -18,9 +18,12 @@ import type {
 	WorktreeDetail,
 } from "../../shared/types";
 import { BranchCombobox } from "./BranchCombobox";
+import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
 import { ChevronIcon, FolderIcon } from "./icons";
 import { api, emitDataChanged } from "../rpc";
+import { openSession } from "../lib/terminalStore";
+import { providerLabel, useChatConfig } from "../lib/chatConfig";
 import { notify } from "../lib/toast";
 import { relativeTime, shortHash } from "../lib/format";
 import styles from "./ReviewPanel.module.css";
@@ -31,6 +34,21 @@ type Staging = {
 	onToggle: (path: string) => void;
 	onSetMany: (paths: string[], staged: boolean) => void;
 };
+
+/** The instruction an "Agent merge" chat is seeded with. */
+function mergePrompt(base: string, branch: string): string {
+	return `Merge the latest \`${base}\` into this branch (\`${branch}\`) and resolve any conflicts.
+
+1. Fetch and merge (\`git fetch\` then \`git merge origin/${base}\`).
+2. If there are conflicts:
+   - Resolve simple, unambiguous conflicts directly.
+   - For conflicts in generated files (build output, lockfiles, generated code, snapshots), don't hand-merge — regenerate them by running the project's codegen/build command, then stage the result.
+   - If a conflict is non-trivial or you're unsure, STOP and ask me for direction instead of guessing.
+3. When done:
+   - If the ONLY conflicts were in generated files, complete the merge commit and push.
+   - Otherwise, leave your resolutions staged but do NOT commit — I want to review locally first — and summarize what changed.
+4. Ask me before doing anything risky.`;
+}
 
 const KIND_LABEL: Record<ChangeKind, string> = {
 	modified: "M",
@@ -55,9 +73,12 @@ export function ReviewPanel({
 	const { worktree, branch, upstream, upstreamAhead, upstreamBehind, base, branches, ahead, behind, committed, uncommitted } =
 		detail;
 	const router = useRouter();
+	const chatConfig = useChatConfig();
 	const [optimistic, setOptimistic] = useState<Map<string, boolean>>(new Map());
 	const [message, setMessage] = useState("");
 	const [committing, setCommitting] = useState(false);
+	const [updating, setUpdating] = useState(false);
+	const [pushing, setPushing] = useState(false);
 
 	// Drop optimistic overrides once fresh data (with real staged flags) arrives.
 	const stagedSig = uncommitted.map((f) => `${f.path}:${f.staged ? 1 : 0}`).join("|");
@@ -117,6 +138,61 @@ export function ReviewPanel({
 		router.invalidate();
 	}
 
+	async function update(mode: "rebase" | "merge") {
+		if (!base || updating) return;
+		setUpdating(true);
+		const res = await api.updateWorktree({ id: worktree.id, base, mode });
+		setUpdating(false);
+		if (res.ok) {
+			notify(`Updated from ${base} (${mode})`);
+		} else {
+			notify(
+				`${mode} hit conflicts — resolve in your editor/terminal: ${res.error ?? ""}`,
+				"error",
+			);
+		}
+		// Refresh either way (a conflict leaves the worktree mid-op).
+		emitDataChanged("worktrees");
+		router.invalidate();
+	}
+
+	// Open a chat that merges base in and resolves conflicts per the seeded prompt.
+	function agentMerge() {
+		if (!base || !branch) return;
+		const agent = providerLabel(chatConfig.defaultProvider);
+		openSession({
+			worktreeId: worktree.id,
+			projectId,
+			kind: "chat",
+			commandId: null,
+			command: null,
+			resumeCommand: null,
+			sessionId: crypto.randomUUID(),
+			provider: chatConfig.defaultProvider,
+			permissionMode: chatConfig.defaultPermissionMode,
+			model: chatConfig.defaultModel,
+			agentLabel: agent,
+			name: `Merge ${base}`,
+			renamed: true,
+			title: `${branch} · Merge ${base}`,
+			initialPrompt: mergePrompt(base, branch),
+		});
+	}
+
+	async function push() {
+		if (pushing) return;
+		setPushing(true);
+		const res = await api.pushBranch({ id: worktree.id });
+		setPushing(false);
+		if (res.ok) notify(`Pushed ${branch ?? "branch"} to origin`);
+		else notify(res.error ?? "Push failed", "error");
+		emitDataChanged("worktrees");
+		router.invalidate();
+	}
+
+	// Something to push: no upstream yet, or local commits ahead of it.
+	const canPush = !!branch && !worktree.isDetached && (!upstream || upstreamAhead > 0);
+
 	const staging: Staging = { isStaged, onToggle: toggleStage, onSetMany: setMany };
 
 	return (
@@ -138,6 +214,20 @@ export function ReviewPanel({
 								<span className={styles.statLabel}>vs {base}</span>
 							</div>
 						)}
+						{base && behind > 0 && !worktree.isPrimary && (
+							<Dropdown
+								trigger={
+									<button className={styles.updateBtn} disabled={updating}>
+										{updating ? "Updating…" : `Update from ${base}`}
+										<ChevronIcon size={12} />
+									</button>
+								}
+							>
+								<DropdownItem label={`Rebase onto ${base}`} onClick={() => update("rebase")} />
+								<DropdownItem label={`Merge ${base}`} onClick={() => update("merge")} />
+								<DropdownItem label={`Agent merge from ${base}`} onClick={agentMerge} />
+							</Dropdown>
+						)}
 						{upstream && (
 							<div className={styles.stat}>
 								<span className={styles.statValue}>{upstream}</span>
@@ -154,6 +244,11 @@ export function ReviewPanel({
 								<span className={styles.statLabel}>vs tracking</span>
 							</div>
 						)}
+						{canPush && (
+							<button className={styles.updateBtn} onClick={push} disabled={pushing}>
+								{pushing ? "Pushing…" : upstream ? `Push ↑${upstreamAhead}` : "Push"}
+							</button>
+						)}
 						<div className={styles.badges}>
 							{worktree.isPrimary && <span className={styles.primary}>primary</span>}
 							{worktree.isDetached && <span className={styles.detached}>detached</span>}
@@ -161,7 +256,14 @@ export function ReviewPanel({
 						</div>
 					</section>
 
-					{branch && <BranchIntegrationBar projectId={projectId} branch={branch} />}
+					{branch && (
+						<BranchIntegrationBar
+							projectId={projectId}
+							worktreeId={worktree.id}
+							branch={branch}
+							base={base}
+						/>
+					)}
 
 					{uncommitted.length > 0 && (
 						<>

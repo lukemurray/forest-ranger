@@ -1,6 +1,10 @@
 .shell {
 	display: grid;
 	grid-template-columns: var(--sidebar-width) 1fr;
+	/* Pin the single row to the viewport height. Without this the row is `auto`
+	   and grows to the sidebar's content, so the sidebar's internal scroll region
+	   (`.projects`) never gets a bounded height and the footer is pushed off. */
+	grid-template-rows: minmax(0, 1fr);
 	height: 100%;
 	width: 100%;
 }

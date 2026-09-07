@@ -25,6 +25,8 @@ export type TermSession = {
 	model?: string | null;
 	/** chat only: label of the chat agent driving this session. */
 	agentLabel?: string;
+	/** chat only: a prompt auto-sent once when the session first starts (not persisted). */
+	initialPrompt?: string;
 	/** Display name on the tab (auto from the first chat message, or renamed). */
 	name?: string;
 	/** True once the user manually renamed it — don't auto-name over it. */

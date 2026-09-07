@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
-import type { BranchIntegrations } from "../../shared/types";
-import { api } from "../rpc";
+import { useRouter } from "@tanstack/react-router";
+import type { BranchIntegrations, IntegrationType } from "../../shared/types";
+import { api, emitDataChanged } from "../rpc";
+import { notify } from "../lib/toast";
 import styles from "./BranchIntegrationBar.module.css";
 
-/** Map a GitLab pipeline status to a tone + label. */
-function pipelineTone(status: string): { tone: string; label: string } {
+const PROVIDER: Record<IntegrationType, { name: string; reqPrefix: string; checks: string }> = {
+	github: { name: "GitHub", reqPrefix: "PR #", checks: "checks" },
+	gitlab: { name: "GitLab", reqPrefix: "MR !", checks: "pipeline" },
+};
+
+/** Map a normalized checks status to a tone + label. */
+function checksTone(status: string): { tone: string; label: string } {
 	switch (status) {
 		case "success":
 			return { tone: "ok", label: "passed" };
@@ -13,18 +20,14 @@ function pipelineTone(status: string): { tone: string; label: string } {
 		case "running":
 			return { tone: "run", label: "running" };
 		case "pending":
-		case "created":
-		case "preparing":
-		case "waiting_for_resource":
-		case "scheduled":
 			return { tone: "warn", label: "pending" };
 		default:
 			return { tone: "mute", label: status.replace(/_/g, " ") };
 	}
 }
 
-function mrTone(state: string): string {
-	if (state === "opened") return "ok";
+function requestTone(state: string): string {
+	if (state === "open") return "ok";
 	if (state === "merged") return "done";
 	if (state === "closed") return "bad";
 	return "mute";
@@ -32,14 +35,20 @@ function mrTone(state: string): string {
 
 export function BranchIntegrationBar({
 	projectId,
+	worktreeId,
 	branch,
+	base,
 }: {
 	projectId: string;
+	worktreeId: string;
 	branch: string;
+	base: string | null;
 }) {
 	const [data, setData] = useState<BranchIntegrations | null>(null);
+	const [creating, setCreating] = useState(false);
+	const router = useRouter();
 
-	useEffect(() => {
+	function load() {
 		let live = true;
 		setData(null);
 		api.branchIntegrations({ projectId, branch }).then((d) => {
@@ -48,54 +57,80 @@ export function BranchIntegrationBar({
 		return () => {
 			live = false;
 		};
-	}, [projectId, branch]);
+	}
+	useEffect(load, [projectId, branch]);
 
-	const gl = data?.gitlab;
-	if (!gl) return null;
+	if (!data) return null;
 
+	const p = PROVIDER[data.provider];
 	const open = (url: string | null) => url && api.openUrl({ url });
+	const { request, checks } = data;
+
+	async function create() {
+		if (!base || creating) return;
+		setCreating(true);
+		const res = await api.createReviewRequest({ id: worktreeId, base, title: branch });
+		setCreating(false);
+		if (res.ok) {
+			notify(`Opened ${p.reqPrefix}${res.number}`);
+			open(res.url ?? null);
+			emitDataChanged("worktrees");
+			router.invalidate();
+			load();
+		} else {
+			notify(res.error ?? "Failed to open request", "error");
+		}
+	}
 
 	return (
 		<div className={styles.bar}>
-			<span className={styles.provider}>GitLab</span>
+			<span className={styles.provider}>{p.name}</span>
 
-			{gl.mr ? (
+			{request ? (
 				<button
 					className={styles.badge}
-					data-tone={mrTone(gl.mr.state)}
-					onClick={() => open(gl.mr!.url)}
-					title={gl.mr.title}
+					data-tone={requestTone(request.state)}
+					onClick={() => open(request.url)}
+					title={request.title}
 				>
-					MR !{gl.mr.iid} · {gl.mr.state}
+					{p.reqPrefix}
+					{request.number} · {request.state}
 				</button>
 			) : (
-				!gl.error && <span className={styles.muted}>No open MR</span>
+				!data.error &&
+				(base ? (
+					<button className={styles.link} onClick={create} disabled={creating}>
+						{creating ? "Opening…" : `Push & open ${p.reqPrefix.trim()}`}
+					</button>
+				) : (
+					<span className={styles.muted}>No open {p.reqPrefix.trim()}</span>
+				))
 			)}
 
-			{gl.pipeline &&
+			{checks &&
 				(() => {
-					const { tone, label } = pipelineTone(gl.pipeline.status);
+					const { tone, label } = checksTone(checks.status);
 					return (
 						<button
 							className={styles.badge}
 							data-tone={tone}
-							onClick={() => open(gl.pipeline!.url)}
-							title={`Pipeline: ${gl.pipeline.status}`}
+							onClick={() => open(checks.url)}
+							title={`${p.checks}: ${checks.status}`}
 						>
-							<span className={styles.dot} /> pipeline {label}
+							<span className={styles.dot} /> {p.checks} {label}
 						</button>
 					);
 				})()}
 
-			{gl.error && (
-				<span className={styles.error} title={gl.error}>
+			{data.error && (
+				<span className={styles.error} title={data.error}>
 					unavailable
 				</span>
 			)}
 
-			{gl.projectUrl && (
-				<button className={styles.link} onClick={() => open(gl.projectUrl)}>
-					Open in GitLab ↗
+			{data.projectUrl && (
+				<button className={styles.link} onClick={() => open(data.projectUrl)}>
+					Open in {p.name} ↗
 				</button>
 			)}
 		</div>

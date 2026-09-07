@@ -8,6 +8,7 @@ import {
 	ActivityIcon,
 	ChevronIcon,
 	ClockIcon,
+	PencilIcon,
 	PlusIcon,
 	RefreshIcon,
 	RevealIcon,
@@ -16,6 +17,7 @@ import {
 } from "./icons";
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { RenameWorktreeDialog } from "./RenameWorktreeDialog";
 import { SettingsMenu } from "./SettingsMenu";
 import { useTerminals } from "../lib/terminalStore";
 import styles from "./Sidebar.module.css";
@@ -144,6 +146,7 @@ function ProjectNode({
 	const [open, setOpen] = useState(onThisProject);
 	const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
 	const [confirmOpen, setConfirmOpen] = useState(false);
+	const [renaming, setRenaming] = useState<Worktree | null>(null);
 	const fetching = useRef(false);
 
 	async function removeProject() {
@@ -263,7 +266,7 @@ function ProjectNode({
 									title={wt.path}
 								>
 									<span className={styles.worktreeBranch}>
-										{wt.branch ?? "detached"}
+										{wt.name ?? wt.branch ?? "detached"}
 										{wt.isPrimary && <span className={styles.primaryDot} title="primary worktree" />}
 									</span>
 									{runningWorktrees.has(wt.id) ? (
@@ -277,10 +280,30 @@ function ProjectNode({
 							}
 						>
 							<OpenItems path={wt.path} />
+							<Separator />
+							<MenuItem
+								icon={<PencilIcon size={15} />}
+								label="Rename…"
+								onClick={() => setRenaming(wt)}
+							/>
 						</RowMenu>
 					))
 				)}
 			</Collapsible.Panel>
+
+			{renaming && (
+				<RenameWorktreeDialog
+					open={!!renaming}
+					onOpenChange={(o) => !o && setRenaming(null)}
+					worktreeId={renaming.id}
+					current={renaming.name ?? renaming.branch ?? ""}
+					onRenamed={() => {
+						setRenaming(null);
+						loadWorktrees(true);
+						emitDataChanged("worktrees");
+					}}
+				/>
+			)}
 
 			<ConfirmDialog
 				open={confirmOpen}

@@ -4563,6 +4563,70 @@ function requiredDefaultOnError(schema, fallback) {
 		return NEVER;
 	});
 }
+/**
+* A wire value's discriminant tag, when present as a string. excludeKnownTags
+* and preserveCustomPayload are always applied as a pair, so what counts as
+* "the tag" is single-sourced here.
+*/
+function stringTag(value, key) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+	const tag = value[key];
+	return typeof tag === "string" ? tag : void 0;
+}
+/**
+* Restores the JSON Schema `not` semantics of an extensible union's catch-all
+* variant, which the code generator drops: the catch-all formally excludes the
+* known variants' discriminant tags, so a malformed known variant (right tag,
+* wrong payload) must fail validation instead of parsing as a custom variant.
+*
+* When this fires inside a union, zod surfaces only this issue (the catch-all
+* is the closest match), so the message names the offending tag; the known
+* variant's own field-level issues are not available here.
+* TODO: re-run the matching known variant's schema and forward its issues so
+* consumers can see which field actually failed.
+*/
+function excludeKnownTags(schema, key, knownTags) {
+	return schema.superRefine((value, context) => {
+		const tag = stringTag(value, key);
+		if (tag !== void 0 && knownTags.includes(tag)) context.addIssue({
+			code: "custom",
+			path: [key],
+			message: `${key} ${JSON.stringify(tag)} is reserved by a known variant, but the value does not match that variant's schema`
+		});
+	});
+}
+/**
+* Restores the `unevaluatedProperties`/`additionalProperties: true` semantics
+* of an extensible union's custom catch-all variant, which the generated
+* object schemas drop: a custom variant's extra properties are its payload,
+* so after a normal (stripping) parse the raw keys the subschemas didn't
+* produce are re-attached. Keys the winning variant evaluated — including
+* invalid values salvaged to defaults — keep their parsed results; keys it
+* did NOT evaluate arrive raw, even ones a losing variant would have salvaged
+* (e.g. a malformed `_meta` on a custom multi-select item).
+*/
+function preserveCustomPayload(schema, key, knownTags) {
+	return unknown().transform((value, context) => {
+		const result = schema.safeParse(value);
+		if (!result.success) {
+			for (const issue of result.error.issues) context.addIssue({
+				...issue,
+				input: value
+			});
+			return NEVER;
+		}
+		const output = result.data;
+		const tag = stringTag(value, key);
+		if (tag !== void 0 && !knownTags.includes(tag)) {
+			const raw = value;
+			for (const [property, rawValue] of Object.entries(raw)) {
+				if (property === "__proto__") continue;
+				if (!Object.hasOwn(output, property)) output[property] = rawValue;
+			}
+		}
+		return output;
+	});
+}
 function vecSkipError(itemSchema) {
 	return array(itemSchema.catch(skippedItem)).transform((items) => items.filter((item) => item !== skippedItem));
 }
@@ -4598,7 +4662,7 @@ var zWriteTextFileRequest = object({
 	sessionId: zSessionId,
 	path: string(),
 	content: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to read content from a text file.
@@ -4608,9 +4672,9 @@ var zWriteTextFileRequest = object({
 var zReadTextFileRequest = object({
 	sessionId: zSessionId,
 	path: string(),
-	line: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	limit: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	line: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	limit: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Unique identifier for a tool call within a session.
@@ -4654,9 +4718,9 @@ var zToolCallStatus = union([
 */
 var zAnnotations = object({
 	audience: defaultOnError(vecSkipError(union([literal("assistant"), literal("user")])).nullish(), () => void 0),
-	lastModified: string().nullish(),
-	priority: number().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	lastModified: defaultOnError(string().nullish(), () => void 0),
+	priority: defaultOnError(number().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Text provided to or from an LLM.
@@ -4664,7 +4728,7 @@ var zAnnotations = object({
 var zTextContent = object({
 	annotations: defaultOnError(zAnnotations.nullish(), () => void 0),
 	text: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An image provided to or from an LLM.
@@ -4673,8 +4737,8 @@ var zImageContent = object({
 	annotations: defaultOnError(zAnnotations.nullish(), () => void 0),
 	data: string(),
 	mimeType: string(),
-	uri: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	uri: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Audio provided to or from an LLM.
@@ -4683,34 +4747,34 @@ var zAudioContent = object({
 	annotations: defaultOnError(zAnnotations.nullish(), () => void 0),
 	data: string(),
 	mimeType: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A resource that the server is capable of reading, included in a prompt or tool call result.
 */
 var zResourceLink = object({
 	annotations: defaultOnError(zAnnotations.nullish(), () => void 0),
-	description: string().nullish(),
-	mimeType: string().nullish(),
+	description: defaultOnError(string().nullish(), () => void 0),
+	mimeType: defaultOnError(string().nullish(), () => void 0),
 	name: string(),
-	size: number().nullish(),
-	title: string().nullish(),
+	size: defaultOnError(number().nullish(), () => void 0),
+	title: defaultOnError(string().nullish(), () => void 0),
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Resource content that can be embedded in a message.
 */
 var zEmbeddedResourceResource = union([object({
-	mimeType: string().nullish(),
+	mimeType: defaultOnError(string().nullish(), () => void 0),
 	text: string(),
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 }), object({
 	blob: string(),
-	mimeType: string().nullish(),
+	mimeType: defaultOnError(string().nullish(), () => void 0),
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 })]);
 /**
 * The contents of a resource, embedded into a prompt or tool call result.
@@ -4718,7 +4782,7 @@ var zEmbeddedResourceResource = union([object({
 var zEmbeddedResource = object({
 	annotations: defaultOnError(zAnnotations.nullish(), () => void 0),
 	resource: zEmbeddedResourceResource,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Content blocks represent displayable information in the Agent Client Protocol.
@@ -4748,7 +4812,7 @@ var zContentBlock = union([
 */
 var zContent = object({
 	content: zContentBlock,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A diff representing file modifications.
@@ -4759,9 +4823,9 @@ var zContent = object({
 */
 var zDiff = object({
 	path: string(),
-	oldText: string().nullish(),
+	oldText: defaultOnError(string().nullish(), () => void 0),
 	newText: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Typed identifier used for terminal values on the wire.
@@ -4776,7 +4840,7 @@ var zTerminalId = string();
 */
 var zTerminal = object({
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Content produced by a tool call.
@@ -4801,8 +4865,8 @@ var zToolCallContent = union([
 */
 var zToolCallLocation = object({
 	path: string(),
-	line: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	line: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An update to an existing tool call.
@@ -4816,12 +4880,13 @@ var zToolCallUpdate = object({
 	toolCallId: zToolCallId,
 	kind: defaultOnError(zToolKind.nullish(), () => void 0),
 	status: defaultOnError(zToolCallStatus.nullish(), () => void 0),
-	title: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
+	name: defaultOnError(string().nullish(), () => void 0),
 	content: defaultOnError(vecSkipError(zToolCallContent).nullish(), () => void 0),
 	locations: defaultOnError(vecSkipError(zToolCallLocation).nullish(), () => void 0),
-	rawInput: unknown().optional(),
-	rawOutput: unknown().optional(),
-	_meta: record(string(), unknown()).nullish()
+	rawInput: defaultOnError(unknown().optional(), () => void 0),
+	rawOutput: defaultOnError(unknown().optional(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Unique identifier for a permission option.
@@ -4852,9 +4917,9 @@ var zRequestPermissionRequest = object({
 		optionId: zPermissionOptionId,
 		name: string(),
 		kind: zPermissionOptionKind,
-		_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	})),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An environment variable to set when launching an MCP server.
@@ -4862,7 +4927,7 @@ var zRequestPermissionRequest = object({
 var zEnvVariable = object({
 	name: string(),
 	value: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to create a new terminal and execute a command.
@@ -4870,11 +4935,11 @@ var zEnvVariable = object({
 var zCreateTerminalRequest = object({
 	sessionId: zSessionId,
 	command: string(),
-	args: array(string()).optional(),
-	env: array(zEnvVariable).optional(),
-	cwd: string().nullish(),
-	outputByteLimit: number().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	args: defaultOnError(vecSkipError(string()).optional(), () => []),
+	env: defaultOnError(vecSkipError(zEnvVariable).optional(), () => []),
+	cwd: defaultOnError(string().nullish(), () => void 0),
+	outputByteLimit: defaultOnError(number().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to get the current output and status of a terminal.
@@ -4882,7 +4947,7 @@ var zCreateTerminalRequest = object({
 var zTerminalOutputRequest = object({
 	sessionId: zSessionId,
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to release a terminal and free its resources.
@@ -4890,7 +4955,7 @@ var zTerminalOutputRequest = object({
 var zReleaseTerminalRequest = object({
 	sessionId: zSessionId,
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to wait for a terminal command to exit.
@@ -4898,7 +4963,7 @@ var zReleaseTerminalRequest = object({
 var zWaitForTerminalExitRequest = object({
 	sessionId: zSessionId,
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to kill a terminal without releasing it.
@@ -4906,7 +4971,7 @@ var zWaitForTerminalExitRequest = object({
 var zKillTerminalRequest = object({
 	sessionId: zSessionId,
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -4923,7 +4988,7 @@ var zKillTerminalRequest = object({
 */
 var zElicitationSessionScope = object({
 	sessionId: zSessionId,
-	toolCallId: zToolCallId.nullish()
+	toolCallId: defaultOnError(zToolCallId.nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -4950,12 +5015,13 @@ var zStringFormat = union([
 	literal("date-time")
 ]);
 /**
-* A titled enum option with a const value and human-readable title.
+* A titled enum option with a const value, human-readable title, and optional description.
 */
 var zEnumOption = object({
 	const: string(),
 	title: string(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Schema for string properties in an elicitation form.
@@ -4964,70 +5030,85 @@ var zEnumOption = object({
 * with `"type": "string"`.
 */
 var zStringPropertySchema = object({
-	title: string().nullish(),
-	description: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
+	description: defaultOnError(string().nullish(), () => void 0),
 	minLength: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
 	maxLength: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
 	pattern: string().nullish(),
 	format: zStringFormat.nullish(),
-	default: string().nullish(),
+	default: defaultOnError(string().nullish(), () => void 0),
 	enum: array(string()).nullish(),
 	oneOf: array(zEnumOption).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Schema for number (floating-point) properties in an elicitation form.
 */
 var zNumberPropertySchema = object({
-	title: string().nullish(),
-	description: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
+	description: defaultOnError(string().nullish(), () => void 0),
 	minimum: number().nullish(),
 	maximum: number().nullish(),
-	default: number().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	default: defaultOnError(number().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Schema for integer properties in an elicitation form.
 */
 var zIntegerPropertySchema = object({
-	title: string().nullish(),
-	description: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
+	description: defaultOnError(string().nullish(), () => void 0),
 	minimum: number().nullish(),
 	maximum: number().nullish(),
-	default: number().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	default: defaultOnError(number().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Schema for boolean properties in an elicitation form.
 */
 var zBooleanPropertySchema = object({
-	title: string().nullish(),
-	description: string().nullish(),
-	default: boolean().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	title: defaultOnError(string().nullish(), () => void 0),
+	description: defaultOnError(string().nullish(), () => void 0),
+	default: defaultOnError(boolean().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
+});
+/**
+* String item schema for multi-select enum properties.
+*/
+var zStringMultiSelectItems = object({
+	enum: array(string()),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
+});
+/**
+* Items definition for titled multi-select enum properties.
+*/
+var zTitledMultiSelectItems = object({
+	anyOf: array(zEnumOption),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Items for a multi-select (array) property schema.
+*
+* Custom variants (unknown `type` values) keep their extra
+* properties exactly as received; unlike known variants, those keys
+* bypass lenient-field salvage and arrive unvalidated.
 */
-var zMultiSelectItems = union([object({
-	type: literal("string"),
-	enum: array(string()),
-	_meta: record(string(), unknown()).nullish()
-}), object({
-	anyOf: array(zEnumOption),
-	_meta: record(string(), unknown()).nullish()
-})]);
+var zMultiSelectItems = preserveCustomPayload(union([
+	zStringMultiSelectItems.and(object({ type: literal("string") })),
+	excludeKnownTags(object({ type: string() }), "type", ["string"]),
+	zTitledMultiSelectItems
+]), "type", ["string"]);
 /**
 * Schema for multi-select (array) properties in an elicitation form.
 */
 var zMultiSelectPropertySchema = object({
-	title: string().nullish(),
-	description: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
+	description: defaultOnError(string().nullish(), () => void 0),
 	minItems: number().nullish(),
 	maxItems: number().nullish(),
 	items: zMultiSelectItems,
-	default: array(string()).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	default: defaultOnError(vecSkipError(string()).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Property schema for elicitation form fields.
@@ -5035,13 +5116,30 @@ var zMultiSelectPropertySchema = object({
 * Each variant corresponds to a JSON Schema `"type"` value.
 * Single-select enums use the `String` variant with `enum` or `oneOf` set.
 * Multi-select enums use the `Array` variant.
+*
+* Custom variants (unknown `type` values) keep their extra
+* properties exactly as received; unlike known variants, those keys
+* bypass lenient-field salvage and arrive unvalidated.
 */
-var zElicitationPropertySchema = union([
+var zElicitationPropertySchema = preserveCustomPayload(union([
 	zStringPropertySchema.and(object({ type: literal("string") })),
 	zNumberPropertySchema.and(object({ type: literal("number") })),
 	zIntegerPropertySchema.and(object({ type: literal("integer") })),
 	zBooleanPropertySchema.and(object({ type: literal("boolean") })),
-	zMultiSelectPropertySchema.and(object({ type: literal("array") }))
+	zMultiSelectPropertySchema.and(object({ type: literal("array") })),
+	excludeKnownTags(object({ type: string() }), "type", [
+		"array",
+		"boolean",
+		"integer",
+		"number",
+		"string"
+	])
+]), "type", [
+	"array",
+	"boolean",
+	"integer",
+	"number",
+	"string"
 ]);
 /**
 * Type-safe elicitation schema for requesting structured user input.
@@ -5050,12 +5148,12 @@ var zElicitationPropertySchema = union([
 * as required by the elicitation specification.
 */
 var zElicitationSchema = object({
-	type: zElicitationSchemaType.optional().default("object"),
-	title: string().nullish(),
+	type: defaultOnError(zElicitationSchemaType.optional().default("object"), () => "object"),
+	title: defaultOnError(string().nullish(), () => void 0),
 	properties: record(string(), zElicitationPropertySchema).optional().default({}),
 	required: array(string()).nullish(),
-	description: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5102,11 +5200,19 @@ var zElicitationUrlMode = intersection(union([zElicitationSessionScope, zElicita
 * Elicitations are tied to a session (optionally a tool call) or a request.
 *
 * @experimental
+*
+* Custom variants (unknown `mode` values) keep their extra
+* properties exactly as received; unlike known variants, those keys
+* bypass lenient-field salvage and arrive unvalidated.
 */
-var zCreateElicitationRequest = intersection(union([zElicitationFormMode.and(object({ mode: literal("form") })), zElicitationUrlMode.and(object({ mode: literal("url") }))]), object({
+var zCreateElicitationRequest = preserveCustomPayload(intersection(union([
+	zElicitationFormMode.and(object({ mode: literal("form") })),
+	zElicitationUrlMode.and(object({ mode: literal("url") })),
+	excludeKnownTags(intersection(union([zElicitationSessionScope, zElicitationRequestScope]), object({ mode: string() })), "mode", ["form", "url"])
+]), object({
 	message: string(),
-	_meta: record(string(), unknown()).nullish()
-}));
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
+})), "mode", ["form", "url"]);
 /**
 * **UNSTABLE**
 *
@@ -5131,8 +5237,8 @@ var zMcpServerAcpId = string();
 * @experimental
 */
 var zConnectMcpRequest = object({
-	acpId: zMcpServerAcpId,
-	_meta: record(string(), unknown()).nullish()
+	serverId: zMcpServerAcpId,
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5157,7 +5263,7 @@ var zMessageMcpRequest = object({
 	connectionId: zMcpConnectionId,
 	method: string(),
 	params: record(string(), unknown()).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5170,7 +5276,7 @@ var zMessageMcpRequest = object({
 */
 var zDisconnectMcpRequest = object({
 	connectionId: zMcpConnectionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Allows for sending an arbitrary request that is not part of the ACP spec.
@@ -5221,41 +5327,41 @@ var zProtocolVersion = int().gte(0).lte(65535);
 * See protocol docs: [Prompt Capabilities](https://agentclientprotocol.com/protocol/initialization#prompt-capabilities)
 */
 var zPromptCapabilities = object({
-	image: boolean().optional().default(false),
-	audio: boolean().optional().default(false),
-	embeddedContext: boolean().optional().default(false),
-	_meta: record(string(), unknown()).nullish()
+	image: defaultOnError(boolean().optional().default(false), () => false),
+	audio: defaultOnError(boolean().optional().default(false), () => false),
+	embeddedContext: defaultOnError(boolean().optional().default(false), () => false),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * MCP capabilities supported by the agent
 */
 var zMcpCapabilities = object({
-	http: boolean().optional().default(false),
-	sse: boolean().optional().default(false),
-	acp: boolean().optional().default(false),
-	_meta: record(string(), unknown()).nullish()
+	http: defaultOnError(boolean().optional().default(false), () => false),
+	sse: defaultOnError(boolean().optional().default(false), () => false),
+	acp: defaultOnError(boolean().optional().default(false), () => false),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Capabilities for the `session/list` method.
 *
-* By supplying `{}` it means that the agent supports listing of sessions.
+* Supplying `{}` means the agent supports listing sessions.
 */
-var zSessionListCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionListCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for the `session/delete` method.
 *
 * Supplying `{}` means the agent supports deleting sessions from `session/list`.
 */
-var zSessionDeleteCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionDeleteCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for additional session directories support.
 *
-* By supplying `{}` it means that the agent supports the `additionalDirectories`
-* field on supported session lifecycle requests. Agents that also support
+* Supplying `{}` means the agent supports the `additionalDirectories` field on
+* supported session lifecycle requests. Agents that also support
 * `session/list` may return `SessionInfo.additionalDirectories` to report the
 * complete ordered additional-root list associated with a listed session.
 */
-var zSessionAdditionalDirectoriesCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionAdditionalDirectoriesCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -5263,23 +5369,23 @@ var zSessionAdditionalDirectoriesCapabilities = object({ _meta: record(string(),
 *
 * Capabilities for the `session/fork` method.
 *
-* By supplying `{}` it means that the agent supports forking of sessions.
+* Supplying `{}` means the agent supports forking sessions.
 *
 * @experimental
 */
-var zSessionForkCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionForkCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for the `session/resume` method.
 *
-* By supplying `{}` it means that the agent supports resuming of sessions.
+* Supplying `{}` means the agent supports resuming sessions.
 */
-var zSessionResumeCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionResumeCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for the `session/close` method.
 *
-* By supplying `{}` it means that the agent supports closing of sessions.
+* Supplying `{}` means the agent supports closing sessions.
 */
-var zSessionCloseCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zSessionCloseCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Session capabilities supported by the agent.
 *
@@ -5298,14 +5404,14 @@ var zSessionCapabilities = object({
 	fork: defaultOnError(zSessionForkCapabilities.nullish(), () => void 0),
 	resume: defaultOnError(zSessionResumeCapabilities.nullish(), () => void 0),
 	close: defaultOnError(zSessionCloseCapabilities.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Authentication-related capabilities supported by the agent.
 */
 var zAgentAuthCapabilities = object({
-	logout: defaultOnError(object({ _meta: record(string(), unknown()).nullish() }).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	logout: defaultOnError(object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5314,34 +5420,34 @@ var zAgentAuthCapabilities = object({
 *
 * Provider configuration capabilities supported by the agent.
 *
-* By supplying `{}` it means that the agent supports provider configuration methods.
+* Supplying `{}` means the agent supports provider configuration methods.
 *
 * @experimental
 */
-var zProvidersCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zProvidersCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Marker for `document/didOpen` capability support.
 */
-var zNesDocumentDidOpenCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesDocumentDidOpenCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for `document/didChange` events.
 */
 var zNesDocumentDidChangeCapabilities = object({
 	syncKind: union([literal("full"), literal("incremental")]),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Marker for `document/didClose` capability support.
 */
-var zNesDocumentDidCloseCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesDocumentDidCloseCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Marker for `document/didSave` capability support.
 */
-var zNesDocumentDidSaveCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesDocumentDidSaveCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Marker for `document/didFocus` capability support.
 */
-var zNesDocumentDidFocusCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesDocumentDidFocusCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Event capabilities the agent can consume.
 */
@@ -5352,43 +5458,43 @@ var zNesEventCapabilities = object({
 		didClose: defaultOnError(zNesDocumentDidCloseCapabilities.nullish(), () => void 0),
 		didSave: defaultOnError(zNesDocumentDidSaveCapabilities.nullish(), () => void 0),
 		didFocus: defaultOnError(zNesDocumentDidFocusCapabilities.nullish(), () => void 0),
-		_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	}).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Capabilities for recent files context.
 */
 var zNesRecentFilesCapabilities = object({
-	maxCount: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	maxCount: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Capabilities for related snippets context.
 */
-var zNesRelatedSnippetsCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesRelatedSnippetsCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for edit history context.
 */
 var zNesEditHistoryCapabilities = object({
-	maxCount: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	maxCount: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Capabilities for user actions context.
 */
 var zNesUserActionsCapabilities = object({
-	maxCount: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	maxCount: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Capabilities for open files context.
 */
-var zNesOpenFilesCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesOpenFilesCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Capabilities for diagnostics context.
 */
-var zNesDiagnosticsCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesDiagnosticsCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Context capabilities the agent wants attached to each suggestion request.
 */
@@ -5399,7 +5505,7 @@ var zNesContextCapabilities = object({
 	userActions: defaultOnError(zNesUserActionsCapabilities.nullish(), () => void 0),
 	openFiles: defaultOnError(zNesOpenFilesCapabilities.nullish(), () => void 0),
 	diagnostics: defaultOnError(zNesDiagnosticsCapabilities.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * NES capabilities advertised by the agent during initialization.
@@ -5407,7 +5513,7 @@ var zNesContextCapabilities = object({
 var zNesCapabilities = object({
 	events: defaultOnError(zNesEventCapabilities.nullish(), () => void 0),
 	context: defaultOnError(zNesContextCapabilities.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * The encoding used for character offsets in positions.
@@ -5428,23 +5534,31 @@ var zPositionEncodingKind = union([
 * See protocol docs: [Agent Capabilities](https://agentclientprotocol.com/protocol/initialization#agent-capabilities)
 */
 var zAgentCapabilities = object({
-	loadSession: boolean().optional().default(false),
-	promptCapabilities: zPromptCapabilities.optional().default({
+	loadSession: defaultOnError(boolean().optional().default(false), () => false),
+	promptCapabilities: defaultOnError(zPromptCapabilities.optional().default({
 		image: false,
 		audio: false,
 		embeddedContext: false
-	}),
-	mcpCapabilities: zMcpCapabilities.optional().default({
+	}), () => ({
+		image: false,
+		audio: false,
+		embeddedContext: false
+	})),
+	mcpCapabilities: defaultOnError(zMcpCapabilities.optional().default({
 		http: false,
 		sse: false,
 		acp: false
-	}),
-	sessionCapabilities: zSessionCapabilities.optional().default({}),
-	auth: zAgentAuthCapabilities.optional().default({}),
+	}), () => ({
+		http: false,
+		sse: false,
+		acp: false
+	})),
+	sessionCapabilities: defaultOnError(zSessionCapabilities.optional().default({}), () => ({})),
+	auth: defaultOnError(zAgentAuthCapabilities.optional().default({}), () => ({})),
 	providers: defaultOnError(zProvidersCapabilities.nullish(), () => void 0),
 	nes: defaultOnError(zNesCapabilities.nullish(), () => void 0),
 	positionEncoding: defaultOnError(zPositionEncodingKind.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Typed identifier used for auth method values on the wire.
@@ -5461,10 +5575,10 @@ var zAuthMethodId = string();
 */
 var zAuthEnvVar = object({
 	name: string(),
-	label: string().nullish(),
-	secret: boolean().optional().default(true),
-	optional: boolean().optional().default(false),
-	_meta: record(string(), unknown()).nullish()
+	label: defaultOnError(string().nullish(), () => void 0),
+	secret: defaultOnError(boolean().optional().default(true), () => true),
+	optional: defaultOnError(boolean().optional().default(false), () => false),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5480,10 +5594,10 @@ var zAuthEnvVar = object({
 var zAuthMethodEnvVar = object({
 	id: zAuthMethodId,
 	name: string(),
-	description: string().nullish(),
-	vars: array(zAuthEnvVar),
-	link: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	vars: requiredDefaultOnError(vecSkipError(zAuthEnvVar), () => []),
+	link: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5499,10 +5613,10 @@ var zAuthMethodEnvVar = object({
 var zAuthMethodTerminal = object({
 	id: zAuthMethodId,
 	name: string(),
-	description: string().nullish(),
-	args: array(string()).optional(),
-	env: record(string(), string()).optional(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	args: defaultOnError(vecSkipError(string()).optional(), () => []),
+	env: defaultOnError(record(string(), string()).optional(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Agent handles authentication itself.
@@ -5512,8 +5626,8 @@ var zAuthMethodTerminal = object({
 var zAuthMethodAgent = object({
 	id: zAuthMethodId,
 	name: string(),
-	description: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Describes an available authentication method.
@@ -5528,14 +5642,14 @@ var zAuthMethod = union([
 ]);
 /**
 * Metadata about the implementation of the client or agent.
-* Describes the name and version of an MCP implementation, with an optional
+* Describes the name and version of an ACP implementation, with an optional
 * title for UI representation.
 */
 var zImplementation = object({
 	name: string(),
-	title: string().nullish(),
+	title: defaultOnError(string().nullish(), () => void 0),
 	version: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to the `initialize` method.
@@ -5546,7 +5660,7 @@ var zImplementation = object({
 */
 var zInitializeResponse = object({
 	protocolVersion: zProtocolVersion,
-	agentCapabilities: zAgentCapabilities.optional().default({
+	agentCapabilities: defaultOnError(zAgentCapabilities.optional().default({
 		loadSession: false,
 		promptCapabilities: {
 			image: false,
@@ -5560,15 +5674,39 @@ var zInitializeResponse = object({
 		},
 		sessionCapabilities: {},
 		auth: {}
-	}),
+	}), () => ({
+		loadSession: false,
+		promptCapabilities: {
+			image: false,
+			audio: false,
+			embeddedContext: false
+		},
+		mcpCapabilities: {
+			http: false,
+			sse: false,
+			acp: false
+		},
+		sessionCapabilities: {},
+		auth: {}
+	})),
 	authMethods: defaultOnError(vecSkipError(zAuthMethod).optional().default([]), () => []),
 	agentInfo: defaultOnError(zImplementation.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to the `authenticate` method.
 */
-var zAuthenticateResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zAuthenticateResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
+/**
+* **UNSTABLE**
+*
+* This capability is not part of the spec yet, and may be removed or changed at any point.
+*
+* Unique identifier for a configurable LLM provider.
+*
+* @experimental
+*/
+var zProviderId = string();
 /**
 * **UNSTABLE**
 *
@@ -5603,7 +5741,7 @@ var zLlmProtocol = union([
 var zProviderCurrentConfig = object({
 	apiType: zLlmProtocol,
 	baseUrl: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5615,14 +5753,14 @@ var zProviderCurrentConfig = object({
 * @experimental
 */
 var zListProvidersResponse = object({
-	providers: requiredDefaultOnError(vecSkipError(object({
-		id: string(),
+	providers: array(object({
+		providerId: zProviderId,
 		supported: requiredDefaultOnError(vecSkipError(zLlmProtocol), () => []),
 		required: boolean(),
 		current: zProviderCurrentConfig.nullish(),
-		_meta: record(string(), unknown()).nullish()
-	})), () => []),
-	_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
+	})),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -5633,7 +5771,7 @@ var zListProvidersResponse = object({
 *
 * @experimental
 */
-var zSetProviderResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zSetProviderResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -5643,11 +5781,11 @@ var zSetProviderResponse = object({ _meta: record(string(), unknown()).nullish()
 *
 * @experimental
 */
-var zDisableProviderResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zDisableProviderResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Response to the `logout` method.
 */
-var zLogoutResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zLogoutResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Unique identifier for a Session Mode.
 */
@@ -5660,10 +5798,10 @@ var zSessionModeState = object({
 	availableModes: requiredDefaultOnError(vecSkipError(object({
 		id: zSessionModeId,
 		name: string(),
-		description: string().nullish(),
-		_meta: record(string(), unknown()).nullish()
+		description: defaultOnError(string().nullish(), () => void 0),
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	})), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Unique identifier for a session configuration option.
@@ -5697,8 +5835,8 @@ var zSessionConfigValueId = string();
 var zSessionConfigSelectOption = object({
 	value: zSessionConfigValueId,
 	name: string(),
-	description: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	description: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A group of possible values for a session configuration option.
@@ -5706,8 +5844,8 @@ var zSessionConfigSelectOption = object({
 var zSessionConfigSelectGroup = object({
 	group: string(),
 	name: string(),
-	options: array(zSessionConfigSelectOption),
-	_meta: record(string(), unknown()).nullish()
+	options: requiredDefaultOnError(vecSkipError(zSessionConfigSelectOption), () => []),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A single-value selector (dropdown) session configuration option payload.
@@ -5717,13 +5855,7 @@ var zSessionConfigSelect = object({
 	options: union([array(zSessionConfigSelectOption), array(zSessionConfigSelectGroup)])
 });
 /**
-* **UNSTABLE**
-*
-* This capability is not part of the spec yet, and may be removed or changed at any point.
-*
 * A boolean on/off toggle session configuration option payload.
-*
-* @experimental
 */
 var zSessionConfigBoolean = object({ currentValue: boolean() });
 /**
@@ -5732,9 +5864,9 @@ var zSessionConfigBoolean = object({ currentValue: boolean() });
 var zSessionConfigOption = intersection(union([zSessionConfigSelect.and(object({ type: literal("select") })), zSessionConfigBoolean.and(object({ type: literal("boolean") }))]), object({
 	id: zSessionConfigId,
 	name: string(),
-	description: string().nullish(),
+	description: defaultOnError(string().nullish(), () => void 0),
 	category: defaultOnError(zSessionConfigOptionCategory.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 }));
 /**
 * Response from creating a new session.
@@ -5745,7 +5877,7 @@ var zNewSessionResponse = object({
 	sessionId: zSessionId,
 	modes: defaultOnError(zSessionModeState.nullish(), () => void 0),
 	configOptions: defaultOnError(vecSkipError(zSessionConfigOption).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from loading an existing session.
@@ -5753,7 +5885,7 @@ var zNewSessionResponse = object({
 var zLoadSessionResponse = object({
 	modes: defaultOnError(zSessionModeState.nullish(), () => void 0),
 	configOptions: defaultOnError(vecSkipError(zSessionConfigOption).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from listing sessions.
@@ -5762,18 +5894,18 @@ var zListSessionsResponse = object({
 	sessions: requiredDefaultOnError(vecSkipError(object({
 		sessionId: zSessionId,
 		cwd: string(),
-		additionalDirectories: array(string()).optional(),
+		additionalDirectories: defaultOnError(vecSkipError(string()).optional(), () => []),
 		title: defaultOnError(string().nullish(), () => void 0),
 		updatedAt: defaultOnError(string().nullish(), () => void 0),
-		_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	})), () => []),
-	nextCursor: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	nextCursor: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from deleting a session.
 */
-var zDeleteSessionResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zDeleteSessionResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -5787,7 +5919,7 @@ var zForkSessionResponse = object({
 	sessionId: zSessionId,
 	modes: defaultOnError(zSessionModeState.nullish(), () => void 0),
 	configOptions: defaultOnError(vecSkipError(zSessionConfigOption).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from resuming an existing session.
@@ -5795,22 +5927,22 @@ var zForkSessionResponse = object({
 var zResumeSessionResponse = object({
 	modes: defaultOnError(zSessionModeState.nullish(), () => void 0),
 	configOptions: defaultOnError(vecSkipError(zSessionConfigOption).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from closing a session.
 */
-var zCloseSessionResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zCloseSessionResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Response to `session/set_mode` method.
 */
-var zSetSessionModeResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zSetSessionModeResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Response to `session/set_config_option` method.
 */
 var zSetSessionConfigOptionResponse = object({
 	configOptions: requiredDefaultOnError(vecSkipError(zSessionConfigOption), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from processing a user prompt.
@@ -5829,20 +5961,24 @@ var zPromptResponse = object({
 		totalTokens: number(),
 		inputTokens: number(),
 		outputTokens: number(),
-		thoughtTokens: number().nullish(),
-		cachedReadTokens: number().nullish(),
-		cachedWriteTokens: number().nullish(),
-		_meta: record(string(), unknown()).nullish()
+		thoughtTokens: defaultOnError(number().nullish(), () => void 0),
+		cachedReadTokens: defaultOnError(number().nullish(), () => void 0),
+		cachedWriteTokens: defaultOnError(number().nullish(), () => void 0),
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	}).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to `nes/start`.
 */
 var zStartNesResponse = object({
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
+/**
+* Unique identifier for a next edit suggestion.
+*/
+var zNesSuggestionId = string();
 /**
 * A zero-based position in a text document.
 *
@@ -5851,7 +5987,7 @@ var zStartNesResponse = object({
 var zPosition = object({
 	line: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }),
 	character: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A range in a text document, expressed as start and end positions.
@@ -5859,7 +5995,7 @@ var zPosition = object({
 var zRange = object({
 	start: zPosition,
 	end: zPosition,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A text edit within a suggestion.
@@ -5867,64 +6003,64 @@ var zRange = object({
 var zNesTextEdit = object({
 	range: zRange,
 	newText: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A text edit suggestion.
 */
 var zNesEditSuggestion = object({
-	id: string(),
+	id: zNesSuggestionId,
 	uri: string(),
 	edits: array(zNesTextEdit),
 	cursorPosition: defaultOnError(zPosition.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A jump-to-location suggestion.
 */
 var zNesJumpSuggestion = object({
-	id: string(),
+	id: zNesSuggestionId,
 	uri: string(),
 	position: zPosition,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A rename symbol suggestion.
 */
 var zNesRenameSuggestion = object({
-	id: string(),
+	id: zNesSuggestionId,
 	uri: string(),
 	position: zPosition,
 	newName: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A search-and-replace suggestion.
 */
 var zNesSearchAndReplaceSuggestion = object({
-	id: string(),
+	id: zNesSuggestionId,
 	uri: string(),
 	search: string(),
 	replace: string(),
 	isRegex: boolean().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to `nes/suggest`.
 */
 var zSuggestNesResponse = object({
-	suggestions: requiredDefaultOnError(vecSkipError(union([
+	suggestions: array(union([
 		zNesEditSuggestion.and(object({ kind: literal("edit") })),
 		zNesJumpSuggestion.and(object({ kind: literal("jump") })),
 		zNesRenameSuggestion.and(object({ kind: literal("rename") })),
 		zNesSearchAndReplaceSuggestion.and(object({ kind: literal("searchAndReplace") }))
-	])), () => []),
-	_meta: record(string(), unknown()).nullish()
+	])),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response from closing an NES session.
 */
-var zCloseNesResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zCloseNesResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Allows for sending an arbitrary response to an [`ExtRequest`] that is not part of the ACP spec.
 * Extension methods provide a way to add custom functionality while maintaining
@@ -5963,11 +6099,10 @@ var zError = object({
 		literal(-32800),
 		literal(-32e3),
 		literal(-32002),
-		literal(-32042),
 		int().min(-2147483648, { error: "Invalid value: Expected int32 to be >= -2147483648" }).max(2147483647, { error: "Invalid value: Expected int32 to be <= 2147483647" })
 	]),
 	message: string(),
-	data: unknown().optional()
+	data: defaultOnError(unknown().optional(), () => void 0)
 });
 union([object({
 	id: zRequestId,
@@ -6003,8 +6138,8 @@ union([object({
 */
 var zContentChunk = object({
 	content: zContentBlock,
-	messageId: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	messageId: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Represents a tool call that the language model has requested.
@@ -6017,13 +6152,14 @@ var zContentChunk = object({
 var zToolCall = object({
 	toolCallId: zToolCallId,
 	title: string(),
-	kind: zToolKind.optional(),
-	status: zToolCallStatus.optional(),
+	name: defaultOnError(string().nullish(), () => void 0),
+	kind: defaultOnError(zToolKind.optional(), () => void 0),
+	status: defaultOnError(zToolCallStatus.optional(), () => void 0),
 	content: defaultOnError(vecSkipError(zToolCallContent).optional(), () => []),
 	locations: defaultOnError(vecSkipError(zToolCallLocation).optional(), () => []),
-	rawInput: unknown().optional(),
-	rawOutput: unknown().optional(),
-	_meta: record(string(), unknown()).nullish()
+	rawInput: defaultOnError(unknown().optional(), () => void 0),
+	rawOutput: defaultOnError(unknown().optional(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Priority levels for plan entries.
@@ -6059,7 +6195,7 @@ var zPlanEntry = object({
 	content: string(),
 	priority: zPlanEntryPriority,
 	status: zPlanEntryStatus,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An execution plan for accomplishing complex tasks.
@@ -6072,7 +6208,7 @@ var zPlanEntry = object({
 */
 var zPlan = object({
 	entries: requiredDefaultOnError(vecSkipError(zPlanEntry), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6094,9 +6230,9 @@ var zPlanId = string();
 * @experimental
 */
 var zPlanItems = object({
-	id: zPlanId,
+	planId: zPlanId,
 	entries: requiredDefaultOnError(vecSkipError(zPlanEntry), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6108,9 +6244,9 @@ var zPlanItems = object({
 * @experimental
 */
 var zPlanFile = object({
-	id: zPlanId,
+	planId: zPlanId,
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6122,9 +6258,9 @@ var zPlanFile = object({
 * @experimental
 */
 var zPlanMarkdown = object({
-	id: zPlanId,
+	planId: zPlanId,
 	content: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6141,7 +6277,7 @@ var zPlanUpdate = object({
 		zPlanFile.and(object({ type: literal("file") })),
 		zPlanMarkdown.and(object({ type: literal("markdown") }))
 	]),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6153,8 +6289,8 @@ var zPlanUpdate = object({
 * @experimental
 */
 var zPlanRemoved = object({
-	id: zPlanId,
-	_meta: record(string(), unknown()).nullish()
+	planId: zPlanId,
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * unstructured
@@ -6163,7 +6299,7 @@ var zPlanRemoved = object({
 */
 var zAvailableCommandInput = object({
 	hint: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Available commands are ready or have changed
@@ -6173,9 +6309,9 @@ var zAvailableCommandsUpdate = object({
 		name: string(),
 		description: string(),
 		input: defaultOnError(zAvailableCommandInput.nullish(), () => void 0),
-		_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	})), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * The current mode of the session has changed
@@ -6184,14 +6320,14 @@ var zAvailableCommandsUpdate = object({
 */
 var zCurrentModeUpdate = object({
 	currentModeId: zSessionModeId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Session configuration options have been updated.
 */
 var zConfigOptionUpdate = object({
 	configOptions: requiredDefaultOnError(vecSkipError(zSessionConfigOption), () => []),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Update to session metadata. All fields are optional to support partial updates.
@@ -6200,9 +6336,9 @@ var zConfigOptionUpdate = object({
 * This allows clients to display dynamic session names and track session state changes.
 */
 var zSessionInfoUpdate = object({
-	title: string().nullish(),
-	updatedAt: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	title: defaultOnError(string().nullish(), () => void 0),
+	updatedAt: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Cost information for a session.
@@ -6210,7 +6346,7 @@ var zSessionInfoUpdate = object({
 var zCost = object({
 	amount: number(),
 	currency: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Context window and cost update for a session.
@@ -6219,7 +6355,7 @@ var zUsageUpdate = object({
 	used: number(),
 	size: number(),
 	cost: defaultOnError(zCost.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification containing a session update from the agent.
@@ -6245,7 +6381,7 @@ var zSessionNotification = object({
 		zSessionInfoUpdate.and(object({ sessionUpdate: literal("session_info_update") })),
 		zUsageUpdate.and(object({ sessionUpdate: literal("usage_update") }))
 	]),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6258,7 +6394,7 @@ var zSessionNotification = object({
 */
 var zCompleteElicitationNotification = object({
 	elicitationId: zElicitationId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6275,8 +6411,8 @@ var zCompleteElicitationNotification = object({
 var zMessageMcpNotification = object({
 	connectionId: zMcpConnectionId,
 	method: string(),
-	params: record(string(), unknown()).nullish(),
-	_meta: record(string(), unknown()).nullish()
+	params: defaultOnError(record(string(), unknown()).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Allows the Agent to send an arbitrary notification that is not part of the ACP spec.
@@ -6301,25 +6437,19 @@ object({
 * See protocol docs: [FileSystem](https://agentclientprotocol.com/protocol/initialization#filesystem)
 */
 var zFileSystemCapabilities = object({
-	readTextFile: boolean().optional().default(false),
-	writeTextFile: boolean().optional().default(false),
-	_meta: record(string(), unknown()).nullish()
+	readTextFile: defaultOnError(boolean().optional().default(false), () => false),
+	writeTextFile: defaultOnError(boolean().optional().default(false), () => false),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
-* **UNSTABLE**
-*
-* This capability is not part of the spec yet, and may be removed or changed at any point.
-*
 * Session-related capabilities supported by the client.
-*
-* @experimental
 */
 var zClientSessionCapabilities = object({
 	configOptions: defaultOnError(object({
-		boolean: defaultOnError(object({ _meta: record(string(), unknown()).nullish() }).nullish(), () => void 0),
-		_meta: record(string(), unknown()).nullish()
+		boolean: defaultOnError(object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) }).nullish(), () => void 0),
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	}).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6330,7 +6460,7 @@ var zClientSessionCapabilities = object({
 *
 * @experimental
 */
-var zPlanCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zPlanCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -6345,8 +6475,8 @@ var zPlanCapabilities = object({ _meta: record(string(), unknown()).nullish() })
 * @experimental
 */
 var zAuthCapabilities = object({
-	terminal: boolean().optional().default(false),
-	_meta: record(string(), unknown()).nullish()
+	terminal: defaultOnError(boolean().optional().default(false), () => false),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6355,9 +6485,11 @@ var zAuthCapabilities = object({
 *
 * Form-based elicitation capabilities.
 *
+* Supplying `{}` means the client supports form-based elicitation.
+*
 * @experimental
 */
-var zElicitationFormCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zElicitationFormCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -6365,9 +6497,11 @@ var zElicitationFormCapabilities = object({ _meta: record(string(), unknown()).n
 *
 * URL-based elicitation capabilities.
 *
+* Supplying `{}` means the client supports URL-based elicitation.
+*
 * @experimental
 */
-var zElicitationUrlCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zElicitationUrlCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -6380,20 +6514,20 @@ var zElicitationUrlCapabilities = object({ _meta: record(string(), unknown()).nu
 var zElicitationCapabilities = object({
 	form: defaultOnError(zElicitationFormCapabilities.nullish(), () => void 0),
 	url: defaultOnError(zElicitationUrlCapabilities.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Marker for jump suggestion support.
 */
-var zNesJumpCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesJumpCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Marker for rename suggestion support.
 */
-var zNesRenameCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesRenameCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Marker for search and replace suggestion support.
 */
-var zNesSearchAndReplaceCapabilities = object({ _meta: record(string(), unknown()).nullish() });
+var zNesSearchAndReplaceCapabilities = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * NES capabilities advertised by the client during initialization.
 */
@@ -6401,7 +6535,7 @@ var zClientNesCapabilities = object({
 	jump: defaultOnError(zNesJumpCapabilities.nullish(), () => void 0),
 	rename: defaultOnError(zNesRenameCapabilities.nullish(), () => void 0),
 	searchAndReplace: defaultOnError(zNesSearchAndReplaceCapabilities.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for the initialize method.
@@ -6412,19 +6546,22 @@ var zClientNesCapabilities = object({
 */
 var zInitializeRequest = object({
 	protocolVersion: zProtocolVersion,
-	clientCapabilities: object({
-		fs: zFileSystemCapabilities.optional().default({
+	clientCapabilities: defaultOnError(object({
+		fs: defaultOnError(zFileSystemCapabilities.optional().default({
 			readTextFile: false,
 			writeTextFile: false
-		}),
-		terminal: boolean().optional().default(false),
+		}), () => ({
+			readTextFile: false,
+			writeTextFile: false
+		})),
+		terminal: defaultOnError(boolean().optional().default(false), () => false),
 		session: defaultOnError(zClientSessionCapabilities.nullish(), () => void 0),
 		plan: defaultOnError(zPlanCapabilities.nullish(), () => void 0),
-		auth: zAuthCapabilities.optional().default({ terminal: false }),
+		auth: defaultOnError(zAuthCapabilities.optional().default({ terminal: false }), () => ({ terminal: false })),
 		elicitation: defaultOnError(zElicitationCapabilities.nullish(), () => void 0),
 		nes: defaultOnError(zClientNesCapabilities.nullish(), () => void 0),
 		positionEncodings: defaultOnError(vecSkipError(zPositionEncodingKind).optional(), () => []),
-		_meta: record(string(), unknown()).nullish()
+		_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 	}).optional().default({
 		fs: {
 			readTextFile: false,
@@ -6432,9 +6569,16 @@ var zInitializeRequest = object({
 		},
 		terminal: false,
 		auth: { terminal: false }
-	}),
+	}), () => ({
+		fs: {
+			readTextFile: false,
+			writeTextFile: false
+		},
+		terminal: false,
+		auth: { terminal: false }
+	})),
 	clientInfo: defaultOnError(zImplementation.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for the authenticate method.
@@ -6443,7 +6587,7 @@ var zInitializeRequest = object({
 */
 var zAuthenticateRequest = object({
 	methodId: zAuthMethodId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6454,7 +6598,7 @@ var zAuthenticateRequest = object({
 *
 * @experimental
 */
-var zListProvidersRequest = object({ _meta: record(string(), unknown()).nullish() });
+var zListProvidersRequest = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * **UNSTABLE**
 *
@@ -6462,16 +6606,16 @@ var zListProvidersRequest = object({ _meta: record(string(), unknown()).nullish(
 *
 * Request parameters for `providers/set`.
 *
-* Replaces the full configuration for one provider id.
+* Replaces the full configuration for one provider ID.
 *
 * @experimental
 */
 var zSetProviderRequest = object({
-	id: string(),
+	providerId: zProviderId,
 	apiType: zLlmProtocol,
 	baseUrl: string(),
 	headers: record(string(), string()).optional(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6483,22 +6627,22 @@ var zSetProviderRequest = object({
 * @experimental
 */
 var zDisableProviderRequest = object({
-	id: string(),
-	_meta: record(string(), unknown()).nullish()
+	providerId: zProviderId,
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for the logout method.
 *
 * Terminates the current authenticated session.
 */
-var zLogoutRequest = object({ _meta: record(string(), unknown()).nullish() });
+var zLogoutRequest = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * An HTTP header to set when making requests to the MCP server.
 */
 var zHttpHeader = object({
 	name: string(),
 	value: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * HTTP transport configuration for MCP.
@@ -6507,7 +6651,7 @@ var zMcpServerHttp = object({
 	name: string(),
 	url: string(),
 	headers: array(zHttpHeader),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * SSE transport configuration for MCP.
@@ -6516,7 +6660,7 @@ var zMcpServerSse = object({
 	name: string(),
 	url: string(),
 	headers: array(zHttpHeader),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6532,8 +6676,8 @@ var zMcpServerSse = object({
 */
 var zMcpServerAcp = object({
 	name: string(),
-	id: zMcpServerAcpId,
-	_meta: record(string(), unknown()).nullish()
+	serverId: zMcpServerAcpId,
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Stdio transport configuration for MCP.
@@ -6543,7 +6687,7 @@ var zMcpServerStdio = object({
 	command: string(),
 	args: array(string()),
 	env: array(zEnvVariable),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Configuration for connecting to an MCP (Model Context Protocol) server.
@@ -6566,9 +6710,9 @@ var zMcpServer = union([
 */
 var zNewSessionRequest = object({
 	cwd: string(),
-	additionalDirectories: array(string()).optional(),
-	mcpServers: array(zMcpServer),
-	_meta: record(string(), unknown()).nullish()
+	additionalDirectories: defaultOnError(vecSkipError(string()).optional(), () => []),
+	mcpServers: requiredDefaultOnError(vecSkipError(zMcpServer), () => []),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for loading an existing session.
@@ -6578,11 +6722,11 @@ var zNewSessionRequest = object({
 * See protocol docs: [Loading Sessions](https://agentclientprotocol.com/protocol/session-setup#loading-sessions)
 */
 var zLoadSessionRequest = object({
-	mcpServers: array(zMcpServer),
+	mcpServers: requiredDefaultOnError(vecSkipError(zMcpServer), () => []),
 	cwd: string(),
-	additionalDirectories: array(string()).optional(),
+	additionalDirectories: defaultOnError(vecSkipError(string()).optional(), () => []),
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for listing existing sessions.
@@ -6592,7 +6736,7 @@ var zLoadSessionRequest = object({
 var zListSessionsRequest = object({
 	cwd: string().nullish(),
 	cursor: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for deleting an existing session from `session/list`.
@@ -6601,7 +6745,7 @@ var zListSessionsRequest = object({
 */
 var zDeleteSessionRequest = object({
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * **UNSTABLE**
@@ -6620,9 +6764,9 @@ var zDeleteSessionRequest = object({
 var zForkSessionRequest = object({
 	sessionId: zSessionId,
 	cwd: string(),
-	additionalDirectories: array(string()).optional(),
-	mcpServers: array(zMcpServer).optional(),
-	_meta: record(string(), unknown()).nullish()
+	additionalDirectories: defaultOnError(vecSkipError(string()).optional(), () => []),
+	mcpServers: defaultOnError(vecSkipError(zMcpServer).optional(), () => []),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for resuming an existing session.
@@ -6635,9 +6779,9 @@ var zForkSessionRequest = object({
 var zResumeSessionRequest = object({
 	sessionId: zSessionId,
 	cwd: string(),
-	additionalDirectories: array(string()).optional(),
-	mcpServers: array(zMcpServer).optional(),
-	_meta: record(string(), unknown()).nullish()
+	additionalDirectories: defaultOnError(vecSkipError(string()).optional(), () => []),
+	mcpServers: defaultOnError(vecSkipError(zMcpServer).optional(), () => []),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for closing an active session.
@@ -6650,7 +6794,7 @@ var zResumeSessionRequest = object({
 */
 var zCloseSessionRequest = object({
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for setting a session mode.
@@ -6658,7 +6802,7 @@ var zCloseSessionRequest = object({
 var zSetSessionModeRequest = object({
 	sessionId: zSessionId,
 	modeId: zSessionModeId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request parameters for setting a session configuration option.
@@ -6669,7 +6813,7 @@ var zSetSessionConfigOptionRequest = intersection(union([object({
 }), object({ value: zSessionConfigValueId })]), object({
 	sessionId: zSessionId,
 	configId: zSessionConfigId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 }));
 /**
 * Request parameters for sending a user prompt to the agent.
@@ -6681,7 +6825,7 @@ var zSetSessionConfigOptionRequest = intersection(union([object({
 var zPromptRequest = object({
 	sessionId: zSessionId,
 	prompt: array(zContentBlock),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A workspace folder.
@@ -6689,7 +6833,7 @@ var zPromptRequest = object({
 var zWorkspaceFolder = object({
 	uri: string(),
 	name: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Repository metadata for an NES session.
@@ -6698,16 +6842,16 @@ var zNesRepository = object({
 	name: string(),
 	owner: string(),
 	remoteUrl: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to start an NES session.
 */
 var zStartNesRequest = object({
-	workspaceUri: string().nullish(),
-	workspaceFolders: defaultOnError(vecSkipError(zWorkspaceFolder).nullish(), () => void 0),
+	workspaceUri: defaultOnError(string().nullish(), () => void 0),
+	workspaceFolders: array(zWorkspaceFolder).nullish(),
 	repository: defaultOnError(zNesRepository.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * What triggered the suggestion request.
@@ -6724,7 +6868,7 @@ var zNesRecentFile = object({
 	uri: string(),
 	languageId: string(),
 	text: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A code excerpt from a file.
@@ -6733,7 +6877,7 @@ var zNesExcerpt = object({
 	startLine: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }),
 	endLine: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }),
 	text: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A related code snippet from a file.
@@ -6741,7 +6885,7 @@ var zNesExcerpt = object({
 var zNesRelatedSnippet = object({
 	uri: string(),
 	excerpts: array(zNesExcerpt),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An entry in the edit history.
@@ -6749,7 +6893,7 @@ var zNesRelatedSnippet = object({
 var zNesEditHistoryEntry = object({
 	uri: string(),
 	diff: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A user action (typing, cursor movement, etc.).
@@ -6759,7 +6903,7 @@ var zNesUserAction = object({
 	uri: string(),
 	position: zPosition,
 	timestampMs: number(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * An open file in the editor.
@@ -6769,7 +6913,7 @@ var zNesOpenFile = object({
 	languageId: string(),
 	visibleRange: defaultOnError(zRange.nullish(), () => void 0),
 	lastFocusedMs: defaultOnError(number().nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Severity of a diagnostic.
@@ -6788,19 +6932,19 @@ var zNesDiagnostic = object({
 	range: zRange,
 	severity: zNesDiagnosticSeverity,
 	message: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Context attached to a suggestion request.
 */
 var zNesSuggestContext = object({
-	recentFiles: defaultOnError(vecSkipError(zNesRecentFile).nullish(), () => void 0),
-	relatedSnippets: defaultOnError(vecSkipError(zNesRelatedSnippet).nullish(), () => void 0),
-	editHistory: defaultOnError(vecSkipError(zNesEditHistoryEntry).nullish(), () => void 0),
-	userActions: defaultOnError(vecSkipError(zNesUserAction).nullish(), () => void 0),
-	openFiles: defaultOnError(vecSkipError(zNesOpenFile).nullish(), () => void 0),
-	diagnostics: defaultOnError(vecSkipError(zNesDiagnostic).nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	recentFiles: array(zNesRecentFile).nullish(),
+	relatedSnippets: array(zNesRelatedSnippet).nullish(),
+	editHistory: array(zNesEditHistoryEntry).nullish(),
+	userActions: array(zNesUserAction).nullish(),
+	openFiles: array(zNesOpenFile).nullish(),
+	diagnostics: array(zNesDiagnostic).nullish(),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request for a code suggestion.
@@ -6810,10 +6954,10 @@ var zSuggestNesRequest = object({
 	uri: string(),
 	version: number(),
 	position: zPosition,
-	selection: defaultOnError(zRange.nullish(), () => void 0),
+	selection: zRange.nullish(),
 	triggerKind: zNesTriggerKind,
-	context: defaultOnError(zNesSuggestContext.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	context: zNesSuggestContext.nullish(),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Request to close an NES session.
@@ -6823,7 +6967,7 @@ var zSuggestNesRequest = object({
 */
 var zCloseNesRequest = object({
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 object({
 	id: zRequestId,
@@ -6855,42 +6999,42 @@ object({
 /**
 * Response to `fs/write_text_file`
 */
-var zWriteTextFileResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zWriteTextFileResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Response containing the contents of a text file.
 */
 var zReadTextFileResponse = object({
 	content: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * The user selected one of the provided options.
 */
 var zSelectedPermissionOutcome = object({
 	optionId: zPermissionOptionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to a permission request.
 */
 var zRequestPermissionResponse = object({
 	outcome: union([object({ outcome: literal("cancelled") }), zSelectedPermissionOutcome.and(object({ outcome: literal("selected") }))]),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response containing the ID of the created terminal.
 */
 var zCreateTerminalResponse = object({
 	terminalId: zTerminalId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Exit status of a terminal command.
 */
 var zTerminalExitStatus = object({
-	exitCode: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	signal: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	exitCode: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	signal: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response containing the terminal output and exit status.
@@ -6898,25 +7042,25 @@ var zTerminalExitStatus = object({
 var zTerminalOutputResponse = object({
 	output: string(),
 	truncated: boolean(),
-	exitStatus: zTerminalExitStatus.nullish(),
-	_meta: record(string(), unknown()).nullish()
+	exitStatus: defaultOnError(zTerminalExitStatus.nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to terminal/release method
 */
-var zReleaseTerminalResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zReleaseTerminalResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Response containing the exit status of a terminal command.
 */
 var zWaitForTerminalExitResponse = object({
-	exitCode: int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(),
-	signal: string().nullish(),
-	_meta: record(string(), unknown()).nullish()
+	exitCode: defaultOnError(int().gte(0).max(4294967295, { error: "Invalid value: Expected uint32 to be <= 4294967295" }).nullish(), () => void 0),
+	signal: defaultOnError(string().nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Response to `terminal/kill` method
 */
-var zKillTerminalResponse = object({ _meta: record(string(), unknown()).nullish() });
+var zKillTerminalResponse = object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) });
 /**
 * Allowed wire representations for [`ElicitationContentValue`].
 */
@@ -6927,6 +7071,16 @@ var zElicitationContentValue = union([
 	boolean(),
 	array(string())
 ]);
+/**
+* **UNSTABLE**
+*
+* This capability is not part of the spec yet, and may be removed or changed at any point.
+*
+* The user accepted the elicitation and provided content.
+*
+* @experimental
+*/
+var zElicitationAcceptAction = object({ content: record(string(), zElicitationContentValue).nullish() });
 union([object({
 	id: zRequestId,
 	result: union([
@@ -6938,18 +7092,27 @@ union([object({
 		zReleaseTerminalResponse,
 		zWaitForTerminalExitResponse,
 		zKillTerminalResponse,
-		intersection(union([
-			object({ content: record(string(), zElicitationContentValue).nullish() }).and(object({ action: literal("accept") })),
+		preserveCustomPayload(intersection(union([
+			zElicitationAcceptAction.and(object({ action: literal("accept") })),
 			object({ action: literal("decline") }),
-			object({ action: literal("cancel") })
-		]), object({ _meta: record(string(), unknown()).nullish() })),
+			object({ action: literal("cancel") }),
+			excludeKnownTags(object({ action: string() }), "action", [
+				"accept",
+				"cancel",
+				"decline"
+			])
+		]), object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) })), "action", [
+			"accept",
+			"cancel",
+			"decline"
+		]),
 		object({
 			connectionId: zMcpConnectionId,
-			_meta: record(string(), unknown()).nullish()
+			_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 		}),
-		object({ _meta: record(string(), unknown()).nullish() }),
-		zExtResponse,
-		zMessageMcpResponse
+		object({ _meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0) }),
+		zMessageMcpResponse,
+		zExtResponse
 	])
 }), object({
 	id: zRequestId,
@@ -6962,7 +7125,7 @@ union([object({
 */
 var zCancelNotification = object({
 	sessionId: zSessionId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a file is opened in the editor.
@@ -6973,7 +7136,7 @@ var zDidOpenDocumentNotification = object({
 	languageId: string(),
 	version: number(),
 	text: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * A content change event for a document.
@@ -6984,7 +7147,7 @@ var zDidOpenDocumentNotification = object({
 var zTextDocumentContentChangeEvent = object({
 	range: zRange.nullish(),
 	text: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a file is edited.
@@ -6993,8 +7156,8 @@ var zDidChangeDocumentNotification = object({
 	sessionId: zSessionId,
 	uri: string(),
 	version: number(),
-	contentChanges: array(zTextDocumentContentChangeEvent),
-	_meta: record(string(), unknown()).nullish()
+	contentChanges: requiredDefaultOnError(vecSkipError(zTextDocumentContentChangeEvent), () => []),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a file is closed.
@@ -7002,7 +7165,7 @@ var zDidChangeDocumentNotification = object({
 var zDidCloseDocumentNotification = object({
 	sessionId: zSessionId,
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a file is saved.
@@ -7010,7 +7173,7 @@ var zDidCloseDocumentNotification = object({
 var zDidSaveDocumentNotification = object({
 	sessionId: zSessionId,
 	uri: string(),
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a file becomes the active editor tab.
@@ -7021,33 +7184,29 @@ var zDidFocusDocumentNotification = object({
 	version: number(),
 	position: zPosition,
 	visibleRange: zRange,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 /**
 * Notification sent when a suggestion is accepted.
 */
 var zAcceptNesNotification = object({
 	sessionId: zSessionId,
-	id: string(),
-	_meta: record(string(), unknown()).nullish()
+	id: zNesSuggestionId,
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
-/**
-* The reason a suggestion was rejected.
-*/
-var zNesRejectReason = union([
-	literal("rejected"),
-	literal("ignored"),
-	literal("replaced"),
-	literal("cancelled")
-]);
 /**
 * Notification sent when a suggestion is rejected.
 */
 var zRejectNesNotification = object({
 	sessionId: zSessionId,
-	id: string(),
-	reason: defaultOnError(zNesRejectReason.nullish(), () => void 0),
-	_meta: record(string(), unknown()).nullish()
+	id: zNesSuggestionId,
+	reason: defaultOnError(union([
+		literal("rejected"),
+		literal("ignored"),
+		literal("replaced"),
+		literal("cancelled")
+	]).nullish(), () => void 0),
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
 object({
 	method: string(),
@@ -7066,101 +7225,75 @@ object({
 });
 object({
 	requestId: zRequestId,
-	_meta: record(string(), unknown()).nullish()
+	_meta: defaultOnError(record(string(), unknown()).nullish(), () => void 0)
 });
-//#endregion
-//#region node_modules/@agentclientprotocol/sdk/dist/stream.js
-/**
-* Creates an ACP Stream from a pair of newline-delimited JSON streams.
-*
-* This is the typical way to handle ACP connections over stdio, converting
-* between AnyMessage objects and newline-delimited JSON.
-*
-* @param output - The writable stream to send encoded messages to
-* @param input - The readable stream to receive encoded messages from
-* @returns A Stream for bidirectional ACP communication
-*/
-function ndJsonStream(output, input) {
-	const textEncoder = new TextEncoder();
-	const textDecoder = new TextDecoder();
-	let cancelled = false;
-	let inputReader;
-	return {
-		readable: new ReadableStream({
-			async start(controller) {
-				let content = "";
-				const reader = input.getReader();
-				inputReader = reader;
-				try {
-					while (true) {
-						const { value, done } = await reader.read();
-						if (cancelled) return;
-						if (done) {
-							content += textDecoder.decode();
-							break;
-						}
-						if (!value) continue;
-						content += textDecoder.decode(value, { stream: true });
-						const lines = content.split("\n");
-						content = lines.pop() || "";
-						for (const line of lines) {
-							if (cancelled) return;
-							const trimmedLine = line.trim();
-							if (trimmedLine) try {
-								const message = JSON.parse(trimmedLine);
-								controller.enqueue(message);
-							} catch (err) {
-								console.error("Failed to parse JSON message:", trimmedLine, err);
-							}
-						}
-					}
-					if (cancelled) return;
-					const trimmedLine = content.trim();
-					if (trimmedLine) try {
-						const message = JSON.parse(trimmedLine);
-						controller.enqueue(message);
-					} catch (err) {
-						console.error("Failed to parse JSON message:", trimmedLine, err);
-					}
-				} catch (err) {
-					if (cancelled) return;
-					controller.error(err);
-					return;
-				} finally {
-					if (inputReader === reader) inputReader = void 0;
-					reader.releaseLock();
-				}
-				if (cancelled) return;
-				controller.close();
-			},
-			cancel(reason) {
-				cancelled = true;
-				return inputReader?.cancel(reason);
-			}
-		}),
-		writable: new WritableStream({ async write(message) {
-			const content = JSON.stringify(message) + "\n";
-			const writer = output.getWriter();
-			try {
-				await writer.write(textEncoder.encode(content));
-			} finally {
-				writer.releaseLock();
-			}
-		} })
-	};
-}
 //#endregion
 //#region node_modules/@agentclientprotocol/sdk/dist/jsonrpc.js
 var CANCEL_REQUEST_METHOD = "$/cancel_request";
+function isRequestMessage(value) {
+	return isJsonRpcEnvelope(value) && "id" in value && typeof value["method"] === "string" && isJsonRpcId(value["id"]);
+}
+function isResponseMessage(value) {
+	if (!isJsonRpcEnvelope(value) || "method" in value) return false;
+	if (!("id" in value) || !isJsonRpcId(value["id"])) return false;
+	const hasResult = Object.hasOwn(value, "result");
+	const hasError = Object.hasOwn(value, "error");
+	if (hasResult === hasError) return false;
+	return !hasError || isErrorResponse(value["error"]);
+}
+function isNotificationMessage(value) {
+	return isJsonRpcEnvelope(value) && !("id" in value) && typeof value["method"] === "string";
+}
 function isRecord(value) {
 	return typeof value === "object" && value !== null;
+}
+function isJsonRpcEnvelope(value) {
+	return isRecord(value) && value["jsonrpc"] === "2.0";
 }
 function isJsonRpcId(value) {
 	return value === null || typeof value === "string" || typeof value === "number" && Number.isFinite(value);
 }
+/**
+* Detects response-shaped objects, including malformed responses, so they are
+* never handled as calls that require a JSON-RPC response.
+*
+* @internal
+*/
+function isResponseShapedMessage(value) {
+	return isRecord(value) && !("method" in value) && ("id" in value || "result" in value || "error" in value);
+}
+/**
+* Classifies a potentially malformed batch using the direction established by
+* its valid entries. A valid call takes precedence because response members in
+* a call batch must be rejected. Otherwise, a valid response establishes
+* response semantics so malformed siblings cannot provoke another response.
+* Shape hints are used only when the batch has no valid messages; an `id` alone
+* is ambiguous, and batches without a direction hint default to call semantics.
+*
+* @internal
+*/
+function isResponseBatch(batch) {
+	let hasValidCall = false;
+	let hasValidResponse = false;
+	let hasCallShape = false;
+	let hasResponseShape = false;
+	for (const entry of batch) {
+		hasValidCall ||= isRequestMessage(entry) || isNotificationMessage(entry);
+		hasValidResponse ||= isResponseMessage(entry);
+		if (!isRecord(entry)) continue;
+		hasCallShape ||= "method" in entry;
+		hasResponseShape ||= "result" in entry || "error" in entry;
+	}
+	if (hasValidCall) return false;
+	if (hasValidResponse) return true;
+	return hasResponseShape && !hasCallShape;
+}
 function cancelRequestId(params) {
 	if (!isRecord(params) || !isJsonRpcId(params["requestId"])) return;
 	return params["requestId"];
+}
+function isErrorResponse(value) {
+	return isRecord(value) && typeof value["code"] === "number" && Number.isInteger(value["code"]) && typeof value["message"] === "string";
 }
 /**
 * Helpers for constructing `HandleResult` values.
@@ -7321,6 +7454,12 @@ var ConnectionContext = class {
 		return this.connection.sendNotification(method, params);
 	}
 	/**
+	* Sends a non-empty JSON-RPC batch in one transport message.
+	*/
+	sendBatch(entries) {
+		return this.connection.sendBatch(entries);
+	}
+	/**
 	* Sends a protocol-level request cancellation notification.
 	*/
 	sendCancelRequest(requestId) {
@@ -7364,18 +7503,19 @@ var Connection = class {
 	retryQueue = [];
 	context = new ConnectionContext(this);
 	receiveReader;
+	allowBatches = true;
 	constructor(requestHandlerOrStream, notificationHandlerOrHandlers, streamOrOptions, options) {
 		if (typeof requestHandlerOrStream === "function") {
 			const requestHandler = requestHandlerOrStream;
 			const notificationHandler = notificationHandlerOrHandlers;
 			const stream = streamOrOptions;
-			this.initialize(stream, [...options?.handlers ?? [], this.legacyHandler(requestHandler, notificationHandler)]);
+			this.initialize(stream, [...options?.handlers ?? [], this.legacyHandler(requestHandler, notificationHandler)], options);
 			return;
 		}
 		const stream = requestHandlerOrStream;
 		const handlers = notificationHandlerOrHandlers;
 		const connectionOptions = streamOrOptions;
-		this.initialize(stream, [...connectionOptions?.handlers ?? [], ...handlers]);
+		this.initialize(stream, [...connectionOptions?.handlers ?? [], ...handlers], connectionOptions);
 	}
 	/**
 	* Creates a builder for configuring a handler-based connection.
@@ -7440,13 +7580,75 @@ var Connection = class {
 	*/
 	sendRequest(method, params, mapResponse, options = {}) {
 		if (this.abortController.signal.aborted) return rejectedPromise(this.closedReason());
+		const request = this.prepareRequest(method, params, mapResponse, options);
+		this.sendWireMessage(request.message).catch(() => {});
+		if (options.cancellationSignal?.aborted) request.cancel();
+		return request.response;
+	}
+	/**
+	* Sends a non-empty JSON-RPC batch in one transport message.
+	*
+	* Requests and notifications are processed independently by the peer. The
+	* returned tuple preserves the input order: request entries resolve to their
+	* mapped response, while notification entries resolve to `undefined`.
+	*/
+	sendBatch(entries) {
+		if (this.abortController.signal.aborted) return rejectedPromise(this.closedReason());
+		if (!this.allowBatches) return rejectedPromise(/* @__PURE__ */ new TypeError("JSON-RPC batches are not supported on this connection"));
+		if (entries.length === 0) return rejectedPromise(/* @__PURE__ */ new TypeError("JSON-RPC batch must contain at least one entry"));
+		const messages = [];
+		const cancellations = [];
+		const outputs = [];
+		for (const entry of entries) {
+			if (entry.kind === "notification") {
+				messages.push({
+					jsonrpc: "2.0",
+					method: entry.method,
+					params: entry.params
+				});
+				outputs.push(Promise.resolve(void 0));
+				continue;
+			}
+			const request = this.prepareRequest(entry.method, entry.params, entry.mapResponse, entry.options);
+			messages.push(request.message);
+			outputs.push(request.response);
+			cancellations.push({
+				signal: entry.options?.cancellationSignal,
+				cancel: request.cancel
+			});
+		}
+		const batch = messages;
+		const batchSent = this.sendWireMessage(batch);
+		for (const cancellation of cancellations) if (cancellation.signal?.aborted) cancellation.cancel();
+		const response = Promise.all([batchSent, ...outputs]).then(([, ...resolved]) => resolved);
+		response.catch(() => {});
+		return response;
+	}
+	/**
+	* Sends a protocol-level request cancellation notification.
+	*/
+	sendCancelRequest(requestId) {
+		return this.sendNotification(CANCEL_REQUEST_METHOD, { requestId });
+	}
+	/**
+	* Sends a JSON-RPC notification.
+	*/
+	sendNotification(method, params) {
+		if (this.abortController.signal.aborted) return rejectedPromise(this.closedReason());
+		return this.sendWireMessage({
+			jsonrpc: "2.0",
+			method,
+			params
+		});
+	}
+	prepareRequest(method, params, mapResponse, options = {}) {
 		const id = this.nextRequestId++;
 		let cancel = () => {};
-		const responsePromise = new Promise((resolve, reject) => {
+		const response = new Promise((resolve, reject) => {
 			const pendingResponse = {
-				resolve: (response) => {
+				resolve: (value) => {
 					try {
-						resolve(mapResponse ? mapResponse(response) : response);
+						resolve(mapResponse ? mapResponse(value) : value);
 					} catch (error) {
 						reject(error);
 					}
@@ -7465,32 +7667,17 @@ var Connection = class {
 			};
 			this.pendingResponses.set(id, pendingResponse);
 		});
-		responsePromise.catch(() => {});
-		this.sendMessage({
-			jsonrpc: "2.0",
-			id,
-			method,
-			params
-		}).catch(() => {});
-		if (options.cancellationSignal?.aborted) cancel();
-		return responsePromise;
-	}
-	/**
-	* Sends a protocol-level request cancellation notification.
-	*/
-	sendCancelRequest(requestId) {
-		return this.sendNotification(CANCEL_REQUEST_METHOD, { requestId });
-	}
-	/**
-	* Sends a JSON-RPC notification.
-	*/
-	sendNotification(method, params) {
-		if (this.abortController.signal.aborted) return rejectedPromise(this.closedReason());
-		return this.sendMessage({
-			jsonrpc: "2.0",
-			method,
-			params
-		});
+		response.catch(() => {});
+		return {
+			message: {
+				jsonrpc: "2.0",
+				id,
+				method,
+				params
+			},
+			response,
+			cancel: () => cancel()
+		};
 	}
 	/**
 	* Closes the connection and rejects pending requests.
@@ -7508,9 +7695,10 @@ var Connection = class {
 		this.incomingRequests.clear();
 		this.receiveReader?.cancel(closeError).catch(() => {});
 	}
-	initialize(stream, handlers) {
+	initialize(stream, handlers, options) {
 		this.stream = stream;
 		this.staticHandlers = handlers;
+		this.allowBatches = options?.allowBatches ?? true;
 		this.closedPromise = new Promise((resolve) => {
 			this.abortController.signal.addEventListener("abort", () => resolve());
 		});
@@ -7536,7 +7724,7 @@ var Connection = class {
 					if (this.abortController.signal.aborted) break;
 					if (done) break;
 					if (!message) continue;
-					this.receiveMessage(message);
+					this.receiveWireMessage(message);
 				}
 			} finally {
 				if (this.receiveReader === reader) this.receiveReader = void 0;
@@ -7548,13 +7736,77 @@ var Connection = class {
 			this.close(closeError);
 		}
 	}
-	receiveMessage(message) {
-		if (this.abortController.signal.aborted) return;
+	receiveWireMessage(message) {
+		if (Array.isArray(message)) {
+			if (!this.allowBatches) {
+				this.close(/* @__PURE__ */ new TypeError("JSON-RPC batches are not supported on this connection"));
+				return;
+			}
+			this.receiveBatch(message);
+			return;
+		}
+		if (!isRecord(message)) {
+			console.error("Invalid message", { message });
+			return;
+		}
+		this.receiveMessage(message);
+	}
+	receiveBatch(batch) {
+		if (batch.length === 0) {
+			this.sendWireMessage({
+				jsonrpc: "2.0",
+				id: null,
+				error: RequestError.invalidRequest(batch).toErrorResponse()
+			}).catch(() => {});
+			return;
+		}
+		const responseBatch = isResponseBatch(batch);
+		let remaining = responseBatch ? 0 : batch.reduce((count, message) => count + (isNotificationMessage(message) ? 0 : 1), 0);
+		let remainingNotifications = batch.reduce((count, message) => count + (isNotificationMessage(message) ? 1 : 0), 0);
+		let responseSent = false;
+		const responses = [];
+		const sendResponsesIfReady = async () => {
+			if (responseSent || remaining !== 0 || remainingNotifications !== 0 || responses.length === 0) return;
+			responseSent = true;
+			await this.sendWireMessage(responses);
+		};
+		const collectResponse = async (response) => {
+			responses.push(response);
+			remaining -= 1;
+			await sendResponsesIfReady();
+		};
+		for (const message of batch) {
+			if (responseBatch) {
+				if (isResponseShapedMessage(message)) this.receiveMessage(message);
+				continue;
+			}
+			if (!isRequestMessage(message) && !isNotificationMessage(message)) {
+				collectResponse({
+					jsonrpc: "2.0",
+					id: null,
+					error: RequestError.invalidRequest(message).toErrorResponse()
+				}).catch(() => {});
+				continue;
+			}
+			const processing = this.receiveMessage(message, isRequestMessage(message) ? collectResponse : void 0);
+			if (isNotificationMessage(message)) processing.finally(() => {
+				remainingNotifications -= 1;
+				sendResponsesIfReady().catch((error) => this.close(error));
+			});
+		}
+	}
+	receiveMessage(message, sendResponse) {
+		if (this.abortController.signal.aborted) return Promise.resolve();
+		if (!isRecord(message)) {
+			console.error("Invalid message", { message });
+			return Promise.resolve();
+		}
 		if ("method" in message) {
 			if (!("id" in message)) this.handleProtocolNotification(message);
-			this.processIncomingMessage(this.toIncomingMessage(message)).catch((error) => this.close(error));
+			return this.processIncomingMessage(this.toIncomingMessage(message, sendResponse)).catch((error) => this.close(error));
 		} else if ("id" in message) this.handleResponse(message);
 		else console.error("Invalid message", { message });
+		return Promise.resolve();
 	}
 	async processIncomingMessage(message) {
 		if (this.abortController.signal.aborted) return;
@@ -7579,7 +7831,7 @@ var Connection = class {
 			}
 		}
 	}
-	toIncomingMessage(message) {
+	toIncomingMessage(message, sendResponse) {
 		if ("id" in message) {
 			const abortController = new AbortController();
 			this.incomingRequests.set(message.id, abortController);
@@ -7592,11 +7844,14 @@ var Connection = class {
 				params: message.params,
 				raw: message,
 				signal: abortController.signal,
-				responder: new RequestResponder(message.id, (result) => this.sendMessage({
-					jsonrpc: "2.0",
-					id: message.id,
-					...result
-				}), abortController.signal, finishRequest)
+				responder: new RequestResponder(message.id, (result) => {
+					const response = {
+						jsonrpc: "2.0",
+						id: message.id,
+						...result
+					};
+					return sendResponse ? sendResponse(response) : this.sendWireMessage(response);
+				}, abortController.signal, finishRequest)
 			};
 		}
 		return {
@@ -7611,11 +7866,12 @@ var Connection = class {
 		if (pendingResponse) {
 			this.pendingResponses.delete(response.id);
 			pendingResponse.cleanup?.();
-			if ("result" in response) pendingResponse.resolve(response.result);
-			else if ("error" in response) {
+			if (!isResponseMessage(response)) pendingResponse.reject(RequestError.invalidRequest(response));
+			else if ("result" in response) pendingResponse.resolve(response.result);
+			else {
 				const { code, message, data } = response.error;
 				pendingResponse.reject(new RequestError(code, message, data));
-			} else pendingResponse.reject(RequestError.invalidRequest(response));
+			}
 		} else console.error("Got response to unknown request", response.id);
 	}
 	handleProtocolNotification(message) {
@@ -7629,7 +7885,7 @@ var Connection = class {
 	closedReason() {
 		return this.abortController.signal.reason ?? /* @__PURE__ */ new Error("ACP connection closed");
 	}
-	async sendMessage(message) {
+	async sendWireMessage(message) {
 		if (this.abortController.signal.aborted) return rejectedPromise(this.closedReason());
 		this.writeQueue = this.writeQueue.then(async () => {
 			if (this.abortController.signal.aborted) throw this.closedReason();
@@ -7805,7 +8061,200 @@ var RequestError = class RequestError extends Error {
 	}
 };
 //#endregion
+//#region node_modules/@agentclientprotocol/sdk/dist/line-buffer.js
+var newline = 10;
+/**
+* Incrementally splits a byte stream into newline-terminated lines.
+*
+* Only the newly pushed chunk is scanned for newlines, so splitting costs
+* O(total bytes) no matter how many chunks a line spans.
+*
+* Chunks passed to {@link push} must not be mutated afterwards; a chunk
+* without a newline is retained until its line completes.
+*/
+var LineBuffer = class {
+	/** Bytes of the current (incomplete) line, carried across chunks. */
+	#pending = [];
+	/**
+	* Consumes a chunk, returning each complete line without its trailing
+	* newline.
+	*/
+	push(chunk) {
+		const lines = [];
+		let start = 0;
+		let newlineIndex = chunk.indexOf(newline, start);
+		while (newlineIndex !== -1) {
+			lines.push(this.#takeLine(chunk.subarray(start, newlineIndex)));
+			start = newlineIndex + 1;
+			newlineIndex = chunk.indexOf(newline, start);
+		}
+		if (start < chunk.byteLength) this.#pending.push(start === 0 ? chunk : new Uint8Array(chunk.subarray(start)));
+		return lines;
+	}
+	/**
+	* Returns the trailing unterminated line and resets the buffer, or
+	* undefined if no bytes are buffered.
+	*/
+	flush() {
+		if (this.#pending.length === 0) return;
+		return this.#takeLine(/* @__PURE__ */ new Uint8Array(0));
+	}
+	#takeLine(tail) {
+		if (this.#pending.length === 0) return tail;
+		let total = tail.byteLength;
+		for (const part of this.#pending) total += part.byteLength;
+		const line = new Uint8Array(total);
+		let offset = 0;
+		for (const part of this.#pending) {
+			line.set(part, offset);
+			offset += part.byteLength;
+		}
+		line.set(tail, offset);
+		this.#pending = [];
+		return line;
+	}
+};
+//#endregion
+//#region node_modules/@agentclientprotocol/sdk/dist/stream.js
+/**
+* Creates an ACP Stream from a pair of newline-delimited JSON streams.
+*
+* This is the typical way to handle ACP connections over stdio, converting
+* between AnyMessage objects and newline-delimited JSON.
+*
+* @param output - The writable stream to send encoded messages to
+* @param input - The readable stream to receive encoded messages from
+* @returns A Stream for bidirectional ACP communication
+*/
+function ndJsonStream$1(output, input) {
+	const textEncoder = new TextEncoder();
+	const textDecoder = new TextDecoder();
+	let cancelled = false;
+	let inputReader;
+	return {
+		readable: new ReadableStream({
+			async start(controller) {
+				const lines = new LineBuffer();
+				const enqueueLine = (lineBytes) => {
+					const trimmedLine = textDecoder.decode(lineBytes).trim();
+					if (trimmedLine) try {
+						const message = JSON.parse(trimmedLine);
+						if (isRecord(message) || Array.isArray(message)) controller.enqueue(message);
+						else console.warn("Skipping JSON line that is not an object:", trimmedLine);
+					} catch (err) {
+						console.error("Failed to parse JSON message:", trimmedLine, err);
+					}
+				};
+				const reader = input.getReader();
+				inputReader = reader;
+				try {
+					while (true) {
+						const { value, done } = await reader.read();
+						if (cancelled) return;
+						if (done) break;
+						if (!value) continue;
+						for (const line of lines.push(value)) {
+							enqueueLine(line);
+							if (cancelled) return;
+						}
+					}
+					if (cancelled) return;
+					const lastLine = lines.flush();
+					if (lastLine) enqueueLine(lastLine);
+				} catch (err) {
+					if (cancelled) return;
+					controller.error(err);
+					return;
+				} finally {
+					if (inputReader === reader) inputReader = void 0;
+					reader.releaseLock();
+				}
+				if (cancelled) return;
+				controller.close();
+			},
+			cancel(reason) {
+				cancelled = true;
+				return inputReader?.cancel(reason);
+			}
+		}),
+		writable: new WritableStream({ async write(message) {
+			const content = JSON.stringify(message) + "\n";
+			const writer = output.getWriter();
+			try {
+				await writer.write(textEncoder.encode(content));
+			} finally {
+				writer.releaseLock();
+			}
+		} })
+	};
+}
+//#endregion
+//#region node_modules/@agentclientprotocol/sdk/dist/schema/guards.gen.js
+function tagOf(value, key) {
+	return typeof value === "object" && value !== null ? value[key] : void 0;
+}
+var zGuardCreateElicitationRequestForm = zElicitationFormMode.and(object({ mode: literal("form") })).and(object({ message: string() }));
+var zGuardCreateElicitationRequestUrl = zElicitationUrlMode.and(object({ mode: literal("url") })).and(object({ message: string() }));
+var zGuardCreateElicitationRequestCustom = union([zElicitationSessionScope, zElicitationRequestScope]).and(object({ message: string() }));
+zStringPropertySchema.and(object({ type: literal("string") }));
+zNumberPropertySchema.and(object({ type: literal("number") }));
+zIntegerPropertySchema.and(object({ type: literal("integer") }));
+zBooleanPropertySchema.and(object({ type: literal("boolean") }));
+zMultiSelectPropertySchema.and(object({ type: literal("array") }));
+zStringMultiSelectItems.and(object({ type: literal("string") }));
+zElicitationAcceptAction.and(object({ action: literal("accept") }));
+object({ action: literal("decline") });
+object({ action: literal("cancel") });
+/**
+* Validated type guards for `CreateElicitationRequest`'s known variants.
+*
+* Each guard validates the variant's payload, not just its discriminant
+* tag: a malformed known variant (right tag, wrong payload) matches no
+* guard — mirroring wire validation, which rejects such values instead
+* of classifying them as custom.
+*
+* Guards check the value as given: fields that wire deserialization
+* salvages to a default (e.g. a malformed `_meta`) are only normalized
+* by parsing, and for ambiguous raw shapes (a known tag combined with
+* another variant's payload) guards are conservative where wire parsing
+* may still accept the value — narrow wire-parsed values when exact
+* parity matters.
+*
+* @experimental
+*/
+var CreateElicitationRequest = {
+	/** Narrow to the `form` variant, validating its payload. */
+	isForm(value) {
+		return tagOf(value, "mode") === "form" && zGuardCreateElicitationRequestForm.safeParse(value).success;
+	},
+	/** Narrow to the `url` variant, validating its payload. */
+	isUrl(value) {
+		return tagOf(value, "mode") === "url" && zGuardCreateElicitationRequestUrl.safeParse(value).success;
+	},
+	/**
+	* Narrow to a custom or future variant: the `mode` tag matches no known variant, with a valid payload.
+	*
+	* TypeScript keeps the known variants in the narrowed union (they are
+	* structural subtypes of the catch-all), so read vendor payload keys
+	* via a widening cast: `(value as Record<string, unknown>).someKey`.
+	*/
+	isCustom(value) {
+		const tag = tagOf(value, "mode");
+		return typeof tag === "string" && !["form", "url"].includes(tag) && zGuardCreateElicitationRequestCustom.safeParse(value).success;
+	}
+};
+//#endregion
 //#region node_modules/@agentclientprotocol/sdk/dist/acp.js
+/**
+* Creates a stable ACP v1 stream from newline-delimited JSON streams.
+*
+* @param output - The writable stream to send encoded messages to
+* @param input - The readable stream to receive encoded messages from
+* @returns A stream for bidirectional ACP v1 communication
+*/
+function ndJsonStream(output, input) {
+	return ndJsonStream$1(output, input);
+}
 function emptyObjectResponse(response) {
 	return response ?? {};
 }
@@ -8380,6 +8829,7 @@ function runConnectHandlers(connection, handlers) {
 var appBuilder = Symbol("appBuilder");
 var runAgentConnectHandlers = Symbol("runAgentConnectHandlers");
 var runClientConnectHandlers = Symbol("runClientConnectHandlers");
+var stableConnectionOptions = { allowBatches: false };
 /**
 * Creates a client-side app.
 *
@@ -8465,7 +8915,7 @@ var ClientApp = class {
 			return state;
 		}
 		const [thisStream, peerStream] = memoryStreamPair();
-		const peerRawConnection = target[appBuilder]().connect(peerStream);
+		const peerRawConnection = target[appBuilder]().connect(peerStream, stableConnectionOptions);
 		const peerConnection = agentConnection(peerRawConnection);
 		const state = this.openStreamConnection(thisStream);
 		state.rawConnection.closed.then(() => peerConnection.close());
@@ -8481,7 +8931,7 @@ var ClientApp = class {
 		return state;
 	}
 	openStreamConnection(stream) {
-		const rawConnection = this.builder.connect(stream);
+		const rawConnection = this.builder.connect(stream, stableConnectionOptions);
 		return {
 			rawConnection,
 			connection: clientConnection(rawConnection, this.connectHandlers)
@@ -8554,7 +9004,7 @@ var ClientSideConnection = class {
 	* @deprecated Prefer `client({ name }).connectWith(stream, async (ctx) => ...)`.
 	*/
 	constructor(toClient, stream) {
-		this.connection = legacyClientApp(toClient(this))[appBuilder]().connect(stream);
+		this.connection = legacyClientApp(toClient(this))[appBuilder]().connect(stream, stableConnectionOptions);
 	}
 	/**
 	* Establishes the connection with a client and negotiates protocol capabilities.
@@ -9265,7 +9715,7 @@ function startAcpDriver(opts, emit) {
 		},
 		async unstable_createElicitation(params) {
 			const message = params.message;
-			if (params.mode === "url") {
+			if (CreateElicitationRequest.isUrl(params)) {
 				const id = params.elicitationId;
 				emit({
 					type: "elicitation",
@@ -9285,7 +9735,7 @@ function startAcpDriver(opts, emit) {
 				id,
 				mode: "form",
 				message,
-				fields: normalizeSchema(params.requestedSchema)
+				fields: CreateElicitationRequest.isForm(params) ? normalizeSchema(params.requestedSchema) : []
 			});
 			return new Promise((resolve) => {
 				pendingElicits.set(id, (action, content) => resolve(elicitResponse(action, content)));
@@ -9561,6 +10011,7 @@ function emitterFor(sessionId) {
 function replay(sessionId) {
 	const buf = buffers.get(sessionId);
 	if (!buf) return;
+	emitGlobal?.(sessionId, { type: "history_reset" });
 	for (const event of buf) emitGlobal?.(sessionId, event);
 }
 /** Wire the main->renderer push callback (set once at startup). */
@@ -9714,6 +10165,7 @@ db.exec(`
 	if (!cmdCols.includes("dir")) db.exec("ALTER TABLE project_commands ADD COLUMN dir TEXT NOT NULL DEFAULT ''");
 	if (!cmdCols.includes("run_target")) db.exec("ALTER TABLE project_commands ADD COLUMN run_target TEXT NOT NULL DEFAULT 'in-app'");
 	if (!db.prepare("PRAGMA table_info(projects)").all().map((c) => c.name).includes("worktree_dir")) db.exec("ALTER TABLE projects ADD COLUMN worktree_dir TEXT");
+	if (!db.prepare("PRAGMA table_info(worktrees)").all().map((c) => c.name).includes("name")) db.exec("ALTER TABLE worktrees ADD COLUMN name TEXT");
 }
 var stmts = {
 	listProjects: db.prepare("SELECT * FROM projects ORDER BY COALESCE(last_opened_at, added_at) DESC"),
@@ -9729,6 +10181,7 @@ var stmts = {
 		 VALUES ($id, $projectId, $path, NULL, $createdAt)
 		 ON CONFLICT(project_id, path) DO UPDATE SET id = excluded.id`),
 	touchWorktree: db.prepare("UPDATE worktrees SET last_opened_at = $now WHERE id = $id"),
+	renameWorktree: db.prepare("UPDATE worktrees SET name = $name WHERE id = $id"),
 	pruneWorktrees: db.prepare("DELETE FROM worktrees WHERE project_id = $projectId AND path NOT IN (SELECT value FROM json_each($keepPaths))"),
 	getCommand: db.prepare("SELECT * FROM project_commands WHERE id = ?"),
 	commandsForProject: db.prepare("SELECT * FROM project_commands WHERE project_id = ? ORDER BY sort, created_at"),
@@ -9774,6 +10227,11 @@ var worktreesRepo = {
 	touch: (id, now) => stmts.touchWorktree.run({
 		id,
 		now
+	}),
+	/** Set a custom display name (null/"" clears it, reverting to the branch label). */
+	setName: (id, name) => stmts.renameWorktree.run({
+		id,
+		name: name && name.trim() ? name.trim() : null
 	}),
 	/** Remove db rows for worktrees that no longer exist in git. */
 	prune: (projectId, keepPaths) => stmts.pruneWorktrees.run({
@@ -9983,6 +10441,64 @@ async function computeWorktreeActivity(worktreePath) {
 		} catch {}
 	}
 	return latest;
+}
+/** Working-tree status + branch tracking + per-file line stats for a worktree. */
+async function worktreeStatus(worktreePath) {
+	const [statusRes, numstatRes] = await Promise.all([git(worktreePath, [
+		"status",
+		"--porcelain=v1",
+		"-b"
+	]), git(worktreePath, [
+		"diff",
+		"--numstat",
+		"HEAD"
+	])]);
+	let branch = null;
+	let upstream = null;
+	let ahead = 0;
+	let behind = 0;
+	const files = [];
+	for (const raw of statusRes.stdout.split("\n")) {
+		if (raw === "") continue;
+		if (raw.startsWith("## ")) {
+			const info = raw.slice(3);
+			ahead = Number(info.match(/ahead (\d+)/)?.[1] ?? 0);
+			behind = Number(info.match(/behind (\d+)/)?.[1] ?? 0);
+			const [head, up] = info.replace(/\s*\[.*\]$/, "").split("...");
+			branch = head.trim() === "HEAD (no branch)" ? null : head.trim() || null;
+			upstream = up?.trim() ?? null;
+			continue;
+		}
+		const x = raw[0] ?? " ";
+		const y = raw[1] ?? " ";
+		let path = raw.slice(3);
+		const arrow = path.indexOf(" -> ");
+		if (arrow !== -1) path = path.slice(arrow + 4);
+		path = path.replace(/^"|"$/g, "");
+		files.push({
+			path,
+			x,
+			y
+		});
+	}
+	const numstat = /* @__PURE__ */ new Map();
+	if (numstatRes.ok) for (const line of numstatRes.stdout.split("\n")) {
+		if (line === "") continue;
+		const [adds, dels, ...rest] = line.split("	");
+		const path = rest.join("	");
+		numstat.set(path, {
+			insertions: adds === "-" ? null : Number(adds),
+			deletions: dels === "-" ? null : Number(dels)
+		});
+	}
+	return {
+		branch,
+		upstream,
+		ahead,
+		behind,
+		files,
+		numstat
+	};
 }
 /** Local branch names (short form). */
 async function localBranches(repoPath) {
@@ -10438,6 +10954,32 @@ function parseRemote(url) {
 	return null;
 }
 /** Force-delete a local branch. */
+/** Bring a worktree's branch up to date with `base` by rebasing or merging it in. */
+async function updateFromBase(worktreePath, base, mode) {
+	const res = await git(worktreePath, mode === "rebase" ? ["rebase", base] : [
+		"merge",
+		"--no-edit",
+		base
+	], { timeoutMs: 12e4 });
+	if (res.ok) return { ok: true };
+	return {
+		ok: false,
+		error: res.stderr.trim() || `${mode} failed`
+	};
+}
+/** Push the current branch to origin, setting upstream if it has none. */
+async function pushBranch(worktreePath) {
+	const res = await git(worktreePath, [
+		"push",
+		"-u",
+		"origin",
+		"HEAD"
+	], { timeoutMs: 12e4 });
+	return res.ok ? { ok: true } : {
+		ok: false,
+		error: res.stderr.trim() || "push failed"
+	};
+}
 async function renameBranch(repoPath, from, to) {
 	const r = await git(repoPath, [
 		"branch",
@@ -10462,7 +11004,20 @@ async function deleteBranch(repoPath, branch, force = false) {
 	};
 }
 /** Create a new worktree at `worktreePath` on a new `branch` off `base`. */
-async function addWorktree(repoPath, worktreePath, branch, base) {
+async function addWorktree(repoPath, worktreePath, branch, base, detach = false) {
+	if (detach) {
+		const res = await git(repoPath, [
+			"worktree",
+			"add",
+			"--detach",
+			worktreePath,
+			branch
+		]);
+		return res.ok ? { ok: true } : {
+			ok: false,
+			error: res.stderr.trim() || "git worktree add failed"
+		};
+	}
 	const existing = await git(repoPath, [
 		"rev-parse",
 		"--verify",
@@ -10548,16 +11103,28 @@ function siteUrl(host) {
 	if (!/^https?:\/\//i.test(h)) h = `https://${h}`;
 	return h;
 }
-async function gl(config, path) {
-	const res = await fetch(`${siteUrl(config.host)}/api/v4${path}`, { headers: { "PRIVATE-TOKEN": config.token } });
+async function gl(config, path, body) {
+	const res = await fetch(`${siteUrl(config.host)}/api/v4${path}`, {
+		method: body ? "POST" : "GET",
+		headers: {
+			"PRIVATE-TOKEN": config.token,
+			...body ? { "Content-Type": "application/json" } : {}
+		},
+		body: body ? JSON.stringify(body) : void 0
+	});
 	if (!res.ok) {
-		const body = await res.text().catch(() => "");
-		throw new Error(`GitLab ${res.status}${body ? `: ${body.slice(0, 120)}` : ""}`);
+		const raw = await res.text().catch(() => "");
+		let msg = raw.slice(0, 160);
+		try {
+			const j = JSON.parse(raw);
+			msg = (Array.isArray(j.message) ? j.message[0] : j.message) || j.error || msg;
+		} catch {}
+		throw new Error(`GitLab ${res.status}${msg ? `: ${msg}` : ""}`);
 	}
 	return res.json();
 }
 /** Verify the host + token by fetching the current user. */
-async function testConnection(config) {
+async function testConnection$1(config) {
 	try {
 		return {
 			ok: true,
@@ -10580,8 +11147,34 @@ async function projectPathFor(repoPath, host) {
 	if (parsed.host.toLowerCase() !== cfgHost.toLowerCase()) return null;
 	return parsed.path;
 }
+/** Normalize GitLab MR/pipeline states to the shared vocabulary. */
+var mrState = (s) => s === "opened" ? "open" : s;
+var pipeState = (s) => s === "failed" ? "failed" : s === "success" || s === "running" || s === "pending" ? s : s === "created" || s === "preparing" || s === "scheduled" || s === "waiting_for_resource" ? "pending" : s;
+/** Open a merge request from `branch` into `base`. Repo must be on this GitLab host. */
+async function createRequest$1(config, repoPath, branch, base, title) {
+	const path = await projectPathFor(repoPath, config.host);
+	if (!path) return null;
+	const id = encodeURIComponent(path);
+	try {
+		const mr = await gl(config, `/projects/${id}/merge_requests`, {
+			source_branch: branch,
+			target_branch: base,
+			title
+		});
+		return {
+			ok: true,
+			url: mr.web_url,
+			number: mr.iid
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			error: err instanceof Error ? err.message : String(err)
+		};
+	}
+}
 /** MR + pipeline status for a branch, or null if the repo isn't on this GitLab host. */
-async function branchStatus(config, repoPath, branch) {
+async function branchStatus$1(config, repoPath, branch) {
 	const path = await projectPathFor(repoPath, config.host);
 	if (!path) return null;
 	const id = encodeURIComponent(path);
@@ -10591,23 +11184,141 @@ async function branchStatus(config, repoPath, branch) {
 		let pipeline = mr?.head_pipeline ?? null;
 		if (!pipeline) pipeline = (await gl(config, `/projects/${id}/pipelines?ref=${encodeURIComponent(branch)}&per_page=1`))[0] ?? null;
 		return {
+			provider: "gitlab",
 			projectUrl,
-			mr: mr ? {
-				iid: mr.iid,
+			request: mr ? {
+				number: mr.iid,
 				title: mr.title,
-				state: mr.state,
+				state: mrState(mr.state),
 				url: mr.web_url
 			} : null,
-			pipeline: pipeline ? {
-				status: pipeline.status,
+			checks: pipeline ? {
+				status: pipeState(pipeline.status),
 				url: pipeline.web_url
 			} : null
 		};
 	} catch (err) {
 		return {
+			provider: "gitlab",
 			projectUrl,
-			mr: null,
-			pipeline: null,
+			request: null,
+			checks: null,
+			error: err instanceof Error ? err.message : String(err)
+		};
+	}
+}
+//#endregion
+//#region src/main/github.ts
+/** Bare host (no scheme) for matching remotes, e.g. "github.com". */
+function bareHost(host) {
+	return host.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
+}
+/** REST API base for github.com vs GitHub Enterprise. */
+function apiBase(host) {
+	const h = bareHost(host);
+	return h === "github.com" ? "https://api.github.com" : `https://${h}/api/v3`;
+}
+async function gh(config, path, body) {
+	const res = await fetch(`${apiBase(config.host)}${path}`, {
+		method: body ? "POST" : "GET",
+		headers: {
+			Authorization: `Bearer ${config.token}`,
+			Accept: "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+			...body ? { "Content-Type": "application/json" } : {}
+		},
+		body: body ? JSON.stringify(body) : void 0
+	});
+	if (!res.ok) {
+		const raw = await res.text().catch(() => "");
+		let msg = raw.slice(0, 160);
+		try {
+			const j = JSON.parse(raw);
+			msg = j.errors?.[0]?.message || j.message || msg;
+		} catch {}
+		throw new Error(`GitHub ${res.status}${msg ? `: ${msg}` : ""}`);
+	}
+	return res.json();
+}
+/** Verify the host + token by fetching the current user. */
+async function testConnection(config) {
+	try {
+		return {
+			ok: true,
+			user: (await gh(config, "/user")).login
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			error: err instanceof Error ? err.message : String(err)
+		};
+	}
+}
+/** owner/repo for a repo whose origin is on the configured GitHub host, else null. */
+async function repoSlug(repoPath, host) {
+	const url = await remoteUrl(repoPath);
+	if (!url) return null;
+	const parsed = parseRemote(url);
+	if (!parsed) return null;
+	if (parsed.host.toLowerCase() !== bareHost(host)) return null;
+	return parsed.path;
+}
+var checkState = (s) => s === "success" ? "success" : s === "failure" || s === "error" ? "failed" : s === "pending" ? "pending" : s;
+/** Open a pull request from `branch` into `base`. Repo must be on this GitHub host. */
+async function createRequest(config, repoPath, branch, base, title) {
+	const slug = await repoSlug(repoPath, config.host);
+	if (!slug) return null;
+	try {
+		const pr = await gh(config, `/repos/${slug}/pulls`, {
+			title,
+			head: branch,
+			base
+		});
+		return {
+			ok: true,
+			url: pr.html_url,
+			number: pr.number
+		};
+	} catch (err) {
+		return {
+			ok: false,
+			error: err instanceof Error ? err.message : String(err)
+		};
+	}
+}
+/** PR + checks status for a branch, or null if the repo isn't on this GitHub host. */
+async function branchStatus(config, repoPath, branch) {
+	const slug = await repoSlug(repoPath, config.host);
+	if (!slug) return null;
+	const [owner] = slug.split("/");
+	const projectUrl = `https://${bareHost(config.host)}/${slug}`;
+	try {
+		const pr = (await gh(config, `/repos/${slug}/pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&state=all&sort=updated&direction=desc&per_page=1`))[0] ?? null;
+		let checks = null;
+		try {
+			const st = await gh(config, `/repos/${slug}/commits/${encodeURIComponent(branch)}/status`);
+			if (st.total_count > 0) checks = {
+				status: checkState(st.state),
+				url: pr?.html_url ?? projectUrl
+			};
+		} catch {}
+		return {
+			provider: "github",
+			projectUrl,
+			request: pr ? {
+				number: pr.number,
+				title: pr.title,
+				state: pr.merged_at ? "merged" : pr.state,
+				url: pr.html_url
+			} : null,
+			checks
+		};
+	} catch (err) {
+		return {
+			provider: "github",
+			projectUrl,
+			request: null,
+			checks: null,
 			error: err instanceof Error ? err.message : String(err)
 		};
 	}
@@ -10637,8 +11348,11 @@ function toCommand(row) {
 		runTarget: row.run_target === "external" || row.run_target === "default" ? row.run_target : "in-app"
 	};
 }
-var KNOWN_INTEGRATIONS = ["gitlab"];
-var DEFAULT_HOST = { gitlab: "https://gitlab.com" };
+var KNOWN_INTEGRATIONS = ["github", "gitlab"];
+var DEFAULT_HOST = {
+	gitlab: "https://gitlab.com",
+	github: "github.com"
+};
 function integrationConfig(type) {
 	const row = integrationsRepo.get(type);
 	const stored = row ? JSON.parse(row.config) : {};
@@ -10677,6 +11391,7 @@ async function syncWorktrees(project) {
 			projectId: project.id,
 			path: entry.path,
 			branch: entry.branch,
+			name: row?.name ?? null,
 			head: entry.head,
 			isPrimary: entry.path === project.path,
 			isDetached: entry.isDetached,
@@ -10826,6 +11541,7 @@ var handlers = {
 				projectId: project.id,
 				path: row.path,
 				branch: entry.branch,
+				name: row.name ?? null,
 				head: entry.head,
 				isPrimary: entry.path === project.path,
 				isDetached: entry.isDetached,
@@ -10974,6 +11690,14 @@ var handlers = {
 			base: b.base
 		}));
 	},
+	updateWorktree: async ({ id, base, mode }) => {
+		const row = worktreesRepo.get(id);
+		if (!row) return {
+			ok: false,
+			error: "Worktree not found"
+		};
+		return updateFromBase(row.path, base, mode);
+	},
 	renameBranch: async ({ projectId, from, to }) => {
 		const project = projectsRepo.get(projectId);
 		if (!project) return {
@@ -10981,6 +11705,10 @@ var handlers = {
 			error: "Project not found"
 		};
 		return renameBranch(project.path, from, to);
+	},
+	renameWorktree: ({ id, name }) => {
+		worktreesRepo.setName(id, name);
+		return { ok: true };
 	},
 	deleteBranch: async ({ projectId, branch, force }) => {
 		const project = projectsRepo.get(projectId);
@@ -11014,22 +11742,22 @@ var handlers = {
 			failed
 		};
 	},
-	createWorktree: async ({ projectId, name, base, location }) => {
+	createWorktree: async ({ projectId, name, base, location, detach }) => {
 		const project = projectsRepo.get(projectId);
 		if (!project) return {
 			ok: false,
 			error: "Project not found"
 		};
 		const remoteBase = base && /^origin\//.test(base) ? base.slice(7) : null;
-		const branch = name.trim() || remoteBase || `worktree-${Math.random().toString(36).slice(2, 8)}`;
+		const branch = (detach && base ? `review-${remoteBase ?? base}` : null) || name.trim() || remoteBase || `worktree-${Math.random().toString(36).slice(2, 8)}`;
 		const parent = location?.trim() ? expandTilde(location.trim()) : await worktreeParentFor(project);
 		projectsRepo.setWorktreeDir(projectId, parent);
 		(0, node_fs.mkdirSync)(parent, { recursive: true });
 		const dirName = branch.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "worktree";
 		let wtPath = (0, node_path.join)(parent, dirName);
 		for (let n = 2; (0, node_fs.existsSync)(wtPath); n++) wtPath = (0, node_path.join)(parent, `${dirName}-${n}`);
-		const resolvedBase = await resolveBaseBranch(project.path, base);
-		const res = await addWorktree(project.path, wtPath, branch, resolvedBase);
+		const resolvedBase = detach ? null : await resolveBaseBranch(project.path, base);
+		const res = await addWorktree(project.path, wtPath, detach && base ? base : branch, resolvedBase, !!detach);
 		if (!res.ok) return {
 			ok: false,
 			error: res.error
@@ -11041,6 +11769,7 @@ var handlers = {
 			path: wtPath,
 			createdAt: now()
 		});
+		if (detach && base) worktreesRepo.setName(id, `review/${remoteBase ?? base}`);
 		console.log(`[createWorktree] ${branch} -> ${wtPath}`);
 		return {
 			ok: true,
@@ -11119,6 +11848,47 @@ var handlers = {
 		};
 		return commit(row.path, message);
 	},
+	pushBranch: ({ id }) => {
+		const row = worktreesRepo.get(id);
+		if (!row) return {
+			ok: false,
+			error: "Worktree not found"
+		};
+		return pushBranch(row.path);
+	},
+	createReviewRequest: async ({ id, base, title }) => {
+		const row = worktreesRepo.get(id);
+		if (!row) return {
+			ok: false,
+			error: "Worktree not found"
+		};
+		const project = projectsRepo.get(row.project_id);
+		if (!project) return {
+			ok: false,
+			error: "Project not found"
+		};
+		const { branch } = await worktreeStatus(row.path);
+		if (!branch) return {
+			ok: false,
+			error: "Worktree has no branch (detached HEAD)"
+		};
+		const pushed = await pushBranch(row.path);
+		if (!pushed.ok) return {
+			ok: false,
+			error: `Push failed: ${pushed.error}`
+		};
+		for (const type of KNOWN_INTEGRATIONS) {
+			if (!integrationsRepo.get(type)?.enabled) continue;
+			const cfg = integrationConfig(type);
+			if (!cfg.token) continue;
+			const res = type === "github" ? await createRequest(cfg, project.path, branch, base, title) : await createRequest$1(cfg, project.path, branch, base, title);
+			if (res) return res;
+		}
+		return {
+			ok: false,
+			error: "No integration matches this repo's remote"
+		};
+	},
 	listIntegrations: () => KNOWN_INTEGRATIONS.map(integrationStatus),
 	setIntegration: ({ type, enabled, host, token }) => {
 		const cfg = integrationConfig(type);
@@ -11135,23 +11905,23 @@ var handlers = {
 			ok: false,
 			error: "No token provided"
 		};
-		return testConnection({
+		const conn = {
 			host: useHost,
 			token: useToken
-		});
+		};
+		return type === "github" ? testConnection(conn) : testConnection$1(conn);
 	},
 	branchIntegrations: async ({ projectId, branch }) => {
-		const out = {};
 		const project = projectsRepo.get(projectId);
-		if (!project || !branch) return out;
-		if (integrationsRepo.get("gitlab")?.enabled) {
-			const cfg = integrationConfig("gitlab");
-			if (cfg.token) {
-				const status = await branchStatus(cfg, project.path, branch);
-				if (status) out.gitlab = status;
-			}
+		if (!project || !branch) return null;
+		for (const type of KNOWN_INTEGRATIONS) {
+			if (!integrationsRepo.get(type)?.enabled) continue;
+			const cfg = integrationConfig(type);
+			if (!cfg.token) continue;
+			const status = type === "github" ? await branchStatus(cfg, project.path, branch) : await branchStatus$1(cfg, project.path, branch);
+			if (status) return status;
 		}
-		return out;
+		return null;
 	},
 	termStart: ({ sessionId, worktreeId, commandId, command, cols, rows }) => {
 		const row = worktreesRepo.get(worktreeId);
@@ -11270,11 +12040,56 @@ setTerminalCallbacks({
 		exitCode
 	})
 });
-setAgentChatCallback((sessionId, event) => broadcast({
-	type: "agentChatEvent",
-	sessionId,
-	event
-}));
+var pendingAttention = /* @__PURE__ */ new Set();
+function focused() {
+	return electron.BrowserWindow.getAllWindows().some((w) => w.isFocused());
+}
+function notifyUser(title, body) {
+	if (!electron.Notification.isSupported()) return;
+	const n = new electron.Notification({
+		title,
+		body
+	});
+	n.on("click", () => {
+		const win = electron.BrowserWindow.getAllWindows()[0];
+		if (!win) return;
+		if (win.isMinimized()) win.restore();
+		win.show();
+		win.focus();
+	});
+	n.show();
+}
+function handleAttention(sessionId, event) {
+	switch (event.type) {
+		case "permission":
+			pendingAttention.add(`${sessionId}:p:${event.id}`);
+			electron.app.setBadgeCount(pendingAttention.size);
+			if (!focused()) notifyUser("Permission needed", `Allow ${event.toolName}?`);
+			break;
+		case "elicitation":
+			pendingAttention.add(`${sessionId}:e:${event.id}`);
+			electron.app.setBadgeCount(pendingAttention.size);
+			if (!focused()) notifyUser("Input needed", event.message);
+			break;
+		case "permission_resolved":
+		case "elicitation_resolved":
+			pendingAttention.delete(`${sessionId}:p:${event.id}`);
+			pendingAttention.delete(`${sessionId}:e:${event.id}`);
+			electron.app.setBadgeCount(pendingAttention.size);
+			break;
+		case "result":
+			if (!focused()) notifyUser("Chat finished", "The agent finished its turn.");
+			break;
+	}
+}
+setAgentChatCallback((sessionId, event) => {
+	handleAttention(sessionId, event);
+	broadcast({
+		type: "agentChatEvent",
+		sessionId,
+		event
+	});
+});
 function createWindow() {
 	const win = new electron.BrowserWindow({
 		title: "Forest Ranger",

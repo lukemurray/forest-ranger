@@ -8,6 +8,7 @@ import { FolderIcon, GitBranchIcon, PencilIcon, PlayIcon, RevealIcon, TerminalIc
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { RemoveWorktreeDialog } from "./RemoveWorktreeDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
+import { RenameWorktreeDialog } from "./RenameWorktreeDialog";
 import styles from "./WorktreeCard.module.css";
 
 export function WorktreeCard({
@@ -23,6 +24,7 @@ export function WorktreeCard({
 	const navigate = useNavigate();
 	const [removeOpen, setRemoveOpen] = useState(false);
 	const [renameOpen, setRenameOpen] = useState(false);
+	const [renameNameOpen, setRenameNameOpen] = useState(false);
 
 	function open() {
 		navigate({
@@ -88,15 +90,18 @@ export function WorktreeCard({
 				}
 			>
 				<OpenItems path={worktree.path} />
+				<Separator />
+				<MenuItem
+					icon={<PencilIcon size={15} />}
+					label="Rename…"
+					onClick={() => setRenameNameOpen(true)}
+				/>
 				{worktree.branch && !worktree.isDetached && (
-					<>
-						<Separator />
-						<MenuItem
-							icon={<PencilIcon size={15} />}
-							label="Rename branch…"
-							onClick={() => setRenameOpen(true)}
-						/>
-					</>
+					<MenuItem
+						icon={<GitBranchIcon size={15} />}
+						label="Rename branch…"
+						onClick={() => setRenameOpen(true)}
+					/>
 				)}
 				{!worktree.isPrimary && (
 					<>
@@ -119,6 +124,13 @@ export function WorktreeCard({
 					onRenamed={() => emitDataChanged("worktrees")}
 				/>
 			)}
+			<RenameWorktreeDialog
+				open={renameNameOpen}
+				onOpenChange={setRenameNameOpen}
+				worktreeId={worktree.id}
+				current={worktree.name ?? worktree.branch ?? ""}
+				onRenamed={() => emitDataChanged("worktrees")}
+			/>
 			<RemoveWorktreeDialog
 				open={removeOpen}
 				onOpenChange={setRemoveOpen}
@@ -145,7 +157,7 @@ function CardBody({
 			<div className={styles.top}>
 				<span className={styles.branch}>
 					<GitBranchIcon />
-					{worktree.branch ?? "detached"}
+					{worktree.name ?? worktree.branch ?? "detached"}
 				</span>
 				<div className={styles.badges}>
 					{worktree.isPrimary && <span className={styles.primary}>primary</span>}

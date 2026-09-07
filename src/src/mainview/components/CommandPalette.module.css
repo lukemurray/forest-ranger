@@ -1,0 +1,57 @@
+.input {
+	width: 100%;
+	padding: 6px 4px 12px;
+	font-size: 16px;
+	background: transparent;
+	border: none;
+	border-bottom: 1px solid var(--border);
+	color: var(--text);
+	font-family: inherit;
+}
+.input:focus {
+	outline: none;
+}
+.results {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	margin-top: 8px;
+	max-height: 360px;
+	overflow-y: auto;
+}
+.empty {
+	padding: 16px 8px;
+	color: var(--text-faint);
+	font-size: 13px;
+}
+.row {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 8px 10px;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	text-align: left;
+	cursor: pointer;
+}
+.row svg {
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.row[data-selected] {
+	background: var(--bg-active);
+}
+.rowLabel {
+	font-family: var(--font-mono);
+	font-size: 13px;
+	color: var(--text);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.rowSub {
+	margin-left: auto;
+	font-size: 12px;
+	color: var(--text-faint);
+	flex-shrink: 0;
+}

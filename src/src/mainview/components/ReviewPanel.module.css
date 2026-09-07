@@ -359,3 +359,24 @@
 .commitBtn:disabled {
 	opacity: 0.4;
 }
+
+.updateBtn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	align-self: center;
+	padding: 5px 10px;
+	font-size: 12px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border-strong));
+	color: var(--amber);
+	background: transparent;
+	cursor: pointer;
+}
+.updateBtn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.updateBtn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}

@@ -110,10 +110,10 @@
 	filter: brightness(1.1);
 }
 
+/* Thematic breaks are dropped in chat (see Markdown.tsx `hr`); hide any that
+   slip through so a model's `---` never renders as a message-separating line. */
 .md hr {
-	border: none;
-	border-top: 1px solid var(--border);
-	margin: 14px 0;
+	display: none;
 }
 
 .md del {

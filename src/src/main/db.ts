@@ -70,6 +70,13 @@ db.exec(`
 	if (!projCols.includes("worktree_dir")) {
 		db.exec("ALTER TABLE projects ADD COLUMN worktree_dir TEXT");
 	}
+
+	const wtCols = (
+		db.prepare("PRAGMA table_info(worktrees)").all() as { name: string }[]
+	).map((c) => c.name);
+	if (!wtCols.includes("name")) {
+		db.exec("ALTER TABLE worktrees ADD COLUMN name TEXT");
+	}
 }
 
 // --- row shapes as stored ---
@@ -87,6 +94,8 @@ export type WorktreeRow = {
 	id: string;
 	project_id: string;
 	path: string;
+	/** Custom display name (overrides the branch label); null = show the branch. */
+	name: string | null;
 	last_opened_at: number | null;
 	created_at: number;
 };
@@ -141,6 +150,9 @@ const stmts = {
 	),
 	touchWorktree: db.prepare(
 		"UPDATE worktrees SET last_opened_at = $now WHERE id = $id",
+	),
+	renameWorktree: db.prepare(
+		"UPDATE worktrees SET name = $name WHERE id = $id",
 	),
 	pruneWorktrees: db.prepare(
 		"DELETE FROM worktrees WHERE project_id = $projectId AND path NOT IN (SELECT value FROM json_each($keepPaths))",
@@ -206,6 +218,9 @@ export const worktreesRepo = {
 			createdAt: row.createdAt,
 		}),
 	touch: (id: string, now: number) => stmts.touchWorktree.run({ id, now }),
+	/** Set a custom display name (null/"" clears it, reverting to the branch label). */
+	setName: (id: string, name: string | null) =>
+		stmts.renameWorktree.run({ id, name: name && name.trim() ? name.trim() : null }),
 	/** Remove db rows for worktrees that no longer exist in git. */
 	prune: (projectId: string, keepPaths: string[]) =>
 		stmts.pruneWorktrees.run({

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../rpc";
+import { openInEditor } from "../lib/openTargets";
 import { tildePath } from "../lib/format";
 import { BranchCombobox } from "./BranchCombobox";
 import { Modal, ModalClose, ModalTitle } from "./ui/Modal";
@@ -23,6 +24,7 @@ export function NewWorktreeDialog({
 	const [base, setBase] = useState("");
 	const [location, setLocation] = useState("");
 	const [startChat, setStartChat] = useState(false);
+	const [openEditor, setOpenEditor] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -32,6 +34,7 @@ export function NewWorktreeDialog({
 		setError(null);
 		setBusy(false);
 		setStartChat(false);
+		setOpenEditor(false);
 		api.projectBranches({ projectId }).then((r) => {
 			setBranches(r.branches);
 			setBase(r.base ?? "");
@@ -53,6 +56,7 @@ export function NewWorktreeDialog({
 			setError(res.error ?? "Failed to create worktree");
 			return;
 		}
+		if (openEditor && res.path) openInEditor(res.path);
 		onCreated(res.worktreeId, res.path ?? "", startChat);
 		onOpenChange(false);
 	}
@@ -100,6 +104,15 @@ export function NewWorktreeDialog({
 						onChange={(e) => setStartChat(e.target.checked)}
 					/>
 					Start a Claude chat in the new worktree
+				</label>
+
+				<label className={styles.check}>
+					<input
+						type="checkbox"
+						checked={openEditor}
+						onChange={(e) => setOpenEditor(e.target.checked)}
+					/>
+					Open in editor
 				</label>
 			</div>
 

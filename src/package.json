@@ -13,9 +13,9 @@
 		"postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps"
 	},
 	"dependencies": {
-		"@agentclientprotocol/claude-agent-acp": "0.59.0",
-		"@agentclientprotocol/codex-acp": "1.1.2",
-		"@agentclientprotocol/sdk": "1.2.1",
+		"@agentclientprotocol/claude-agent-acp": "0.65.0",
+		"@agentclientprotocol/codex-acp": "1.1.9",
+		"@agentclientprotocol/sdk": "1.3.0",
 		"@base-ui-components/react": "1.0.0-rc.0",
 		"@tanstack/react-router": "1.170.18",
 		"@xterm/addon-fit": "0.11.0",

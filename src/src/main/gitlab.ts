@@ -1,6 +1,6 @@
 /** Minimal GitLab REST client for per-branch MR + pipeline status. */
 
-import type { GitLabBranchStatus } from "../shared/types";
+import type { BranchIntegrations } from "../shared/types";
 import { parseRemote, remoteUrl } from "./git";
 
 export type GitLabConfig = { host: string; token: string };
@@ -12,13 +12,25 @@ function siteUrl(host: string): string {
 	return h;
 }
 
-async function gl<T>(config: GitLabConfig, path: string): Promise<T> {
+async function gl<T>(config: GitLabConfig, path: string, body?: unknown): Promise<T> {
 	const res = await fetch(`${siteUrl(config.host)}/api/v4${path}`, {
-		headers: { "PRIVATE-TOKEN": config.token },
+		method: body ? "POST" : "GET",
+		headers: {
+			"PRIVATE-TOKEN": config.token,
+			...(body ? { "Content-Type": "application/json" } : {}),
+		},
+		body: body ? JSON.stringify(body) : undefined,
 	});
 	if (!res.ok) {
-		const body = await res.text().catch(() => "");
-		throw new Error(`GitLab ${res.status}${body ? `: ${body.slice(0, 120)}` : ""}`);
+		const raw = await res.text().catch(() => "");
+		let msg = raw.slice(0, 160);
+		try {
+			const j = JSON.parse(raw);
+			msg = (Array.isArray(j.message) ? j.message[0] : j.message) || j.error || msg;
+		} catch {
+			// non-JSON body
+		}
+		throw new Error(`GitLab ${res.status}${msg ? `: ${msg}` : ""}`);
 	}
 	return res.json() as Promise<T>;
 }
@@ -55,12 +67,40 @@ type ApiMR = {
 	head_pipeline?: ApiPipeline | null;
 };
 
+/** Normalize GitLab MR/pipeline states to the shared vocabulary. */
+const mrState = (s: string) => (s === "opened" ? "open" : s);
+const pipeState = (s: string) =>
+	s === "failed" ? "failed" : s === "success" || s === "running" || s === "pending" ? s : s === "created" || s === "preparing" || s === "scheduled" || s === "waiting_for_resource" ? "pending" : s;
+
+/** Open a merge request from `branch` into `base`. Repo must be on this GitLab host. */
+export async function createRequest(
+	config: GitLabConfig,
+	repoPath: string,
+	branch: string,
+	base: string,
+	title: string,
+): Promise<{ ok: boolean; url?: string; number?: number; error?: string } | null> {
+	const path = await projectPathFor(repoPath, config.host);
+	if (!path) return null;
+	const id = encodeURIComponent(path);
+	try {
+		const mr = await gl<ApiMR>(config, `/projects/${id}/merge_requests`, {
+			source_branch: branch,
+			target_branch: base,
+			title,
+		});
+		return { ok: true, url: mr.web_url, number: mr.iid };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
 /** MR + pipeline status for a branch, or null if the repo isn't on this GitLab host. */
 export async function branchStatus(
 	config: GitLabConfig,
 	repoPath: string,
 	branch: string,
-): Promise<GitLabBranchStatus | null> {
+): Promise<BranchIntegrations | null> {
 	const path = await projectPathFor(repoPath, config.host);
 	if (!path) return null;
 	const id = encodeURIComponent(path);
@@ -82,15 +122,19 @@ export async function branchStatus(
 			pipeline = pls[0] ?? null;
 		}
 		return {
+			provider: "gitlab",
 			projectUrl,
-			mr: mr ? { iid: mr.iid, title: mr.title, state: mr.state, url: mr.web_url } : null,
-			pipeline: pipeline ? { status: pipeline.status, url: pipeline.web_url } : null,
+			request: mr
+				? { number: mr.iid, title: mr.title, state: mrState(mr.state), url: mr.web_url }
+				: null,
+			checks: pipeline ? { status: pipeState(pipeline.status), url: pipeline.web_url } : null,
 		};
 	} catch (err) {
 		return {
+			provider: "gitlab",
 			projectUrl,
-			mr: null,
-			pipeline: null,
+			request: null,
+			checks: null,
 			error: err instanceof Error ? err.message : String(err),
 		};
 	}

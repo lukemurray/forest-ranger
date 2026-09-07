@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
 	AgentChatEvent,
 	AgentMode,
@@ -85,6 +85,7 @@ export function ChatPane({
 	permissionMode,
 	model,
 	renamed,
+	initialPrompt,
 }: {
 	dockId: string;
 	chatId: string;
@@ -95,6 +96,7 @@ export function ChatPane({
 	model: string | null;
 	agentLabel?: string;
 	renamed?: boolean;
+	initialPrompt?: string;
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
 	const [status, setStatus] = useState<Status>("starting");
@@ -138,6 +140,12 @@ export function ChatPane({
 
 		function apply(event: AgentChatEvent) {
 			switch (event.type) {
+				case "history_reset":
+					// A (re)play of the full buffer follows — start from a clean transcript
+					// so overlapping reattach replays can't stack into duplicates.
+					setItems([]);
+					setPlan([]);
+					break;
 				case "system":
 					setStatus((s) => (s === "starting" || s === "ended" ? "idle" : s));
 					break;
@@ -273,9 +281,17 @@ export function ChatPane({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [chatId, worktreeId]);
 
-	useEffect(() => {
+	// Follow new output while the user is parked near the bottom (so the latest
+	// output stays in view). If they've scrolled up to read, don't yank them down.
+	// The last question stays visible via CSS `position: sticky` on `.user`, not JS.
+	const stick = useRef(true);
+	const onScroll = () => {
 		const el = scrollRef.current;
-		if (el) el.scrollTop = el.scrollHeight;
+		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+	};
+	useLayoutEffect(() => {
+		const el = scrollRef.current;
+		if (el && stick.current) el.scrollTop = el.scrollHeight;
 	}, [items, status]);
 
 	// Auto-grow the input from one line up to ~30% of the viewport, then scroll.
@@ -417,6 +433,7 @@ export function ChatPane({
 			data: a.data,
 		}));
 		if ((!text && atts.length === 0) || status === "starting" || status === "ended") return;
+		stick.current = true; // you sent something — jump to it
 		const clear = () => {
 			setInput("");
 			setAttachments([]);
@@ -439,6 +456,20 @@ export function ChatPane({
 		setStatus("working");
 	}, [status, queue, chatId]);
 
+	// Fire a preset prompt (e.g. "Agent merge") once, the first time a fresh session
+	// is ready. It's a one-shot: consume it off the session so a later remount (which
+	// resets refs and sees status flip back to idle) can't re-send it. Also skipped on
+	// resume and whenever the session already has history.
+	const sentInitial = useRef(false);
+	useEffect(() => {
+		if (resume || !initialPrompt || sentInitial.current || status !== "idle") return;
+		sentInitial.current = true;
+		updateSession(dockId, { initialPrompt: undefined });
+		if (items.length > 0) return; // already has messages — don't inject
+		bus.agentChatSend({ sessionId: chatId, text: initialPrompt, attachments: [] });
+		setStatus("working");
+	}, [status, resume, initialPrompt, chatId, dockId, items.length]);
+
 	function stop() {
 		// Cancel the running turn but keep the session alive so the user can keep
 		// chatting (the agent resolves the turn with a "cancelled" stop reason).
@@ -446,24 +477,31 @@ export function ChatPane({
 		setQueue([]);
 		setStatus("idle");
 	}
-	function respondPermission(requestId: string, optionId: string, label: string) {
-		bus.agentChatPermission({ sessionId: chatId, requestId, optionId });
-		setItems((it) =>
-			it.map((x) =>
-				x.kind === "permission" && x.id === requestId ? { ...x, decided: label } : x,
-			),
-		);
-	}
-	function submitElicit(
-		id: string,
-		action: "accept" | "decline" | "cancel",
-		content?: Record<string, ElicitationValue>,
-	) {
-		bus.agentChatElicit({ sessionId: chatId, id, action, content });
-		setItems((it) =>
-			it.map((x) => (x.kind === "elicitation" && x.id === id ? { ...x, done: true } : x)),
-		);
-	}
+	// Stable across renders so memoized rows don't re-render every streamed token.
+	const respondPermission = useCallback(
+		(requestId: string, optionId: string, label: string) => {
+			bus.agentChatPermission({ sessionId: chatId, requestId, optionId });
+			setItems((it) =>
+				it.map((x) =>
+					x.kind === "permission" && x.id === requestId ? { ...x, decided: label } : x,
+				),
+			);
+		},
+		[chatId],
+	);
+	const submitElicit = useCallback(
+		(
+			id: string,
+			action: "accept" | "decline" | "cancel",
+			content?: Record<string, ElicitationValue>,
+		) => {
+			bus.agentChatElicit({ sessionId: chatId, id, action, content });
+			setItems((it) =>
+				it.map((x) => (x.kind === "elicitation" && x.id === id ? { ...x, done: true } : x)),
+			);
+		},
+		[chatId],
+	);
 	function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
@@ -471,8 +509,30 @@ export function ChatPane({
 		}
 	}
 
+	// Rebuilt only when items change (not on every keystroke/config re-render).
+	const renderNodes = useMemo(() => buildRenderNodes(items), [items]);
+
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
+
+	// Live "what the agent is doing" label — null hides the indicator (idle, or the
+	// answer is already streaming visibly as the last message).
+	const activity = useMemo(() => {
+		if (status === "starting") return "Starting agent…";
+		if (status !== "working") return null;
+		const last = items[items.length - 1];
+		if (!last) return "Thinking…";
+		switch (last.kind) {
+			case "assistant":
+				return null; // the answer is streaming in view already
+			case "thinking":
+				return "Thinking…";
+			case "tool":
+				return last.status === "running" ? `Running ${last.name}…` : "Working…";
+			default:
+				return "Thinking…";
+		}
+	}, [status, items]);
 	// Slash-command autocomplete: match while the input is a bare "/name" prefix.
 	const slashQuery = /^\/(\S*)$/.exec(input);
 	const slashMatches = slashQuery
@@ -502,18 +562,34 @@ export function ChatPane({
 					Drop files to attach
 				</div>
 			)}
-			<div className={styles.scroll} ref={scrollRef}>
+			<div className={styles.scroll} ref={scrollRef} onScroll={onScroll}>
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
-				{items.map((item, i) => (
-					<ChatRow
-						key={i}
-						item={item}
-						onPermission={respondPermission}
-						onElicit={submitElicit}
-					/>
-				))}
+				{renderNodes.map((node, i) =>
+					node.kind === "process" ? (
+						<ProcessStrip
+							key={i}
+							steps={node.steps}
+							active={working && i === renderNodes.length - 1}
+							onPermission={respondPermission}
+							onElicit={submitElicit}
+						/>
+					) : (
+						<ChatRow
+							key={i}
+							item={node}
+							onPermission={respondPermission}
+							onElicit={submitElicit}
+						/>
+					),
+				)}
+				{activity && (
+					<div className={styles.activity}>
+						<span className={styles.spinner} />
+						<span className={styles.activityLabel}>{activity}</span>
+					</div>
+				)}
 				{queue.map((q, i) => (
 					<div key={`q${i}`} className={styles.user} data-queued>
 						<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
@@ -693,7 +769,102 @@ function mergeText(items: ChatItem[], kind: "assistant" | "thinking", text: stri
 	return [...items, { kind, text }];
 }
 
-function ChatRow({
+type RenderNode = ChatItem | { kind: "process"; steps: ChatItem[] };
+
+/**
+ * Fold a turn's "process" items — thinking, tool calls, and the interstitial
+ * narration that precedes them ("Let me check X") — into a single collapsible
+ * strip, leaving the final answer (assistant text after the last tool) visible.
+ * An assistant block is narration iff a tool call follows it before the next
+ * user message; the last assistant block of a turn has no trailing tool, so it
+ * renders normally.
+ */
+function buildRenderNodes(items: ChatItem[]): RenderNode[] {
+	// One backward pass: an assistant block is narration iff a tool call appears
+	// after it before the next user turn. `toolAhead` tracks that per turn (reset
+	// at each user boundary), giving O(n) instead of a lookahead scan per item.
+	const isProcess = new Array<boolean>(items.length);
+	let toolAhead = false;
+	for (let i = items.length - 1; i >= 0; i--) {
+		const kind = items[i].kind;
+		if (kind === "user") toolAhead = false;
+		if (kind === "thinking" || kind === "tool") {
+			isProcess[i] = true;
+			if (kind === "tool") toolAhead = true;
+		} else {
+			isProcess[i] = kind === "assistant" && toolAhead;
+		}
+	}
+
+	const nodes: RenderNode[] = [];
+	let buf: ChatItem[] = [];
+	const flush = () => {
+		if (buf.length) {
+			nodes.push({ kind: "process", steps: buf });
+			buf = [];
+		}
+	};
+	items.forEach((item, i) => {
+		if (isProcess[i]) buf.push(item);
+		else {
+			flush();
+			nodes.push(item);
+		}
+	});
+	flush();
+	return nodes;
+}
+
+/** One-line hint for a process step, shown in the collapsed strip summary. */
+function stepHint(item: ChatItem): string {
+	if (item.kind === "tool") return item.name;
+	if (item.kind === "assistant" || item.kind === "thinking")
+		return item.text.replace(/\s+/g, " ").trim().slice(0, 60);
+	return "";
+}
+
+/** Collapsible "Working…" strip wrapping a turn's thinking + tool + narration steps. */
+function ProcessStrip({
+	steps,
+	active = false,
+	onPermission,
+	onElicit,
+}: {
+	steps: ChatItem[];
+	/** True for the in-flight strip: pulse the dot and label it live. */
+	active?: boolean;
+	onPermission: (id: string, optionId: string, label: string) => void;
+	onElicit: (
+		id: string,
+		action: "accept" | "decline" | "cancel",
+		content?: Record<string, ElicitationValue>,
+	) => void;
+}) {
+	const last = steps[steps.length - 1];
+	const hint = last ? stepHint(last) : "";
+	return (
+		<details className={styles.process} data-active={active || undefined}>
+			<summary className={styles.processHead}>
+				<span className={styles.processSpinner} />
+				<span className={styles.processTitle}>{active ? "Working…" : "Worked"}</span>
+				<span className={styles.processMeta}>
+					{steps.length} step{steps.length === 1 ? "" : "s"}
+					{hint && ` · ${hint}`}
+				</span>
+			</summary>
+			<div className={styles.processBody}>
+				{steps.map((s, i) => (
+					<ChatRow key={i} item={s} onPermission={onPermission} onElicit={onElicit} />
+				))}
+			</div>
+		</details>
+	);
+}
+
+// Memoized: with stable callbacks and ref-stable item objects (only changed
+// items get new refs from the reducer), a streamed token re-renders just the
+// message that changed — not the whole history.
+const ChatRow = memo(function ChatRow({
 	item,
 	onPermission,
 	onElicit,
@@ -708,7 +879,7 @@ function ChatRow({
 }) {
 	if (item.kind === "user") {
 		return (
-			<div className={styles.user}>
+			<div className={styles.user} data-role="user">
 				<div className={styles.bubble}>
 					{item.attachments && item.attachments.length > 0 && (
 						<div className={styles.sentAttachments}>
@@ -725,6 +896,9 @@ function ChatRow({
 		);
 	}
 	if (item.kind === "assistant") {
+		// A text-less agent update (only blank lines / `---` rules) would render as a
+		// stack of empty horizontal rules — skip it rather than show the noise.
+		if (isBlankText(item.text)) return null;
 		return (
 			<div className={styles.assistant}>
 				<Markdown text={item.text} />
@@ -732,6 +906,7 @@ function ChatRow({
 		);
 	}
 	if (item.kind === "thinking") {
+		if (isBlankText(item.text)) return null;
 		return (
 			<details className={styles.thinking}>
 				<summary>Thinking</summary>
@@ -795,7 +970,7 @@ function ChatRow({
 			</div>
 		</details>
 	);
-}
+});
 
 /** First meaningful line of tool output, for the collapsed header. */
 function toolPreview(s: string): string {
@@ -977,6 +1152,11 @@ function ElicitationInput({
 }
 
 /** A compact one-line description of a tool's input for the permission prompt. */
+/** True when text has no visible markdown content — only blank lines and horizontal rules. */
+function isBlankText(text: string): boolean {
+	return text.split("\n").every((l) => /^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})?[ \t]*$/.test(l));
+}
+
 function describeInput(input: unknown): string {
 	if (input && typeof input === "object") {
 		const o = input as Record<string, unknown>;

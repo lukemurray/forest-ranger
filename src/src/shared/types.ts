@@ -16,6 +16,8 @@ export type Worktree = {
 	path: string;
 	/** Short branch name, or null when detached. */
 	branch: string | null;
+	/** Custom display name set by the user (overrides the branch label); null if unset. */
+	name: string | null;
 	/** Current HEAD commit sha. */
 	head: string | null;
 	isPrimary: boolean;
@@ -170,6 +172,12 @@ export type PermissionOption = {
 };
 
 export type AgentChatEvent =
+	/**
+	 * Start-of-replay marker: the events that follow are the full buffered
+	 * history. The view clears its transcript so a re-delivered replay (e.g. two
+	 * overlapping reattaches) collapses to a single copy instead of duplicating.
+	 */
+	| { type: "history_reset" }
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
 	/** The user's own turn, echoed so it's buffered/replayed on reattach. */
@@ -250,8 +258,8 @@ export type OpenResult = { ok: boolean; error?: string };
 
 // --- integrations ---
 
-/** A connectable external service. GitLab is the first; more can follow. */
-export type IntegrationType = "gitlab";
+/** A connectable code host. Matched to a repo by its git remote. */
+export type IntegrationType = "gitlab" | "github";
 
 /** Settings-facing status of an integration (never ships the token itself). */
 export type IntegrationStatus = {
@@ -261,18 +269,36 @@ export type IntegrationStatus = {
 	hasToken: boolean;
 };
 
-/** GitLab MR + pipeline status for one branch. */
-export type GitLabBranchStatus = {
-	/** Web URL of the GitLab project this repo maps to. */
+/** A pull/merge request for a branch (states normalized across providers). */
+export type ReviewRequest = {
+	/** PR number / MR iid. */
+	number: number;
+	title: string;
+	/** Normalized: "open" | "merged" | "closed" (raw value otherwise). */
+	state: string;
+	url: string;
+};
+
+/** CI status for a branch (statuses normalized across providers). */
+export type ChecksStatus = {
+	/** Normalized: "success" | "failed" | "running" | "pending" (raw otherwise). */
+	status: string;
+	url: string | null;
+};
+
+/**
+ * Per-branch code-host status. A repo maps to a single provider via its remote,
+ * so this is one unified result (null when no enabled integration matches).
+ */
+export type BranchIntegrations = {
+	provider: IntegrationType;
+	/** Web URL of the repo on the host. */
 	projectUrl: string | null;
-	mr: { iid: number; title: string; state: string; url: string } | null;
-	pipeline: { status: string; url: string } | null;
+	request: ReviewRequest | null;
+	checks: ChecksStatus | null;
 	/** Set when the lookup failed (e.g. bad token); UI can show it quietly. */
 	error?: string;
 };
-
-/** Per-branch status gathered from all enabled integrations. */
-export type BranchIntegrations = { gitlab?: GitLabBranchStatus };
 
 /** Outcome of an "add project" attempt, so the UI can give clear feedback. */
 export type AddProjectResult =
@@ -380,10 +406,20 @@ export type RpcRequests = {
 				params: { projectId: string };
 				response: BranchSummary[];
 			};
+			/** Update a worktree's branch from its base (rebase or merge). */
+			updateWorktree: {
+				params: { id: string; base: string; mode: "rebase" | "merge" };
+				response: { ok: boolean; error?: string };
+			};
 			/** Rename a local branch (git branch -m). Leaves the worktree path alone. */
 			renameBranch: {
 				params: { projectId: string; from: string; to: string };
 				response: { ok: boolean; error?: string };
+			};
+			/** Set a worktree's display name (""/null clears it, reverting to the branch). */
+			renameWorktree: {
+				params: { id: string; name: string | null };
+				response: { ok: boolean };
 			};
 			/** Delete a local branch (force = discard unmerged work). */
 			deleteBranch: {
@@ -399,6 +435,8 @@ export type RpcRequests = {
 			 * Create a worktree (new branch off base). name="" auto-generates.
 			 * `location` is the parent dir for the worktree (persisted as the
 			 * project's default); null uses the project's stored/detected location.
+			 * `detach`: check out `base` (a ref) detached for review, rather than
+			 * creating/checking out a branch — never conflicts with an existing checkout.
 			 */
 			createWorktree: {
 				params: {
@@ -406,6 +444,7 @@ export type RpcRequests = {
 					name: string;
 					base: string | null;
 					location: string | null;
+					detach?: boolean;
 				};
 				response: {
 					ok: boolean;
@@ -452,6 +491,19 @@ export type RpcRequests = {
 				params: { id: string; message: string };
 				response: { ok: boolean; error?: string };
 			};
+			/** Push the worktree's current branch to origin (sets upstream if none). */
+			pushBranch: {
+				params: { id: string };
+				response: { ok: boolean; error?: string };
+			};
+			/**
+			 * Push, then open a PR/MR from the worktree's branch into `base` on the
+			 * matching enabled integration. Returns the request URL.
+			 */
+			createReviewRequest: {
+				params: { id: string; base: string; title: string };
+				response: { ok: boolean; url?: string; number?: number; error?: string };
+			};
 
 			/** Configured integrations (GitLab, …) with enable + token state. */
 			listIntegrations: {
@@ -476,7 +528,7 @@ export type RpcRequests = {
 			/** MR/pipeline status for a branch from every enabled integration. */
 			branchIntegrations: {
 				params: { projectId: string; branch: string };
-				response: BranchIntegrations;
+				response: BranchIntegrations | null;
 			};
 
 			/** Run a saved command in a worktree directory via the given app. */

@@ -715,6 +715,32 @@ export function parseRemote(url: string): { host: string; path: string } | null 
 }
 
 /** Force-delete a local branch. */
+/** Bring a worktree's branch up to date with `base` by rebasing or merging it in. */
+export async function updateFromBase(
+	worktreePath: string,
+	base: string,
+	mode: "rebase" | "merge",
+): Promise<{ ok: boolean; error?: string }> {
+	const args =
+		mode === "rebase" ? ["rebase", base] : ["merge", "--no-edit", base];
+	const res = await git(worktreePath, args, { timeoutMs: 120_000 });
+	if (res.ok) return { ok: true };
+	// A conflicted rebase/merge leaves the worktree mid-operation; surface it so the
+	// user can resolve in their editor/terminal (we don't try to auto-resolve).
+	return { ok: false, error: res.stderr.trim() || `${mode} failed` };
+}
+
+/** Push the current branch to origin, setting upstream if it has none. */
+export async function pushBranch(
+	worktreePath: string,
+): Promise<{ ok: boolean; error?: string }> {
+	// `HEAD` resolves to the current branch; -u makes origin/<branch> its upstream.
+	const res = await git(worktreePath, ["push", "-u", "origin", "HEAD"], {
+		timeoutMs: 120_000,
+	});
+	return res.ok ? { ok: true } : { ok: false, error: res.stderr.trim() || "push failed" };
+}
+
 export async function renameBranch(
 	repoPath: string,
 	from: string,
@@ -740,7 +766,16 @@ export async function addWorktree(
 	worktreePath: string,
 	branch: string,
 	base: string | null,
+	detach = false,
 ): Promise<{ ok: boolean; error?: string }> {
+	// Detached checkout at `branch` (a ref): read-only review of any branch, even
+	// one already checked out elsewhere or existing only on origin — no conflict.
+	if (detach) {
+		const res = await git(repoPath, ["worktree", "add", "--detach", worktreePath, branch]);
+		return res.ok
+			? { ok: true }
+			: { ok: false, error: res.stderr.trim() || "git worktree add failed" };
+	}
 	// If the branch already exists locally, check it out; otherwise create it off
 	// `base` (e.g. `-b foo <path> origin/foo` makes a local `foo` tracking origin).
 	const existing = await git(repoPath, [

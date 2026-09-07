@@ -10,6 +10,12 @@ const META: Record<
 	IntegrationType,
 	{ label: string; blurb: string; tokenHint: string }
 > = {
+	github: {
+		label: "GitHub",
+		blurb:
+			"Show pull-request and checks status on each worktree whose origin points at this GitHub host.",
+		tokenHint: "Personal access token (classic or fine-grained) with repo read access.",
+	},
 	gitlab: {
 		label: "GitLab",
 		blurb:
@@ -117,7 +123,7 @@ function IntegrationCard({
 					mono
 					value={host}
 					onChange={(e) => setHost(e.target.value)}
-					placeholder="https://gitlab.com"
+					placeholder={status.type === "github" ? "github.com" : "https://gitlab.com"}
 					spellCheck={false}
 				/>
 				<TextField

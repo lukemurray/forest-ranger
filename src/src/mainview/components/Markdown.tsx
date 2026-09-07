@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../rpc";
@@ -29,7 +30,9 @@ function stabilizeStreamingTail(text: string): string {
  * strikethrough, autolinks, …) via react-markdown. Element styling lives in the
  * CSS module under `.md`; links are intercepted to open in the OS browser.
  */
-export function Markdown({ text }: { text: string }) {
+// Memoized on `text`: re-parsing markdown is the dominant per-token cost in a
+// long chat, so stable messages skip it and only the streaming one re-renders.
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
 	return (
 		<div className={styles.md}>
 			<ReactMarkdown
@@ -45,10 +48,13 @@ export function Markdown({ text }: { text: string }) {
 							{children}
 						</a>
 					),
+					// Models sprinkle `---` between narration steps; in a chat that's just
+					// a stack of full-width rules (noise), so drop thematic breaks.
+					hr: () => null,
 				}}
 			>
 				{stabilizeStreamingTail(text)}
 			</ReactMarkdown>
 		</div>
 	);
-}
+});

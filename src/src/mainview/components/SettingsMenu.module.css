@@ -1,6 +1,7 @@
 .footer {
 	display: flex;
 	align-items: center;
+	flex-shrink: 0;
 	gap: 9px;
 	/* full-bleed past the sidebar's horizontal padding */
 	margin: 4px -8px -10px;

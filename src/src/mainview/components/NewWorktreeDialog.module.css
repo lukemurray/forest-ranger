@@ -21,6 +21,30 @@
 	color: var(--text-muted);
 }
 
+.hint {
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--text-faint);
+}
+
+.promptArea {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font-mono);
+	font-size: 12px;
+	line-height: 1.5;
+	resize: vertical;
+}
+.promptArea:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
 .select {
 	padding: 8px 10px;
 	border: 1px solid var(--border-strong);

@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { Readable, Writable } from "node:stream";
 import {
 	ClientSideConnection,
+	CreateElicitationRequest,
 	ndJsonStream,
 	PROTOCOL_VERSION,
 	type Client,
@@ -367,7 +368,9 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		// We surface it and resolve when the user answers (or the agent completes it).
 		async unstable_createElicitation(params) {
 			const message = params.message;
-			if (params.mode === "url") {
+			// SDK 1.3 made the request a union with a catch-all `mode` string, so plain
+			// discriminant narrowing no longer works — use the shipped type guards.
+			if (CreateElicitationRequest.isUrl(params)) {
 				const id = params.elicitationId;
 				emit({ type: "elicitation", id, mode: "url", message, fields: [], url: params.url });
 				return new Promise((resolve) => {
@@ -382,7 +385,9 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 				id,
 				mode: "form",
 				message,
-				fields: normalizeSchema(params.requestedSchema),
+				fields: CreateElicitationRequest.isForm(params)
+					? normalizeSchema(params.requestedSchema)
+					: [],
 			});
 			return new Promise((resolve) => {
 				pendingElicits.set(id, (action, content) =>
