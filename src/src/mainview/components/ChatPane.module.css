@@ -31,6 +31,8 @@
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
+	/* so a user row's offsetTop is measured relative to this scroll box */
+	position: relative;
 }
 
 .empty {
@@ -42,14 +44,14 @@
 .user {
 	display: flex;
 	justify-content: flex-end;
-	/* Pin the question to the top of the scroll viewport while its answer streams
-	   below, so the latest output stays in view without losing what was asked. It
-	   releases as normal once you scroll up past it. The solid band + z-index keep
-	   reply text from showing through as it scrolls underneath. */
+}
+/* Each question is a sticky section header, but only ONE is pinned at a time — the
+   turn whose answer you're currently viewing (chosen in JS by scroll position). The
+   rest stay in normal flow, so a shorter current question can't let a taller earlier
+   one peek out beneath it. top:-14px cancels `.scroll`'s 14px top padding (sticky
+   `top` is measured from the padding edge) so nothing shows above the pinned band. */
+.user[data-pinned] {
 	position: sticky;
-	/* Stick flush to the scroll viewport's top. `.scroll` has 14px top padding, and
-	   sticky `top` is measured from that padding edge — so top:0 would leave a 14px
-	   strip above where old text shows through. -14px pulls it flush to the top. */
 	top: -14px;
 	z-index: 2;
 	background: var(--bg);

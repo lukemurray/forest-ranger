@@ -283,16 +283,34 @@ export function ChatPane({
 
 	// Follow new output while the user is parked near the bottom (so the latest
 	// output stays in view). If they've scrolled up to read, don't yank them down.
-	// The last question stays visible via CSS `position: sticky` on `.user`, not JS.
 	const stick = useRef(true);
-	const onScroll = () => {
-		const el = scrollRef.current;
-		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-	};
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
 		if (el && stick.current) el.scrollTop = el.scrollHeight;
 	}, [items, status]);
+
+	// Pin exactly one question as a sticky header: the turn whose answer currently
+	// spans the top of the viewport (the last user row scrolled to/past the top).
+	// Only one is pinned so a shorter current question can't reveal a taller earlier
+	// one beneath it (CSS `.user[data-pinned]`).
+	const [pinnedUser, setPinnedUser] = useState(-1);
+	const updateSticky = useCallback(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+		const users = el.querySelectorAll<HTMLElement>('[data-role="user"]');
+		const limit = el.scrollTop + 15; // 14px top padding + 1
+		let active = -1;
+		users.forEach((u, i) => {
+			if (u.offsetTop <= limit) active = i;
+		});
+		setPinnedUser((prev) => (prev === active ? prev : active));
+	}, []);
+	const onScroll = () => {
+		const el = scrollRef.current;
+		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+		updateSticky();
+	};
+	useLayoutEffect(updateSticky, [items, status, updateSticky]);
 
 	// Auto-grow the input from one line up to ~30% of the viewport, then scroll.
 	useLayoutEffect(() => {
@@ -566,24 +584,29 @@ export function ChatPane({
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
-				{renderNodes.map((node, i) =>
-					node.kind === "process" ? (
-						<ProcessStrip
-							key={i}
-							steps={node.steps}
-							active={working && i === renderNodes.length - 1}
-							onPermission={respondPermission}
-							onElicit={submitElicit}
-						/>
-					) : (
-						<ChatRow
-							key={i}
-							item={node}
-							onPermission={respondPermission}
-							onElicit={submitElicit}
-						/>
-					),
-				)}
+				{(() => {
+					let userSeq = -1;
+					return renderNodes.map((node, i) =>
+						node.kind === "process" ? (
+							<ProcessStrip
+								key={i}
+								steps={node.steps}
+								active={working && i === renderNodes.length - 1}
+								onPermission={respondPermission}
+								onElicit={submitElicit}
+							/>
+						) : (
+							<ChatRow
+								key={i}
+								item={node}
+								userIndex={node.kind === "user" ? ++userSeq : -1}
+								pinned={node.kind === "user" && userSeq === pinnedUser}
+								onPermission={respondPermission}
+								onElicit={submitElicit}
+							/>
+						),
+					);
+				})()}
 				{activity && (
 					<div className={styles.activity}>
 						<span className={styles.spinner} />
@@ -866,10 +889,16 @@ function ProcessStrip({
 // message that changed — not the whole history.
 const ChatRow = memo(function ChatRow({
 	item,
+	userIndex = -1,
+	pinned,
 	onPermission,
 	onElicit,
 }: {
 	item: ChatItem;
+	/** 0-based position among user rows (for the sticky-header measurement). */
+	userIndex?: number;
+	/** Pin this user row as the sticky section header. */
+	pinned?: boolean;
 	onPermission: (id: string, optionId: string, label: string) => void;
 	onElicit: (
 		id: string,
@@ -879,7 +908,7 @@ const ChatRow = memo(function ChatRow({
 }) {
 	if (item.kind === "user") {
 		return (
-			<div className={styles.user} data-role="user">
+			<div className={styles.user} data-role="user" data-uindex={userIndex} data-pinned={pinned || undefined}>
 				<div className={styles.bubble}>
 					{item.attachments && item.attachments.length > 0 && (
 						<div className={styles.sentAttachments}>
