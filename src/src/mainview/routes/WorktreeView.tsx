@@ -24,6 +24,7 @@ import tb from "../components/Titlebar.module.css";
 import styles from "./WorktreeView.module.css";
 
 const REVIEW_WIDTH_KEY = "forest-ranger:review-width";
+const REVIEW_OPEN_KEY = "forest-ranger:review-open";
 
 export function WorktreeView() {
 	const detail = worktreeRoute.useLoaderData();
@@ -34,7 +35,17 @@ export function WorktreeView() {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [editing, setEditing] = useState<ProjectCommand | null>(null);
 	const [removeOpen, setRemoveOpen] = useState(false);
-	const [reviewOpen, setReviewOpen] = useState(true);
+	// Remembered across worktree navigation and app restarts.
+	const [reviewOpen, setReviewOpen] = useState(
+		() => localStorage.getItem(REVIEW_OPEN_KEY) !== "0",
+	);
+	function toggleReview() {
+		setReviewOpen((v) => {
+			const next = !v;
+			localStorage.setItem(REVIEW_OPEN_KEY, next ? "1" : "0");
+			return next;
+		});
+	}
 	const [reviewWidth, setReviewWidth] = useState(
 		() => Number(localStorage.getItem(REVIEW_WIDTH_KEY)) || 480,
 	);
@@ -163,7 +174,7 @@ export function WorktreeView() {
 						<button
 							className={tb.actionButton}
 							data-active={reviewOpen || undefined}
-							onClick={() => setReviewOpen((v) => !v)}
+							onClick={toggleReview}
 							title={reviewOpen ? "Hide review panel" : "Show review panel"}
 						>
 							<PanelRightIcon />

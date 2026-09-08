@@ -366,10 +366,10 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 
 		// The agent asks the user for structured input (a form) or to visit a URL.
 		// We surface it and resolve when the user answers (or the agent completes it).
-		async unstable_createElicitation(params) {
+		async createElicitation(params) {
 			const message = params.message;
-			// SDK 1.3 made the request a union with a catch-all `mode` string, so plain
-			// discriminant narrowing no longer works — use the shipped type guards.
+			// The request is a union with a catch-all `mode` string, so plain discriminant
+			// narrowing doesn't work — use the SDK's shipped type guards.
 			if (CreateElicitationRequest.isUrl(params)) {
 				const id = params.elicitationId;
 				emit({ type: "elicitation", id, mode: "url", message, fields: [], url: params.url });
@@ -397,7 +397,7 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		},
 
 		// URL-based elicitation finished on the agent's side — resolve if still open.
-		async unstable_completeElicitation(params) {
+		async completeElicitation(params) {
 			const id = (params as { elicitationId?: string }).elicitationId;
 			if (id) {
 				const r = pendingElicits.get(id);

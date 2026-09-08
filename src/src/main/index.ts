@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, shell } from "electron";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -41,6 +41,7 @@ import {
 	stop as agentChatStop,
 } from "./agentChat";
 import {
+	DATA_DIR,
 	commandsRepo,
 	integrationsRepo,
 	projectsRepo,
@@ -899,13 +900,52 @@ setAgentChatCallback((sessionId, event) => {
 	broadcast({ type: "agentChatEvent", sessionId, event });
 });
 
+// Persisted window size + position, so the app reopens where you left it.
+const WINDOW_STATE_FILE = join(DATA_DIR, "window-state.json");
+type WindowState = { width: number; height: number; x?: number; y?: number };
+
+function readWindowState(): WindowState | null {
+	try {
+		const s = JSON.parse(readFileSync(WINDOW_STATE_FILE, "utf8")) as WindowState;
+		if (typeof s.width === "number" && typeof s.height === "number") return s;
+	} catch {
+		// no saved state yet / unreadable
+	}
+	return null;
+}
+
+/** A saved position is only usable if it still lands on a connected display. */
+function positionOnScreen(x: number, y: number, w: number, h: number): boolean {
+	return screen.getAllDisplays().some(({ workArea: a }) => {
+		return x < a.x + a.width && x + w > a.x && y < a.y + a.height && y + h > a.y;
+	});
+}
+
+function saveWindowState(win: BrowserWindow): void {
+	if (win.isDestroyed()) return;
+	// Normal bounds ignore the maximized/fullscreen frame, so we restore the real size.
+	const b = win.getNormalBounds();
+	try {
+		writeFileSync(WINDOW_STATE_FILE, JSON.stringify({ width: b.width, height: b.height, x: b.x, y: b.y }));
+	} catch {
+		// non-fatal
+	}
+}
+
 function createWindow(): void {
+	const saved = readWindowState();
+	const width = saved?.width ?? 1100;
+	const height = saved?.height ?? 760;
+	// Only reuse a saved position if it's still on-screen (display unplugged, etc.).
+	const usePos =
+		saved && saved.x != null && saved.y != null && positionOnScreen(saved.x, saved.y, width, height);
+
 	const win = new BrowserWindow({
 		title: "Forest Ranger",
-		width: 1100,
-		height: 760,
-		x: 200,
-		y: 200,
+		width,
+		height,
+		x: usePos ? saved.x : undefined,
+		y: usePos ? saved.y : undefined,
 		// Transparent titlebar with inset native traffic-light controls; we draw
 		// our own dark titlebar strip and mark it as a drag region in the renderer.
 		titleBarStyle: "hiddenInset",
@@ -914,6 +954,16 @@ function createWindow(): void {
 			preload: join(__dirname, "../preload/index.js"),
 		},
 	});
+
+	// Remember size/position across restarts (debounced during drags/resizes).
+	let saveTimer: ReturnType<typeof setTimeout> | undefined;
+	const scheduleSave = () => {
+		clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => saveWindowState(win), 400);
+	};
+	win.on("resize", scheduleSave);
+	win.on("move", scheduleSave);
+	win.on("close", () => saveWindowState(win));
 
 	if (process.env.ELECTRON_RENDERER_URL) {
 		win.loadURL(process.env.ELECTRON_RENDERER_URL);

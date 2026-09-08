@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 // Override with FOREST_RANGER_DATA_DIR so tests/scripts never touch the real DB.
-const DATA_DIR =
+export const DATA_DIR =
 	process.env.FOREST_RANGER_DATA_DIR || join(homedir(), ".forest-ranger");
 mkdirSync(DATA_DIR, { recursive: true });
 

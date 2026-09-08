@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useRouter } from "@tanstack/react-router";
+import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import styles from "./ErrorView.module.css";
 
-export function ErrorView({ error }: { error: Error }) {
+export function ErrorView({ error }: ErrorComponentProps) {
 	const router = useRouter();
 	const [retrying, setRetrying] = useState(false);
 
@@ -21,7 +21,9 @@ export function ErrorView({ error }: { error: Error }) {
 			<div className={styles.center}>
 				<div className={styles.card}>
 					<h2 className={styles.title}>Couldn't load</h2>
-					<p className={styles.message}>{error.message}</p>
+					<p className={styles.message}>
+						{error instanceof Error ? error.message : String(error)}
+					</p>
 					<button
 						className={styles.retry}
 						onClick={retry}
