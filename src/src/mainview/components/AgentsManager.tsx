@@ -1,8 +1,9 @@
 import type { AgentProvider } from "../../shared/types";
 import {
-	PERMISSION_MODES,
 	PROVIDERS,
+	providerLabel,
 	setChatConfig,
+	setDefaultMode,
 	useChatConfig,
 } from "../lib/chatConfig";
 import { Select } from "./ui/Select";
@@ -35,16 +36,37 @@ export function AgentsManager() {
 						ariaLabel="Default provider"
 					/>
 				</div>
-				<div className={styles.field}>
-					<span className={styles.fieldLabel}>Default permission mode</span>
-					<Select
-						value={config.defaultPermissionMode}
-						onValueChange={(v) => setChatConfig({ defaultPermissionMode: v })}
-						options={PERMISSION_MODES}
-						ariaLabel="Default permission mode"
-					/>
-				</div>
+				<DefaultModeField provider={config.defaultProvider} />
 			</div>
+		</div>
+	);
+}
+
+/**
+ * Default starting mode for a provider, chosen from the mode options that provider
+ * has advertised in a chat (remembered in config). "Agent default" leaves it to the
+ * agent. If no chat has run for this provider yet, the options aren't known.
+ */
+function DefaultModeField({ provider }: { provider: AgentProvider }) {
+	const config = useChatConfig();
+	const modes = config.modesByProvider?.[provider] ?? [];
+	const value = config.defaultModeByProvider?.[provider] ?? "";
+
+	return (
+		<div className={styles.field}>
+			<span className={styles.fieldLabel}>Default mode</span>
+			{modes.length === 0 ? (
+				<p className={styles.hint}>
+					Start a {providerLabel(provider)} chat once to load its modes.
+				</p>
+			) : (
+				<Select
+					value={value}
+					onValueChange={(v) => setDefaultMode(provider, v)}
+					options={[{ value: "", label: "Agent default" }, ...modes]}
+					ariaLabel="Default mode"
+				/>
+			)}
 		</div>
 	);
 }

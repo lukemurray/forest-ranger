@@ -6,11 +6,23 @@ import type { AgentPermissionMode, AgentProvider } from "../../shared/types";
  * inside the chat. This holds the defaults new chats start with and the option
  * lists the in-chat pickers show.
  */
+export type ModeOption = { value: string; label: string };
+
 export type ChatConfig = {
 	defaultProvider: AgentProvider;
 	/** Model alias; "default" means the provider's own default (no override). */
 	defaultModel: string;
 	defaultPermissionMode: AgentPermissionMode;
+	/**
+	 * Preferred starting mode per provider (the agent's own mode ids, e.g. "auto").
+	 * "" / absent = use the agent's own default. Applied when a new chat starts.
+	 */
+	defaultModeByProvider?: Partial<Record<AgentProvider, string>>;
+	/**
+	 * The mode options each provider last advertised, remembered so Settings can
+	 * offer them before any chat is open. Agent-driven, so learned at runtime.
+	 */
+	modesByProvider?: Partial<Record<AgentProvider, ModeOption[]>>;
 };
 
 type ModelOption = { value: string; label: string };
@@ -144,6 +156,20 @@ export function setChatConfig(patch: Partial<ChatConfig>): void {
 	config = { ...config, ...patch };
 	localStorage.setItem(KEY, JSON.stringify(config));
 	for (const fn of listeners) fn();
+}
+
+/** Remember a provider's advertised mode options (no-op if unchanged). */
+export function rememberProviderModes(provider: AgentProvider, options: ModeOption[]): void {
+	const cur = config.modesByProvider?.[provider];
+	if (JSON.stringify(cur) === JSON.stringify(options)) return;
+	setChatConfig({ modesByProvider: { ...config.modesByProvider, [provider]: options } });
+}
+
+/** Set the preferred starting mode for a provider ("" clears the override). */
+export function setDefaultMode(provider: AgentProvider, value: string): void {
+	setChatConfig({
+		defaultModeByProvider: { ...config.defaultModeByProvider, [provider]: value || undefined },
+	});
 }
 
 export function useChatConfig(): ChatConfig {

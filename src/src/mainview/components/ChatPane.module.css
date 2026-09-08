@@ -41,15 +41,24 @@
 	margin: auto;
 }
 
+/* One turn = a question and its answer. It's the containing block for that turn's
+   sticky question header, so the header can only stick within its own turn — when
+   the next turn scrolls up, it pushes the previous header out (instead of the newer
+   message hiding behind a header that's pinned across the whole conversation). */
+.turn {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
 .user {
 	display: flex;
 	justify-content: flex-end;
 }
-/* Each question is a sticky section header, but only ONE is pinned at a time — the
-   turn whose answer you're currently viewing (chosen in JS by scroll position). The
-   rest stay in normal flow, so a shorter current question can't let a taller earlier
-   one peek out beneath it. top:-14px cancels `.scroll`'s 14px top padding (sticky
-   `top` is measured from the padding edge) so nothing shows above the pinned band. */
+/* The turn's question sticks to the top of the scroll viewport while its answer is
+   in view. top:-14px cancels `.scroll`'s 14px top padding (sticky `top` is measured
+   from the padding edge) so nothing shows above the pinned band; the opaque band +
+   z-index hide the answer scrolling underneath. */
 .user[data-pinned] {
 	position: sticky;
 	top: -14px;
@@ -68,6 +77,26 @@
 	line-height: 1.5;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+/* Long questions collapse to a Show more toggle (persistent, not scroll-driven) so a
+   big paste never eats the view and stays small when pinned. The clamp height is set
+   inline from CLAMP_PX in ChatPane.tsx; the mask fades the clamped bottom edge. */
+.bubbleText[data-clamped] {
+	overflow: hidden;
+	-webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent);
+	mask-image: linear-gradient(to bottom, #000 72%, transparent);
+}
+.showMore {
+	display: block;
+	margin-top: 6px;
+	padding: 0;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--accent);
+	cursor: pointer;
+}
+.showMore:hover {
+	text-decoration: underline;
 }
 .bubble[data-queued] {
 	background: transparent;

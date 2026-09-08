@@ -17,8 +17,10 @@ import {
 	PERMISSION_MODES,
 	coerceModel,
 	coerceProvider,
+	getChatConfig,
 	modelArg,
 	providerLabel,
+	rememberProviderModes,
 } from "../lib/chatConfig";
 import { Select } from "./ui/Select";
 import { ChatSettingsMenu } from "./ChatSettingsMenu";
@@ -283,34 +285,17 @@ export function ChatPane({
 
 	// Follow new output while the user is parked near the bottom (so the latest
 	// output stays in view). If they've scrolled up to read, don't yank them down.
+	// Sticky question headers are pure CSS section-stickies (see `.turn`); long ones
+	// are clamped with a Show more toggle (see UserBubble), not a scroll-driven cap.
 	const stick = useRef(true);
+	const onScroll = () => {
+		const el = scrollRef.current;
+		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+	};
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
 		if (el && stick.current) el.scrollTop = el.scrollHeight;
 	}, [items, status]);
-
-	// Pin exactly one question as a sticky header: the turn whose answer currently
-	// spans the top of the viewport (the last user row scrolled to/past the top).
-	// Only one is pinned so a shorter current question can't reveal a taller earlier
-	// one beneath it (CSS `.user[data-pinned]`).
-	const [pinnedUser, setPinnedUser] = useState(-1);
-	const updateSticky = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		const users = el.querySelectorAll<HTMLElement>('[data-role="user"]');
-		const limit = el.scrollTop + 15; // 14px top padding + 1
-		let active = -1;
-		users.forEach((u, i) => {
-			if (u.offsetTop <= limit) active = i;
-		});
-		setPinnedUser((prev) => (prev === active ? prev : active));
-	}, []);
-	const onScroll = () => {
-		const el = scrollRef.current;
-		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-		updateSticky();
-	};
-	useLayoutEffect(updateSticky, [items, status, updateSticky]);
 
 	// Auto-grow the input from one line up to ~30% of the viewport, then scroll.
 	useLayoutEffect(() => {
@@ -382,6 +367,26 @@ export function ChatPane({
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [status]);
+
+	// Learn this provider's mode options (so Settings can offer them), and — on a
+	// fresh chat only — switch to the user's preferred default mode once. Resumed
+	// chats keep whatever mode they had.
+	const appliedDefaultMode = useRef(resume);
+	useEffect(() => {
+		const modeOpt = configOptions.find((o) => o.id === "mode" || o.category === "mode");
+		if (!modeOpt) return;
+		rememberProviderModes(
+			providerValue,
+			modeOpt.options.map((o) => ({ value: o.value, label: o.label })),
+		);
+		if (!appliedDefaultMode.current) {
+			appliedDefaultMode.current = true;
+			const want = getChatConfig().defaultModeByProvider?.[providerValue];
+			if (want && want !== modeOpt.currentValue && modeOpt.options.some((o) => o.value === want)) {
+				bus.agentChatSetConfigOption({ sessionId: chatId, configId: modeOpt.id, value: want });
+			}
+		}
+	}, [configOptions, providerValue, chatId]);
 
 	function addFiles(files: FileList | File[]) {
 		for (const file of Array.from(files)) {
@@ -529,6 +534,11 @@ export function ChatPane({
 
 	// Rebuilt only when items change (not on every keystroke/config re-render).
 	const renderNodes = useMemo(() => buildRenderNodes(items), [items]);
+	// Group nodes into turns: each starts at a new question (a user cluster) and runs
+	// through its answer. Wrapping a turn constrains its sticky question header to that
+	// turn's box, so the next turn scrolls up and *pushes* the previous header out.
+	const sections = useMemo(() => buildSections(renderNodes), [renderNodes]);
+	const lastNode = renderNodes[renderNodes.length - 1];
 
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
@@ -584,29 +594,29 @@ export function ChatPane({
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
-				{(() => {
-					let userSeq = -1;
-					return renderNodes.map((node, i) =>
-						node.kind === "process" ? (
-							<ProcessStrip
-								key={i}
-								steps={node.steps}
-								active={working && i === renderNodes.length - 1}
-								onPermission={respondPermission}
-								onElicit={submitElicit}
-							/>
-						) : (
-							<ChatRow
-								key={i}
-								item={node}
-								userIndex={node.kind === "user" ? ++userSeq : -1}
-								pinned={node.kind === "user" && userSeq === pinnedUser}
-								onPermission={respondPermission}
-								onElicit={submitElicit}
-							/>
-						),
-					);
-				})()}
+				{sections.map((sec, si) => (
+					<div key={si} className={styles.turn}>
+						{sec.nodes.map((node, ni) =>
+							node.kind === "process" ? (
+								<ProcessStrip
+									key={ni}
+									steps={node.steps}
+									active={working && node === lastNode}
+									onPermission={respondPermission}
+									onElicit={submitElicit}
+								/>
+							) : (
+								<ChatRow
+									key={ni}
+									item={node}
+									pinned={ni === sec.headerIdx}
+									onPermission={respondPermission}
+									onElicit={submitElicit}
+								/>
+							),
+						)}
+					</div>
+				))}
 				{activity && (
 					<div className={styles.activity}>
 						<span className={styles.spinner} />
@@ -793,47 +803,52 @@ function mergeText(items: ChatItem[], kind: "assistant" | "thinking", text: stri
 }
 
 type RenderNode = ChatItem | { kind: "process"; steps: ChatItem[] };
+type Section = { nodes: RenderNode[]; headerIdx: number };
 
 /**
- * Fold a turn's "process" items — thinking, tool calls, and the interstitial
- * narration that precedes them ("Let me check X") — into a single collapsible
- * strip, leaving the final answer (assistant text after the last tool) visible.
- * An assistant block is narration iff a tool call follows it before the next
- * user message; the last assistant block of a turn has no trailing tool, so it
- * renders normally.
+ * Split the flat node list into turns for sticky section headers. A turn begins at
+ * a new question (a user node not directly preceded by another user) and includes
+ * every node up to the next question. `headerIdx` is the last of a turn's leading
+ * consecutive questions — the one that sticks (so back-to-back questions pin the
+ * latest); -1 when a turn has no question (e.g. an opening assistant message).
+ */
+function buildSections(nodes: RenderNode[]): Section[] {
+	const sections: Section[] = [];
+	let prevWasUser = false;
+	for (const node of nodes) {
+		const isUser = node.kind === "user";
+		if (sections.length === 0 || (isUser && !prevWasUser)) {
+			sections.push({ nodes: [], headerIdx: -1 });
+		}
+		const sec = sections[sections.length - 1];
+		sec.nodes.push(node);
+		if (isUser) sec.headerIdx = sec.nodes.length - 1;
+		prevWasUser = isUser;
+	}
+	return sections;
+}
+
+/**
+ * Fold only runs of consecutive tool calls into a collapsible "Worked" strip.
+ * All prose — assistant answers, interstitial narration, thinking — stays visible
+ * inline, since that text is often what makes the final result read correctly. A
+ * lone tool renders as its own (already collapsible) row rather than a 1-step strip.
  */
 function buildRenderNodes(items: ChatItem[]): RenderNode[] {
-	// One backward pass: an assistant block is narration iff a tool call appears
-	// after it before the next user turn. `toolAhead` tracks that per turn (reset
-	// at each user boundary), giving O(n) instead of a lookahead scan per item.
-	const isProcess = new Array<boolean>(items.length);
-	let toolAhead = false;
-	for (let i = items.length - 1; i >= 0; i--) {
-		const kind = items[i].kind;
-		if (kind === "user") toolAhead = false;
-		if (kind === "thinking" || kind === "tool") {
-			isProcess[i] = true;
-			if (kind === "tool") toolAhead = true;
-		} else {
-			isProcess[i] = kind === "assistant" && toolAhead;
-		}
-	}
-
 	const nodes: RenderNode[] = [];
 	let buf: ChatItem[] = [];
 	const flush = () => {
-		if (buf.length) {
-			nodes.push({ kind: "process", steps: buf });
-			buf = [];
-		}
+		if (buf.length > 1) nodes.push({ kind: "process", steps: buf });
+		else if (buf.length === 1) nodes.push(buf[0]);
+		buf = [];
 	};
-	items.forEach((item, i) => {
-		if (isProcess[i]) buf.push(item);
+	for (const item of items) {
+		if (item.kind === "tool") buf.push(item);
 		else {
 			flush();
 			nodes.push(item);
 		}
-	});
+	}
 	flush();
 	return nodes;
 }
@@ -884,20 +899,64 @@ function ProcessStrip({
 	);
 }
 
+/** A sent user message: long ones clamp with an inline Show more/less toggle so a
+ *  big paste never dominates the view (and stays small when pinned as a header). */
+function UserBubble({
+	text,
+	attachments,
+}: {
+	text: string;
+	attachments?: { name: string; isImage: boolean }[];
+}) {
+	const [expanded, setExpanded] = useState(false);
+	const [overflows, setOverflows] = useState(false);
+	const contentRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const el = contentRef.current;
+		// scrollHeight is the full content height even while clamped by max-height.
+		if (el) setOverflows(el.scrollHeight > CLAMP_PX + 8);
+	}, [text]);
+
+	return (
+		<div className={styles.bubble}>
+			{attachments && attachments.length > 0 && (
+				<div className={styles.sentAttachments}>
+					{attachments.map((a, j) => (
+						<span key={j} className={styles.sentChip}>
+							{a.isImage ? "🖼" : "📎"} {a.name}
+						</span>
+					))}
+				</div>
+			)}
+			<div
+				ref={contentRef}
+				className={styles.bubbleText}
+				data-clamped={overflows && !expanded ? "" : undefined}
+				style={overflows && !expanded ? { maxHeight: CLAMP_PX } : undefined}
+			>
+				{text}
+			</div>
+			{overflows && (
+				<button className={styles.showMore} onClick={() => setExpanded((e) => !e)}>
+					{expanded ? "Show less" : "Show more"}
+				</button>
+			)}
+		</div>
+	);
+}
+const CLAMP_PX = 80;
+
 // Memoized: with stable callbacks and ref-stable item objects (only changed
 // items get new refs from the reducer), a streamed token re-renders just the
 // message that changed — not the whole history.
 const ChatRow = memo(function ChatRow({
 	item,
-	userIndex = -1,
 	pinned,
 	onPermission,
 	onElicit,
 }: {
 	item: ChatItem;
-	/** 0-based position among user rows (for the sticky-header measurement). */
-	userIndex?: number;
-	/** Pin this user row as the sticky section header. */
+	/** Pin this user row as the turn's sticky header. */
 	pinned?: boolean;
 	onPermission: (id: string, optionId: string, label: string) => void;
 	onElicit: (
@@ -908,19 +967,8 @@ const ChatRow = memo(function ChatRow({
 }) {
 	if (item.kind === "user") {
 		return (
-			<div className={styles.user} data-role="user" data-uindex={userIndex} data-pinned={pinned || undefined}>
-				<div className={styles.bubble}>
-					{item.attachments && item.attachments.length > 0 && (
-						<div className={styles.sentAttachments}>
-							{item.attachments.map((a, j) => (
-								<span key={j} className={styles.sentChip}>
-									{a.isImage ? "🖼" : "📎"} {a.name}
-								</span>
-							))}
-						</div>
-					)}
-					{item.text}
-				</div>
+			<div className={styles.user} data-pinned={pinned || undefined}>
+				<UserBubble text={item.text} attachments={item.attachments} />
 			</div>
 		);
 	}
