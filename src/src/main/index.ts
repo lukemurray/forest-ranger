@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, safeStorage, screen, shell } from "electron";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -52,7 +52,6 @@ import {
 import {
 	branchStatus as gitlabBranchStatus,
 	testConnection as gitlabTest,
-	type GitLabConfig,
 } from "./gitlab";
 import {
 	branchStatus as githubBranchStatus,
@@ -125,10 +124,41 @@ const DEFAULT_HOST: Record<IntegrationType, string> = {
 	github: "github.com",
 };
 
+/** Stored integration config. The token is encrypted at rest via the OS keychain
+ * (`tokenEnc`); `tokenPlain` is a fallback when the keychain is unavailable (some
+ * Linux setups); `token` is the pre-encryption legacy field, still read for migration. */
+type StoredIntegration = {
+	host?: string;
+	tokenEnc?: string;
+	tokenPlain?: string;
+	token?: string;
+};
+
+/** Encrypt a token for storage via the OS keychain, falling back to plaintext only
+ *  when encryption isn't available on this machine. Empty token stores nothing. */
+function encryptToken(token: string): Pick<StoredIntegration, "tokenEnc" | "tokenPlain"> {
+	if (!token) return {};
+	if (safeStorage.isEncryptionAvailable()) {
+		return { tokenEnc: safeStorage.encryptString(token).toString("base64") };
+	}
+	return { tokenPlain: token };
+}
+
+function decryptToken(stored: StoredIntegration): string {
+	if (stored.tokenEnc) {
+		try {
+			return safeStorage.decryptString(Buffer.from(stored.tokenEnc, "base64"));
+		} catch {
+			return ""; // keychain changed/unavailable — treat as no token
+		}
+	}
+	return stored.tokenPlain ?? stored.token ?? "";
+}
+
 function integrationConfig(type: IntegrationType): { host: string; token: string } {
 	const row = integrationsRepo.get(type);
-	const stored = row ? (JSON.parse(row.config) as Partial<GitLabConfig>) : {};
-	return { host: stored.host || DEFAULT_HOST[type], token: stored.token || "" };
+	const stored = row ? (JSON.parse(row.config) as StoredIntegration) : {};
+	return { host: stored.host || DEFAULT_HOST[type], token: decryptToken(stored) };
 }
 
 function integrationStatus(type: IntegrationType): IntegrationStatus {
@@ -707,10 +737,15 @@ const handlers: RpcHandlers = {
 			listIntegrations: () => KNOWN_INTEGRATIONS.map(integrationStatus),
 
 			setIntegration: ({ type, enabled, host, token }) => {
-				const cfg = integrationConfig(type);
-				cfg.host = host.trim() || DEFAULT_HOST[type];
-				if (token !== null) cfg.token = token; // "" clears, null keeps
-				integrationsRepo.upsert(type, enabled, JSON.stringify(cfg));
+				const current = integrationConfig(type);
+				const finalHost = host.trim() || DEFAULT_HOST[type];
+				const finalToken = token !== null ? token : current.token; // "" clears, null keeps
+				// Encrypt on every save — this also migrates any legacy plaintext token.
+				integrationsRepo.upsert(
+					type,
+					enabled,
+					JSON.stringify({ host: finalHost, ...encryptToken(finalToken) }),
+				);
 				return integrationStatus(type);
 			},
 

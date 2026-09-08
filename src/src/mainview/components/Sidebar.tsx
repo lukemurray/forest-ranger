@@ -19,7 +19,7 @@ import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RenameWorktreeDialog } from "./RenameWorktreeDialog";
 import { SettingsMenu } from "./SettingsMenu";
-import { useTerminals } from "../lib/terminalStore";
+import { getRestorableSessions, useTerminals } from "../lib/terminalStore";
 import styles from "./Sidebar.module.css";
 
 export function Sidebar({ projects }: { projects: Project[] }) {
@@ -35,6 +35,16 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 	);
 	const runningProjects = new Set(
 		sessions.filter((s) => s.running).map((s) => s.projectId),
+	);
+	// Chats saved from a previous run that haven't been reopened yet (e.g. right
+	// after launch). Marked with a hollow dot so you can see where work is waiting
+	// to resume; once a worktree is opened its chats relaunch and become "running".
+	const resumableChats = getRestorableSessions().filter(
+		(s) => s.kind === "chat" && s.sessionId && !runningWorktrees.has(s.worktreeId),
+	);
+	const resumableWorktrees = new Set(resumableChats.map((s) => s.worktreeId));
+	const resumableProjects = new Set(
+		resumableChats.map((s) => s.projectId).filter((id) => !runningProjects.has(id)),
 	);
 
 	async function addProject() {
@@ -116,6 +126,8 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 							project={p}
 							runningProjects={runningProjects}
 							runningWorktrees={runningWorktrees}
+							resumableProjects={resumableProjects}
+							resumableWorktrees={resumableWorktrees}
 						/>
 					))
 				)}
@@ -130,10 +142,14 @@ function ProjectNode({
 	project,
 	runningProjects,
 	runningWorktrees,
+	resumableProjects,
+	resumableWorktrees,
 }: {
 	project: Project;
 	runningProjects: Set<string>;
 	runningWorktrees: Set<string>;
+	resumableProjects: Set<string>;
+	resumableWorktrees: Set<string>;
 }) {
 	const navigate = useNavigate();
 	const router = useRouter();
@@ -224,8 +240,12 @@ function ProjectNode({
 						>
 							<RefreshIcon size={13} />
 						</button>
-						{runningProjects.has(project.id) && (
+						{runningProjects.has(project.id) ? (
 							<span className={styles.runningDot} title="task running" />
+						) : (
+							resumableProjects.has(project.id) && (
+								<span className={styles.resumeDot} title="a chat here can resume" />
+							)
 						)}
 					</div>
 				}
@@ -272,9 +292,14 @@ function ProjectNode({
 									{runningWorktrees.has(wt.id) ? (
 										<span className={styles.runningDot} title="task running" />
 									) : (
-										<span className={styles.worktreeTime}>
-											{relativeTime(wt.lastActivityAt)}
-										</span>
+										<>
+											{resumableWorktrees.has(wt.id) && (
+												<span className={styles.resumeDot} title="a chat here can resume" />
+											)}
+											<span className={styles.worktreeTime}>
+												{relativeTime(wt.lastActivityAt)}
+											</span>
+										</>
 									)}
 								</button>
 							}

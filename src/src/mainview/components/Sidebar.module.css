@@ -253,6 +253,16 @@
 	margin-left: auto;
 	animation: runningPulse 1.4s ease-in-out infinite;
 }
+/* A previous chat is here to resume (not running yet) — hollow, no pulse. */
+.resumeDot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	border: 1.5px solid var(--accent);
+	box-sizing: border-box;
+	flex-shrink: 0;
+	margin-left: auto;
+}
 @keyframes runningPulse {
 	0%,
 	100% {
