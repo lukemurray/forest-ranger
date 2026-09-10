@@ -28,6 +28,22 @@ export function elapsed(sinceMs: number): string {
 	return `${h}h ${m}m`;
 }
 
+/** Exact local date+time for a hover tooltip: "Sep 10, 2026, 2:41:03 PM". */
+export function clockTime(ms: number): string {
+	return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" });
+}
+
+/** Divider label: bare time ("2:41 PM") if today, else with a short date. */
+export function timeDivider(ms: number): string {
+	const d = new Date(ms);
+	const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	const today = new Date();
+	const sameDay = d.toDateString() === today.toDateString();
+	if (sameDay) return time;
+	const date = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+	return `${date} · ${time}`;
+}
+
 export function shortHash(head: string | null): string {
 	return head ? head.slice(0, 7) : "—";
 }

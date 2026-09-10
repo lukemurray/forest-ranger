@@ -26,6 +26,7 @@ import {
 import { Select } from "./ui/Select";
 import { ChatSettingsMenu } from "./ChatSettingsMenu";
 import { Markdown } from "./Markdown";
+import { clockTime, timeDivider } from "../lib/format";
 import { CloseIcon, PlusIcon } from "./icons";
 import styles from "./ChatPane.module.css";
 
@@ -41,8 +42,8 @@ type LocalAttachment = {
 type Outgoing = { text: string; attachments: ChatAttachment[] };
 
 type ChatItem =
-	| { kind: "user"; text: string; attachments?: { name: string; isImage: boolean }[] }
-	| { kind: "assistant"; text: string }
+	| { kind: "user"; text: string; attachments?: { name: string; isImage: boolean }[]; ts?: number }
+	| { kind: "assistant"; text: string; ts?: number }
 	| { kind: "thinking"; text: string }
 	| {
 			kind: "tool";
@@ -158,7 +159,7 @@ export function ChatPane({
 				case "user_text":
 					setItems((it) => [
 						...it,
-						{ kind: "user", text: event.text, attachments: event.attachments },
+						{ kind: "user", text: event.text, attachments: event.attachments, ts: event.ts },
 					]);
 					setStatus("working");
 					if (!autoNamed.current) {
@@ -170,11 +171,11 @@ export function ChatPane({
 					break;
 				case "assistant_text":
 					setStatus("working");
-					setItems((it) => mergeText(it, "assistant", event.text));
+					setItems((it) => mergeText(it, "assistant", event.text, event.ts));
 					break;
 				case "thinking":
 					setStatus("working");
-					setItems((it) => mergeText(it, "thinking", event.text));
+					setItems((it) => mergeText(it, "thinking", event.text, event.ts));
 					break;
 				case "tool_use":
 					setItems((it) => [
@@ -563,6 +564,7 @@ export function ChatPane({
 	// through its answer. Wrapping a turn constrains its sticky question header to that
 	// turn's box, so the next turn scrolls up and *pushes* the previous header out.
 	const sections = useMemo(() => buildSections(renderNodes), [renderNodes]);
+	const dividers = useMemo(() => buildDividers(sections), [sections]);
 	const lastNode = renderNodes[renderNodes.length - 1];
 
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
@@ -631,6 +633,11 @@ export function ChatPane({
 				)}
 				{sections.map((sec, si) => (
 					<div key={si} className={styles.turn}>
+						{dividers[si] && (
+							<div className={styles.timeDivider}>
+								<span>{dividers[si]}</span>
+							</div>
+						)}
 						{sec.nodes.map((node, ni) =>
 							node.kind === "process" ? (
 								<ProcessStrip
@@ -856,12 +863,18 @@ function deriveName(text: string): string {
 	return line.length > 40 ? `${line.slice(0, 40).trimEnd()}…` : line || "New chat";
 }
 
-function mergeText(items: ChatItem[], kind: "assistant" | "thinking", text: string): ChatItem[] {
+function mergeText(
+	items: ChatItem[],
+	kind: "assistant" | "thinking",
+	text: string,
+	ts?: number,
+): ChatItem[] {
 	const last = items[items.length - 1];
 	if (last && last.kind === kind) {
 		return [...items.slice(0, -1), { ...last, text: last.text + text }];
 	}
-	return [...items, { kind, text }];
+	// ts only on the first chunk — it's when the turn's answer began.
+	return [...items, kind === "assistant" ? { kind, text, ts } : { kind, text }];
 }
 
 type RenderNode = ChatItem | { kind: "process"; steps: ChatItem[] };
@@ -874,6 +887,32 @@ type Section = { nodes: RenderNode[]; headerIdx: number };
  * consecutive questions — the one that sticks (so back-to-back questions pin the
  * latest); -1 when a turn has no question (e.g. an opening assistant message).
  */
+/** The earliest timestamp in a turn (its question, else the answer's first chunk). */
+function sectionStartTs(sec: Section): number | undefined {
+	for (const node of sec.nodes) {
+		if (node.kind === "user" || node.kind === "assistant") {
+			if (node.ts) return node.ts;
+		} else if (node.kind === "process") {
+			for (const step of node.steps) if (step.kind === "assistant" && step.ts) return step.ts;
+		}
+	}
+	return undefined;
+}
+
+const GAP_MS = 60 * 60 * 1000; // insert a time divider when turns are >1h apart
+
+/** Per-section divider labels: set only when a turn begins >1h after the last. */
+function buildDividers(sections: Section[]): (string | null)[] {
+	let prev: number | undefined;
+	return sections.map((sec) => {
+		const ts = sectionStartTs(sec);
+		if (ts === undefined) return null;
+		const label = prev !== undefined && ts - prev > GAP_MS ? timeDivider(ts) : null;
+		prev = ts;
+		return label;
+	});
+}
+
 function buildSections(nodes: RenderNode[]): Section[] {
 	const sections: Section[] = [];
 	let prevWasUser = false;
@@ -967,9 +1006,11 @@ function ProcessStrip({
 function UserBubble({
 	text,
 	attachments,
+	title,
 }: {
 	text: string;
 	attachments?: { name: string; isImage: boolean }[];
+	title?: string;
 }) {
 	const [expanded, setExpanded] = useState(false);
 	const [overflows, setOverflows] = useState(false);
@@ -981,7 +1022,7 @@ function UserBubble({
 	}, [text]);
 
 	return (
-		<div className={styles.bubble}>
+		<div className={styles.bubble} title={title}>
 			{attachments && attachments.length > 0 && (
 				<div className={styles.sentAttachments}>
 					{attachments.map((a, j) => (
@@ -1031,7 +1072,11 @@ const ChatRow = memo(function ChatRow({
 	if (item.kind === "user") {
 		return (
 			<div className={styles.user} data-pinned={pinned || undefined}>
-				<UserBubble text={item.text} attachments={item.attachments} />
+				<UserBubble
+					text={item.text}
+					attachments={item.attachments}
+					title={item.ts ? clockTime(item.ts) : undefined}
+				/>
 			</div>
 		);
 	}
@@ -1040,7 +1085,7 @@ const ChatRow = memo(function ChatRow({
 		// stack of empty horizontal rules — skip it rather than show the noise.
 		if (isBlankText(item.text)) return null;
 		return (
-			<div className={styles.assistant}>
+			<div className={styles.assistant} title={item.ts ? clockTime(item.ts) : undefined}>
 				<Markdown text={item.text} />
 			</div>
 		);

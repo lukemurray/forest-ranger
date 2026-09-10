@@ -170,13 +170,16 @@ let emitGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = nu
 /** An emitter that records events to the session's buffer, then pushes them out. */
 function emitterFor(sessionId: string): Emit {
 	return (event) => {
+		// Stamp once here (the single choke point), so the same ts is buffered,
+		// persisted, and pushed live — and survives replay on reattach/reload.
+		const stamped = { ...event, ts: event.ts ?? Date.now() };
 		const buf = buffers.get(sessionId);
 		if (buf) {
-			buf.push(event);
+			buf.push(stamped);
 			if (buf.length > MAX_BUFFER) buf.shift();
 			schedulePersist(sessionId);
 		}
-		emitGlobal?.(sessionId, event);
+		emitGlobal?.(sessionId, stamped);
 	};
 }
 

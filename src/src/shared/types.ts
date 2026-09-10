@@ -171,7 +171,13 @@ export type PermissionOption = {
 	kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
 };
 
-export type AgentChatEvent =
+export type AgentChatEvent = AgentChatEventKind & {
+	/** Record-time timestamp (ms) stamped when the event is buffered; absent on
+	 *  events from logs written before timestamps existed. */
+	ts?: number;
+};
+
+type AgentChatEventKind =
 	/**
 	 * Start-of-replay marker: the events that follow are the full buffered
 	 * history. The view clears its transcript so a re-delivered replay (e.g. two
