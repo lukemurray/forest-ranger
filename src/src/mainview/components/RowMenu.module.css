@@ -29,6 +29,18 @@
 	color: var(--text-muted);
 	flex-shrink: 0;
 }
+.itemLabel {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.itemHint {
+	margin-left: 14px;
+	color: var(--text-faint);
+	font-size: 12px;
+	flex-shrink: 0;
+}
 .item[data-highlighted] {
 	background: var(--bg-hover);
 }

@@ -112,7 +112,7 @@ export function SettingsDialog({
 					<div className={styles.content}>
 						{section === "general" && (
 							<>
-								<Group label="Run commands & agents in">
+								<Group label="Run commands in">
 									{RUN_OPTIONS.map((o) => (
 										<Option
 											key={o.value}
@@ -151,7 +151,7 @@ export function SettingsDialog({
 										))
 									)}
 								</Group>
-								<Group label="Terminal">
+								<Group label="External Terminal">
 									{terminals.length === 0 ? (
 										<div className={styles.note}>No terminals found</div>
 									) : (

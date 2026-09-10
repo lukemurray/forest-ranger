@@ -12,6 +12,7 @@ import {
 	PlusIcon,
 	RefreshIcon,
 	RevealIcon,
+	SproutIcon,
 	TreeIcon,
 	TrashIcon,
 } from "./icons";
@@ -286,8 +287,12 @@ function ProjectNode({
 									title={wt.path}
 								>
 									<span className={styles.worktreeBranch}>
+										{wt.isPrimary && (
+											<span className={styles.primaryMark} title="primary worktree">
+												<SproutIcon size={14} />
+											</span>
+										)}
 										{wt.name ?? wt.branch ?? "detached"}
-										{wt.isPrimary && <span className={styles.primaryDot} title="primary worktree" />}
 									</span>
 									{runningWorktrees.has(wt.id) ? (
 										<span className={styles.runningDot} title="task running" />

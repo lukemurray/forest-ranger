@@ -29,15 +29,17 @@
 	color: var(--text-muted);
 }
 
+/* Neutral pill — only the little ▶ glyph carries the green, so a run command
+   doesn't out-shout the primary actions. */
 .run {
-	color: var(--green);
-	border-color: color-mix(in srgb, var(--green) 45%, var(--border-strong));
+	color: var(--text-muted);
 }
 .run svg {
 	color: var(--green);
 }
 .run:hover {
-	background: rgba(78, 201, 165, 0.12);
+	background: var(--bg-hover);
+	color: var(--text);
 }
 
 .add {

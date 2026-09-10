@@ -1,7 +1,8 @@
 .workspace {
 	display: flex;
 	flex-direction: column;
-	height: 100%;
+	flex: 1;
+	min-height: 0;
 	min-width: 0;
 	background: var(--bg);
 }
@@ -30,6 +31,15 @@
 }
 .tab:hover {
 	background: var(--bg-hover);
+}
+/* Drop the UA focus box (it lingers on the restored tab after a reopen and reads
+   as an odd border); keyboard users still get a clean on-brand ring. */
+.tab:focus {
+	outline: none;
+}
+.tab:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 2px var(--accent-soft);
 }
 .tab[data-active] {
 	background: var(--bg-active);
@@ -97,6 +107,38 @@
 	color: var(--text);
 }
 
+/* Split button: "Chat" (new) + a dropdown arrow (reopen past chats), in one dashed
+   frame with a divider between the two hoverable regions. */
+.split {
+	display: inline-flex;
+	align-items: stretch;
+	border: 1px dashed var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	overflow: hidden;
+}
+.splitMain,
+.splitArrow {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 5px 9px;
+	font-size: 12px;
+	color: inherit;
+	background: transparent;
+}
+.splitMain {
+	border-right: 1px dashed var(--border-strong);
+}
+.splitArrow {
+	padding: 5px 6px;
+}
+.splitMain:hover,
+.splitArrow:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+
 .body {
 	flex: 1;
 	min-height: 0;
@@ -112,12 +154,13 @@
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 14px;
+	gap: 6px;
 	height: 100%;
 	color: var(--text-faint);
 	font-size: 13.5px;
 }
-.emptyActions {
-	display: flex;
-	gap: 8px;
+.emptyHint {
+	font-size: 12.5px;
+	color: var(--text-faint);
+	opacity: 0.8;
 }

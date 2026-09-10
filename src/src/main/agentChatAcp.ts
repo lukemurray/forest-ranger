@@ -513,7 +513,16 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		send(text: string, attachments: ChatAttachment[] = []) {
 			ready
 				.then(() => {
-					if (closed || !conn || !sessionId) return;
+					// Intentional teardown (stop/restart) — the view resets separately.
+					if (closed) return;
+					// The view flipped to "working" on the echoed user message, so it needs
+					// a turn-end event no matter what. If we can't even issue the prompt
+					// (connection never came up / dropped), emit a terminal result so the
+					// composer doesn't get stuck showing Stop with nothing running.
+					if (!conn || !sessionId) {
+						emit({ type: "error", message: "Chat isn't connected — send failed." });
+						return;
+					}
 					return conn
 						.prompt({ sessionId, prompt: promptBlocks(text, attachments) })
 						.then((res) => {

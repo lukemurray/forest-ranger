@@ -32,6 +32,12 @@
 .center {
 	flex: 1;
 	min-width: 0;
+	/* Flex column so the workspace fills this by flex, not a percentage height —
+	   a percentage against a stretched item overflows once the tab strip grows a
+	   horizontal scrollbar (2+ tabs), clipping the composer. */
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
 }
 .resizer {
 	width: 6px;

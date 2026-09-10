@@ -34,6 +34,7 @@ import {
 	setSessionMode as agentChatSetSessionMode,
 	setConfigOption as agentChatSetConfigOption,
 	cancel as agentChatCancel,
+	listChatLogs,
 	restart as agentChatRestart,
 	send as agentChatSend,
 	setAgentChatCallback,
@@ -802,9 +803,14 @@ const handlers: RpcHandlers = {
 					resume,
 					permissionMode,
 					model,
+					worktreeId,
+					projectId: row.project_id,
 				});
 				return ok ? { ok: true } : { ok: false, error: "Session already running" };
 			},
+
+			listChats: ({ worktreeId }) =>
+				listChatLogs().filter((m) => m.worktreeId === worktreeId),
 
 			agentChatRestart: ({ sessionId, worktreeId, provider, permissionMode, model }) => {
 				const row = worktreesRepo.get(worktreeId);

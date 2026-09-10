@@ -629,12 +629,18 @@ export async function fetchProject(
 			error: err === "timed out" ? "Fetch timed out — check your network or credentials." : err || "fetch failed",
 		};
 	}
-	// Best-effort fast-forward the local default branch when it isn't checked out
-	// (a no-op/failure here is fine — the remote refs are already updated above).
+	// Best-effort fast-forward the local default branch to match origin. How depends
+	// on whether it's checked out: `git fetch origin b:b` refuses to write a ref that's
+	// checked out in a worktree, so for that case we fast-forward *through* the worktree
+	// with `merge --ff-only`. A diverged branch (not fast-forwardable) is left alone.
 	if (branch) {
-		const ff = await git(repoPath, ["fetch", "origin", `${branch}:${branch}`], { timeoutMs: 20_000 });
+		const worktrees = await listWorktrees(repoPath);
+		const checkedOut = worktrees.find((w) => w.branch === branch);
+		const ff = checkedOut
+			? await git(checkedOut.path, ["merge", "--ff-only", `origin/${branch}`], { timeoutMs: 20_000 })
+			: await git(repoPath, ["fetch", "origin", `${branch}:${branch}`], { timeoutMs: 20_000 });
 		console.log(
-			`[fetch] ff ${branch}: ok=${ff.ok} exit=${ff.exitCode}` +
+			`[fetch] ff ${branch} (${checkedOut ? "worktree" : "ref"}): ok=${ff.ok} exit=${ff.exitCode}` +
 				(ff.stderr.trim() ? ` stderr=${ff.stderr.trim().slice(0, 200)}` : ""),
 		);
 	}

@@ -25,18 +25,22 @@ export function Dropdown({
 export function DropdownItem({
 	icon,
 	label,
+	hint,
 	onClick,
 	danger,
 }: {
 	icon?: ReactNode;
 	label: string;
+	/** Optional muted text pinned to the right (e.g. a timestamp). */
+	hint?: string;
 	onClick: () => void;
 	danger?: boolean;
 }) {
 	return (
 		<Menu.Item className={styles.item} data-danger={danger || undefined} onClick={onClick}>
 			{icon}
-			{label}
+			<span className={styles.itemLabel}>{label}</span>
+			{hint && <span className={styles.itemHint}>{hint}</span>}
 		</Menu.Item>
 	);
 }

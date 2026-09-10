@@ -10,7 +10,7 @@
  * Sessions live in the main process so they survive renderer reloads/HMR.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -18,6 +18,7 @@ import type {
 	AgentPermissionMode,
 	AgentProvider,
 	ChatAttachment,
+	ChatLogMeta,
 	ElicitationValue,
 } from "../shared/types";
 import { startAcpDriver } from "./agentChatAcp";
@@ -32,6 +33,41 @@ const CHAT_DIR = join(
 function chatFile(sessionId: string): string {
 	return join(CHAT_DIR, `${sessionId}.json`);
 }
+function chatMetaFile(sessionId: string): string {
+	return join(CHAT_DIR, `${sessionId}.meta.json`);
+}
+
+// Self-describing header (ChatLogMeta) is persisted alongside each chat so it can
+// be listed + reopened later even when the renderer's session list has forgotten it.
+// Start-time context per session, folded into the meta sidecar on persist.
+const sessionMeta = new Map<
+	string,
+	{ worktreeId?: string; projectId?: string; provider: AgentProvider; model: string | null }
+>();
+
+/** A readable name for a chat: its first user message, truncated. */
+function deriveChatName(buf: AgentChatEvent[]): string {
+	const first = buf.find((e) => e.type === "user_text");
+	const text = first && first.type === "user_text" ? first.text : "";
+	const line = text.replace(/\s+/g, " ").trim();
+	if (!line) return "Chat";
+	return line.length > 48 ? `${line.slice(0, 48).trimEnd()}…` : line;
+}
+
+/** Write the `.meta.json` sidecar for a session (files it to its worktree). */
+function writeChatMeta(sessionId: string): void {
+	const ctx = sessionMeta.get(sessionId);
+	const buf = buffers.get(sessionId);
+	if (!ctx || !buf) return;
+	try {
+		mkdirSync(CHAT_DIR, { recursive: true });
+		const meta: ChatLogMeta = { sessionId, ...ctx, name: deriveChatName(buf), updatedAt: Date.now() };
+		writeFileSync(chatMetaFile(sessionId), JSON.stringify(meta));
+	} catch {
+		// best effort
+	}
+}
+
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 function schedulePersist(sessionId: string): void {
 	const existing = persistTimers.get(sessionId);
@@ -48,8 +84,28 @@ function schedulePersist(sessionId: string): void {
 			} catch {
 				// best effort — losing persistence shouldn't break the chat
 			}
+			writeChatMeta(sessionId);
 		}, 400),
 	);
+}
+
+/** All persisted chats (newest first), read from the meta sidecars on disk. */
+export function listChatLogs(): ChatLogMeta[] {
+	let files: string[] = [];
+	try {
+		files = readdirSync(CHAT_DIR).filter((f) => f.endsWith(".meta.json"));
+	} catch {
+		return [];
+	}
+	const out: ChatLogMeta[] = [];
+	for (const f of files) {
+		try {
+			out.push(JSON.parse(readFileSync(join(CHAT_DIR, f), "utf8")) as ChatLogMeta);
+		} catch {
+			// skip unreadable/partial meta
+		}
+	}
+	return out.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 /** Load a persisted log, dropping process-lifecycle events that shouldn't replay. */
 function loadPersisted(sessionId: string): AgentChatEvent[] | null {
@@ -152,6 +208,9 @@ export type StartOpts = {
 	model: string | null;
 	/** ACP session id to resume the agent's own context from (loadSession). */
 	acpResumeId?: string | null;
+	/** Where this chat lives — persisted into the log so it can be listed/reopened. */
+	worktreeId?: string;
+	projectId?: string;
 };
 
 /**
@@ -160,7 +219,15 @@ export type StartOpts = {
  * history instead of spawning a second process. Always returns true.
  */
 export function startSession(opts: StartOpts): boolean {
+	// Remember context so the persisted log knows which worktree it belongs to.
+	sessionMeta.set(opts.sessionId, {
+		worktreeId: opts.worktreeId,
+		projectId: opts.projectId,
+		provider: opts.provider,
+		model: opts.model,
+	});
 	if (sessions.has(opts.sessionId)) {
+		writeChatMeta(opts.sessionId); // re-file to this worktree
 		replay(opts.sessionId);
 		return true;
 	}
@@ -169,7 +236,12 @@ export function startSession(opts: StartOpts): boolean {
 	// the driver can loadSession and continue where the conversation left off.
 	const persisted = opts.resume ? loadPersisted(opts.sessionId) : null;
 	buffers.set(opts.sessionId, persisted ?? []);
-	if (persisted && persisted.length > 0) replay(opts.sessionId);
+	// Reopening an existing chat: file it to this worktree right away (don't wait
+	// for the first new event), so a recovered orphan stops being an orphan now.
+	if (persisted && persisted.length > 0) {
+		writeChatMeta(opts.sessionId);
+		replay(opts.sessionId);
+	}
 	const acpResumeId = opts.resume ? lastAcpSessionId(persisted) : null;
 	const emit = emitterFor(opts.sessionId);
 	const driver = startAcpDriver({ ...opts, acpResumeId }, emit);

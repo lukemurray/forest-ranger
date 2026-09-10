@@ -34,8 +34,8 @@
 	--text-muted: #9aa1ac;
 	--text-faint: #6b7280;
 
-	--accent: #5b8cff;
-	--accent-soft: rgba(91, 140, 255, 0.16);
+	--accent: #46b96e;
+	--accent-soft: rgba(70, 185, 110, 0.18);
 	--green: #4ec9a5;
 	--amber: #e2b341;
 }
@@ -55,8 +55,8 @@
 	--text-muted: #5c636e;
 	--text-faint: #8b929d;
 
-	--accent: #2f6df6;
-	--accent-soft: rgba(47, 109, 246, 0.12);
+	--accent: #1f9d5b;
+	--accent-soft: rgba(31, 157, 91, 0.14);
 	--green: #1f9d76;
 	--amber: #b9852a;
 }
@@ -228,4 +228,49 @@ a {
 }
 .app-region-no-drag {
 	-webkit-app-region: no-drag;
+}
+
+/* Tooltips: native `title` tooltips are swallowed inside the draggable titlebar,
+   so any control with a `data-tip` gets a lightweight CSS tooltip instead. Shows
+   below the element after a short hover delay; give edge controls data-tip-align
+   to keep the bubble on-screen. */
+[data-tip] {
+	position: relative;
+}
+[data-tip]::after {
+	content: attr(data-tip);
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 200;
+	padding: 3px 7px;
+	border-radius: 6px;
+	background: var(--bg-elevated);
+	color: var(--text);
+	border: 1px solid var(--border);
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+	font-size: 11.5px;
+	font-weight: 400;
+	line-height: 1.3;
+	white-space: nowrap;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.1s ease;
+}
+[data-tip]:hover::after {
+	opacity: 1;
+	visibility: visible;
+	transition-delay: 0.4s;
+}
+[data-tip][data-tip-align="end"]::after {
+	left: auto;
+	right: 0;
+	transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	[data-tip]::after {
+		transition: none;
+	}
 }

@@ -236,6 +236,18 @@ export type AgentPermissionMode =
 /** Which agent backend drives a chat (each maps to an ACP adapter). */
 export type AgentProvider = "claude" | "codex";
 
+/** Metadata for a persisted chat log, used to list + reopen past chats. */
+export type ChatLogMeta = {
+	sessionId: string;
+	worktreeId?: string;
+	projectId?: string;
+	provider: AgentProvider;
+	model: string | null;
+	name: string;
+	/** ms timestamp of the last persisted activity (for ordering). */
+	updatedAt: number;
+};
+
 /** Apps a worktree can be opened in. */
 export type AppId =
 	| "cursor"
@@ -575,6 +587,11 @@ export type RpcRequests = {
 					model: string | null;
 				};
 				response: OpenResult;
+			};
+			/** Past chats persisted for a worktree (newest first) — to reopen old ones. */
+			listChats: {
+				params: { worktreeId: string };
+				response: ChatLogMeta[];
 			};
 			/**
 			 * Switch a live chat's model/permission mode without losing context:

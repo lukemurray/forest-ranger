@@ -235,11 +235,13 @@
 	font-size: 12px;
 }
 
-.primaryDot {
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--green);
+/* Primary/main worktree marker: a little sprout to the left of the branch name.
+   A distinct shape (not a round dot), so green is fine — it won't read as the
+   running/resume status dots. */
+.primaryMark {
+	display: inline-flex;
+	align-items: center;
+	color: var(--accent);
 	flex-shrink: 0;
 }
 

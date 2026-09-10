@@ -65,3 +65,66 @@
 	color: var(--text);
 	border-color: var(--accent);
 }
+
+/* Icon-only action (Terminal, Editor, ⋯, panel) — square, no label. */
+.iconBtn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 6px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+.iconBtn:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.iconBtn[data-active] {
+	background: var(--accent-soft);
+	color: var(--text);
+	border-color: var(--accent);
+}
+
+/* Light vertical divider between action groups (e.g. Editor | commands). */
+.sep {
+	width: 1px;
+	align-self: stretch;
+	margin: 6px 2px;
+	background: var(--border);
+	flex-shrink: 0;
+}
+
+/* Split action: main face + a dropdown-arrow half, in one bordered frame. */
+.split {
+	display: inline-flex;
+	align-items: stretch;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	overflow: hidden;
+	flex-shrink: 0;
+}
+.splitMain,
+.splitArrow {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 10px;
+	font-size: 12.5px;
+	color: inherit;
+	background: transparent;
+	white-space: nowrap;
+}
+.splitMain {
+	border-right: 1px solid var(--border-strong);
+}
+.splitArrow {
+	padding: 5px 6px;
+}
+.splitMain:hover,
+.splitArrow:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}

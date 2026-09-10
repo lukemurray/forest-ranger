@@ -22,19 +22,51 @@ function svg(size: number, children: React.ReactNode) {
 
 export const ChevronIcon = ({ size = 14 }: Props) => svg(size, <path d="m9 18 6-6-6-6" />);
 
+export const ChevronDownIcon = ({ size = 14 }: Props) => svg(size, <path d="m6 9 6 6 6-6" />);
+
+export const EllipsisIcon = ({ size = 16 }: Props) => (
+	<svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+		<circle cx="5" cy="12" r="1.6" />
+		<circle cx="12" cy="12" r="1.6" />
+		<circle cx="19" cy="12" r="1.6" />
+	</svg>
+);
+
 export const PlusIcon = ({ size = 16 }: Props) =>
 	svg(size, <><path d="M12 5v14" /><path d="M5 12h14" /></>);
 
 export const ClockIcon = ({ size = 15 }: Props) =>
 	svg(size, <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>);
 
+// Size-adaptive brand mark: a clean single pine at icon sizes (where extra tiers
+// just clog), a fuller two-tier conifer once it's big enough to carry the detail.
 export const TreeIcon = ({ size = 16 }: Props) =>
+	size < 24
+		? svg(
+				size,
+				<>
+					<path d="M12 2 4 14h16L12 2Z" />
+					<path d="M12 14v8" />
+					<path d="M8 9h8" />
+				</>,
+			)
+		: svg(
+				size,
+				<>
+					<path d="M12 3 7 11h10z" />
+					<path d="M12 9 5 18h14z" />
+					<path d="M12 18v3" />
+				</>,
+			);
+
+// A sprouting seedling — marks the primary worktree (the trunk branches grow from).
+export const SproutIcon = ({ size = 14 }: Props) =>
 	svg(
 		size,
 		<>
-			<path d="M12 2 4 14h16L12 2Z" />
-			<path d="M12 14v8" />
-			<path d="M8 9h8" />
+			<path d="M12 21v-8" />
+			<path d="M12 13C8 13 6 10 6 6c4 0 6 3 6 7Z" />
+			<path d="M12 13c0-3 2-6 6-6 0 4-2 6-6 6Z" />
 		</>,
 	);
 

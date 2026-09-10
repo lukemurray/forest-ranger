@@ -13,6 +13,7 @@ import type {
 } from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
 import { markExited, updateSession } from "../lib/terminalStore";
+import { FOREST_WORDS, nextForestWord } from "../lib/forestWords";
 import {
 	PERMISSION_MODES,
 	coerceModel,
@@ -88,6 +89,7 @@ export function ChatPane({
 	model,
 	renamed,
 	initialPrompt,
+	active,
 }: {
 	dockId: string;
 	chatId: string;
@@ -99,6 +101,8 @@ export function ChatPane({
 	agentLabel?: string;
 	renamed?: boolean;
 	initialPrompt?: string;
+	/** Whether this pane is the visible tab — layout measured while hidden is wrong. */
+	active: boolean;
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
 	const [status, setStatus] = useState<Status>("starting");
@@ -292,20 +296,24 @@ export function ChatPane({
 		const el = scrollRef.current;
 		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 	};
+	// `active` is a dep because a tab mounted while hidden (display:none) measures
+	// zero height — re-run on activation so the newest message is in view.
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
-		if (el && stick.current) el.scrollTop = el.scrollHeight;
-	}, [items, status]);
+		if (el && active && stick.current) el.scrollTop = el.scrollHeight;
+	}, [items, status, active]);
 
 	// Auto-grow the input from one line up to ~30% of the viewport, then scroll.
+	// `active` dep for the same reason: scrollHeight is 0 while the tab is hidden,
+	// which would otherwise leave the textarea collapsed until the next keystroke.
 	useLayoutEffect(() => {
 		const el = inputRef.current;
-		if (!el) return;
+		if (!el || !active) return;
 		el.style.height = "auto";
 		const max = Math.round(window.innerHeight * 0.3);
 		el.style.height = `${Math.min(el.scrollHeight, max)}px`;
 		el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
-	}, [input]);
+	}, [input, active]);
 
 	// Provider/model need a fresh agent process, so switching them relaunches
 	// (resuming the session so context carries over). We never relaunch mid-turn —
@@ -497,8 +505,25 @@ export function ChatPane({
 		// Cancel the running turn but keep the session alive so the user can keep
 		// chatting (the agent resolves the turn with a "cancelled" stop reason).
 		bus.agentChatCancel({ sessionId: chatId });
-		setQueue([]);
+		// Don't silently drop a queued follow-up — return its text to the composer.
+		if (queue.length > 0) {
+			const pending = queue.map((q) => q.text).filter(Boolean).join("\n\n");
+			if (pending) setInput((v) => (v.trim() ? `${pending}\n\n${v}` : pending));
+			setQueue([]);
+		}
 		setStatus("idle");
+	}
+
+	// "Steer": interrupt the current turn and send this queued message as a redirect.
+	// We cancel and move it to the front but let the drain-on-idle effect do the send
+	// once the cancelled turn actually ends — so we never prompt over a live turn.
+	function steer(index: number) {
+		setQueue((q) => {
+			const picked = q[index];
+			if (!picked) return q;
+			return [picked, ...q.slice(0, index), ...q.slice(index + 1)];
+		});
+		bus.agentChatCancel({ sessionId: chatId });
 	}
 	// Stable across renders so memoized rows don't re-render every streamed token.
 	const respondPermission = useCallback(
@@ -543,24 +568,34 @@ export function ChatPane({
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
 
-	// Live "what the agent is doing" label — null hides the indicator (idle, or the
-	// answer is already streaming visibly as the last message).
-	const activity = useMemo(() => {
-		if (status === "starting") return "Starting agent…";
-		if (status !== "working") return null;
-		const last = items[items.length - 1];
-		if (!last) return "Thinking…";
-		switch (last.kind) {
-			case "assistant":
-				return null; // the answer is streaming in view already
-			case "thinking":
-				return "Thinking…";
-			case "tool":
-				return last.status === "running" ? `Running ${last.name}…` : "Working…";
-			default:
-				return "Thinking…";
-		}
+	// Show the activity indicator while working — but not once the answer is
+	// streaming (it's visible as the last message) or during a tool's own output.
+	const showActivity = useMemo(() => {
+		if (status === "starting") return true;
+		if (status !== "working") return false;
+		return items[items.length - 1]?.kind !== "assistant";
 	}, [status, items]);
+
+	// Rotate a whimsical forest word while working, à la Claude Code's status line.
+	// Pure random, but skipping the last 7 shown so it doesn't feel repetitive.
+	const [forestWord, setForestWord] = useState(FOREST_WORDS[0]);
+	const recentWords = useRef<string[]>([]);
+	useEffect(() => {
+		if (status !== "working") return;
+		const rotate = () => {
+			const w = nextForestWord(recentWords.current);
+			recentWords.current = [w, ...recentWords.current].slice(0, 7);
+			setForestWord(w);
+		};
+		rotate();
+		const t = setInterval(rotate, 7000);
+		return () => clearInterval(t);
+	}, [status]);
+	const activity = !showActivity
+		? null
+		: status === "starting"
+			? "Lacing up…"
+			: `${forestWord}…`;
 	// Slash-command autocomplete: match while the input is a bare "/name" prefix.
 	const slashQuery = /^\/(\S*)$/.exec(input);
 	const slashMatches = slashQuery
@@ -619,14 +654,41 @@ export function ChatPane({
 				))}
 				{activity && (
 					<div className={styles.activity}>
-						<span className={styles.spinner} />
-						<span className={styles.activityLabel}>{activity}</span>
+						<svg
+							className={styles.treeLoader}
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							strokeWidth="2"
+							strokeLinecap="round"
+							strokeLinejoin="round"
+							aria-hidden="true"
+						>
+							<path d="M12 2 4 14h16L12 2Z" />
+							<path d="M12 14v8" />
+							<path d="M8 9h8" />
+						</svg>
+						{/* keyed so each new word remounts and replays the fade-up */}
+						<span key={activity} className={styles.activityLabel}>
+							{activity}
+						</span>
 					</div>
 				)}
 				{queue.map((q, i) => (
 					<div key={`q${i}`} className={styles.user} data-queued>
-						<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
-							{q.text || `📎 ${q.attachments.length} attachment${q.attachments.length === 1 ? "" : "s"}`}
+						<div className={styles.queued}>
+							<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
+								{q.text || `📎 ${q.attachments.length} attachment${q.attachments.length === 1 ? "" : "s"}`}
+							</div>
+							{working && (
+								<button
+									className={styles.steer}
+									onClick={() => steer(i)}
+									title="Interrupt the current turn and send this now"
+								>
+									Steer
+								</button>
+							)}
 						</div>
 					</div>
 				))}
@@ -883,12 +945,13 @@ function ProcessStrip({
 	return (
 		<details className={styles.process} data-active={active || undefined}>
 			<summary className={styles.processHead}>
+				{/* No "Working…" verb — the tree + forest word is the single live status;
+				    this strip just labels the tool steps it folds (dot pulses while active). */}
 				<span className={styles.processSpinner} />
-				<span className={styles.processTitle}>{active ? "Working…" : "Worked"}</span>
-				<span className={styles.processMeta}>
+				<span className={styles.processTitle}>
 					{steps.length} step{steps.length === 1 ? "" : "s"}
-					{hint && ` · ${hint}`}
 				</span>
+				{hint && <span className={styles.processMeta}>· {hint}</span>}
 			</summary>
 			<div className={styles.processBody}>
 				{steps.map((s, i) => (

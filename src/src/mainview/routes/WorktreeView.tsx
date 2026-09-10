@@ -1,24 +1,31 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useRouter } from "@tanstack/react-router";
-import type { CommandRunTarget, ProjectCommand } from "../../shared/types";
+import type { ChatLogMeta, CommandRunTarget, ProjectCommand } from "../../shared/types";
 import { worktreeRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
 import { CommandDialog } from "../components/CommandDialog";
 import { RemoveWorktreeDialog } from "../components/RemoveWorktreeDialog";
 import { RunCommands } from "../components/RunCommands";
+import { Dropdown, DropdownItem } from "../components/Dropdown";
 import { SessionWorkspace } from "../components/SessionWorkspace";
 import { ReviewPanel } from "../components/ReviewPanel";
 import {
+	ChevronDownIcon,
+	EllipsisIcon,
 	FolderIcon,
 	GitBranchIcon,
 	PanelRightIcon,
+	PlusIcon,
 	RevealIcon,
+	SparkleIcon,
 	TerminalIcon,
 	TrashIcon,
 } from "../components/icons";
 import { api, emitDataChanged } from "../rpc";
-import { openInEditor, openInTerminal, runProjectCommand } from "../lib/openTargets";
-import { openSession } from "../lib/terminalStore";
+import { providerLabel, useChatConfig } from "../lib/chatConfig";
+import { relativeTime } from "../lib/format";
+import { openInEditor, runProjectCommand } from "../lib/openTargets";
+import { openSession, useTerminals } from "../lib/terminalStore";
 import { useDefaultRunTarget } from "../lib/runTarget";
 import tb from "../components/Titlebar.module.css";
 import styles from "./WorktreeView.module.css";
@@ -31,10 +38,13 @@ export function WorktreeView() {
 	const { projectId } = worktreeRoute.useParams();
 	const navigate = useNavigate();
 	const router = useRouter();
+	const { sessions } = useTerminals();
+	const config = useChatConfig();
 
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [editing, setEditing] = useState<ProjectCommand | null>(null);
 	const [removeOpen, setRemoveOpen] = useState(false);
+	const [pastChats, setPastChats] = useState<ChatLogMeta[]>([]);
 	// Remembered across worktree navigation and app restarts.
 	const [reviewOpen, setReviewOpen] = useState(
 		() => localStorage.getItem(REVIEW_OPEN_KEY) !== "0",
@@ -51,6 +61,13 @@ export function WorktreeView() {
 	);
 	const drag = useRef<{ start: number; width: number } | null>(null);
 	const defaultTarget = useDefaultRunTarget();
+
+	const wtId = detail?.worktree.id ?? null;
+	const wtSessions = sessions.filter((s) => s.worktreeId === wtId);
+	// Past chats for this worktree not currently open — offered under Chat's ▾.
+	useEffect(() => {
+		if (wtId) api.listChats({ worktreeId: wtId }).then(setPastChats);
+	}, [wtId, wtSessions.length]);
 
 	function openAdd() {
 		setEditing(null);
@@ -90,6 +107,62 @@ export function WorktreeView() {
 	}
 
 	const { worktree, projectName, branch, upstream, commands } = detail;
+	const label = branch ?? "detached";
+	const openIds = new Set(wtSessions.map((s) => s.sessionId).filter(Boolean));
+	const reopenable = pastChats.filter((c) => !openIds.has(c.sessionId));
+
+	function startChat() {
+		const agent = providerLabel(config.defaultProvider);
+		openSession({
+			worktreeId: worktree.id,
+			projectId,
+			kind: "chat",
+			commandId: null,
+			command: null,
+			resumeCommand: null,
+			sessionId: crypto.randomUUID(),
+			provider: config.defaultProvider,
+			permissionMode: config.defaultPermissionMode,
+			model: config.defaultModel,
+			agentLabel: agent,
+			name: "New chat",
+			title: `${label} · ${agent}`,
+		});
+	}
+	function startTerminal() {
+		openSession({
+			worktreeId: worktree.id,
+			projectId,
+			kind: "terminal",
+			commandId: null,
+			command: null,
+			resumeCommand: null,
+			sessionId: null,
+			name: "Terminal",
+			title: `${label} · Terminal`,
+		});
+	}
+	// Reopen a persisted chat by its session id, resuming the agent's context.
+	function reopenChat(c: ChatLogMeta) {
+		const agent = providerLabel(c.provider);
+		openSession({
+			worktreeId: worktree.id,
+			projectId,
+			kind: "chat",
+			commandId: null,
+			command: null,
+			resumeCommand: null,
+			sessionId: c.sessionId,
+			resume: true,
+			provider: c.provider,
+			permissionMode: config.defaultPermissionMode,
+			model: c.model,
+			agentLabel: agent,
+			name: c.name,
+			renamed: true,
+			title: `${label} · ${agent}`,
+		});
+	}
 
 	function run(cmd: ProjectCommand) {
 		const target = cmd.runTarget === "default" ? defaultTarget : cmd.runTarget;
@@ -105,7 +178,7 @@ export function WorktreeView() {
 				resumeCommand: null,
 				sessionId: null,
 				name: cmd.label,
-				title: `${branch ?? "detached"} · ${cmd.label}`,
+				title: `${label} · ${cmd.label}`,
 			});
 		}
 	}
@@ -142,40 +215,93 @@ export function WorktreeView() {
 				title={worktree.path}
 				actions={
 					<>
-						<RunCommands
-							commands={commands}
-							onRun={run}
-							onEdit={openEdit}
-							onDelete={removeCommand}
-							onAdd={openAdd}
-						/>
-						<button className={tb.actionButton} onClick={() => openInEditor(worktree.path)}>
-							<FolderIcon /> Editor
-						</button>
-						<button className={tb.actionButton} onClick={() => openInTerminal(worktree.path)}>
-							<TerminalIcon /> Terminal
-						</button>
-						<button
-							className={tb.actionButton}
-							onClick={() => api.revealInFinder({ path: worktree.path })}
-							title="Reveal in Finder"
-						>
-							<RevealIcon />
-						</button>
-						{!worktree.isPrimary && (
-							<button
-								className={tb.actionButton}
-								onClick={() => setRemoveOpen(true)}
-								title="Remove worktree"
-							>
-								<TrashIcon />
+						{reopenable.length > 0 ? (
+							// Split: the face starts a new chat; the arrow reopens a past one.
+							<div className={tb.split}>
+								<button className={tb.splitMain} onClick={startChat} data-tip="New chat" aria-label="New chat">
+									<SparkleIcon size={13} /> Chat
+								</button>
+								<Dropdown
+									trigger={
+										<button
+											className={tb.splitArrow}
+											data-tip="Reopen a past chat"
+											aria-label="Reopen a past chat in this worktree"
+										>
+											<ChevronDownIcon size={12} />
+										</button>
+									}
+								>
+									{reopenable.map((c) => (
+										<DropdownItem
+											key={c.sessionId}
+											label={c.name}
+											hint={relativeTime(c.updatedAt)}
+											onClick={() => reopenChat(c)}
+										/>
+									))}
+								</Dropdown>
+							</div>
+						) : (
+							<button className={tb.actionButton} onClick={startChat} data-tip="New chat" aria-label="New chat">
+								<SparkleIcon size={14} /> Chat
 							</button>
 						)}
 						<button
-							className={tb.actionButton}
+							className={tb.iconBtn}
+							onClick={startTerminal}
+							data-tip="New terminal"
+							aria-label="New terminal"
+						>
+							<TerminalIcon />
+						</button>
+						<button
+							className={tb.iconBtn}
+							onClick={() => openInEditor(worktree.path)}
+							data-tip="Open in editor"
+							aria-label="Open in editor"
+						>
+							<FolderIcon />
+						</button>
+
+						<span className={tb.sep} />
+
+						<RunCommands commands={commands} onRun={run} onEdit={openEdit} onDelete={removeCommand} />
+
+						<Dropdown
+							trigger={
+								<button className={tb.iconBtn} data-tip="More" aria-label="More actions">
+									<EllipsisIcon size={16} />
+								</button>
+							}
+						>
+							<DropdownItem
+								icon={<PlusIcon size={15} />}
+								label="Add run command…"
+								onClick={openAdd}
+							/>
+							<DropdownItem
+								icon={<RevealIcon size={15} />}
+								label="Reveal in Finder"
+								onClick={() => api.revealInFinder({ path: worktree.path })}
+							/>
+							{!worktree.isPrimary && (
+								<DropdownItem
+									icon={<TrashIcon size={15} />}
+									label="Remove worktree…"
+									danger
+									onClick={() => setRemoveOpen(true)}
+								/>
+							)}
+						</Dropdown>
+
+						<button
+							className={tb.iconBtn}
 							data-active={reviewOpen || undefined}
+							data-tip={reviewOpen ? "Hide review panel" : "Show review panel"}
+							data-tip-align="end"
+							aria-label={reviewOpen ? "Hide review panel" : "Show review panel"}
 							onClick={toggleReview}
-							title={reviewOpen ? "Hide review panel" : "Show review panel"}
 						>
 							<PanelRightIcon />
 						</button>
@@ -196,11 +322,7 @@ export function WorktreeView() {
 
 			<div className={styles.split}>
 				<div className={styles.center}>
-					<SessionWorkspace
-						worktreeId={worktree.id}
-						projectId={projectId}
-						branch={branch}
-					/>
+					<SessionWorkspace worktreeId={worktree.id} />
 				</div>
 				{reviewOpen && (
 					<>

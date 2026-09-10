@@ -2,14 +2,12 @@ import { useEffect, useState } from "react";
 import {
 	closeSession,
 	getRestorableSessions,
-	openSession,
 	reopenSessions,
 	setActiveSession,
 	updateSession,
 	useTerminals,
 	type TermSession,
 } from "../lib/terminalStore";
-import { providerLabel, useChatConfig } from "../lib/chatConfig";
 import { bus } from "../rpc";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
@@ -24,22 +22,12 @@ function endSession(s: TermSession) {
 }
 
 /**
- * The center workspace for a worktree: a tab strip of all its sessions (chats +
- * terminals) with the active one filling the area. New sessions launch here, so
- * chat and terminal share one home scoped to the worktree.
+ * The center workspace for a worktree: a tab strip of its sessions (chats +
+ * terminals) with the active one filling the area. New sessions are launched
+ * from the worktree toolbar (WorktreeView); this just hosts and switches them.
  */
-export function SessionWorkspace({
-	worktreeId,
-	projectId,
-	branch,
-}: {
-	worktreeId: string;
-	projectId: string;
-	branch: string | null;
-}) {
+export function SessionWorkspace({ worktreeId }: { worktreeId: string }) {
 	const { sessions, activeId } = useTerminals();
-	const config = useChatConfig();
-	const label = branch ?? "detached";
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [draftName, setDraftName] = useState("");
 
@@ -65,39 +53,6 @@ export function SessionWorkspace({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [worktreeId]);
 
-	function startChat() {
-		const agent = providerLabel(config.defaultProvider);
-		openSession({
-			worktreeId,
-			projectId,
-			kind: "chat",
-			commandId: null,
-			command: null,
-			resumeCommand: null,
-			sessionId: crypto.randomUUID(),
-			provider: config.defaultProvider,
-			permissionMode: config.defaultPermissionMode,
-			model: config.defaultModel,
-			agentLabel: agent,
-			name: "New chat",
-			title: `${label} · ${agent}`,
-		});
-	}
-
-	function startTerminal() {
-		openSession({
-			worktreeId,
-			projectId,
-			kind: "terminal",
-			commandId: null,
-			command: null,
-			resumeCommand: null,
-			sessionId: null,
-			name: "Terminal",
-			title: `${label} · Terminal`,
-		});
-	}
-
 	function startRename(s: TermSession) {
 		setEditingId(s.id);
 		setDraftName(s.name ?? tabLabel(s));
@@ -110,66 +65,56 @@ export function SessionWorkspace({
 		setEditingId(null);
 	}
 
-	const newButtons = (
-		<>
-			<button className={styles.add} onClick={startChat} title="New chat">
-				<SparkleIcon size={13} /> Chat
-			</button>
-			<button className={styles.add} onClick={startTerminal} title="New terminal">
-				<TerminalIcon size={13} /> Terminal
-			</button>
-		</>
-	);
-
 	return (
 		<div className={styles.workspace}>
-			<div className={styles.tabs}>
-				{visible.map((s) =>
-					editingId === s.id ? (
-						<input
-							key={s.id}
-							className={styles.tabInput}
-							value={draftName}
-							autoFocus
-							onChange={(e) => setDraftName(e.target.value)}
-							onBlur={commitRename}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") commitRename();
-								else if (e.key === "Escape") setEditingId(null);
-							}}
-							spellCheck={false}
-						/>
-					) : (
-						<button
-							key={s.id}
-							className={styles.tab}
-							data-active={s.id === activeVisibleId || undefined}
-							onClick={() => setActiveSession(s.id)}
-							onDoubleClick={() => startRename(s)}
-							title={`${s.title} — double-click to rename`}
-						>
-							{s.kind === "chat" ? <SparkleIcon size={12} /> : <TerminalIcon size={12} />}
-							<span className={styles.tabLabel}>{s.name ?? tabLabel(s)}</span>
-							<span
-								className={styles.tabClose}
-								onClick={(e) => {
-									e.stopPropagation();
-									endSession(s);
+			{visible.length > 0 && (
+				<div className={styles.tabs}>
+					{visible.map((s) =>
+						editingId === s.id ? (
+							<input
+								key={s.id}
+								className={styles.tabInput}
+								value={draftName}
+								autoFocus
+								onChange={(e) => setDraftName(e.target.value)}
+								onBlur={commitRename}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") commitRename();
+									else if (e.key === "Escape") setEditingId(null);
 								}}
+								spellCheck={false}
+							/>
+						) : (
+							<button
+								key={s.id}
+								className={styles.tab}
+								data-active={s.id === activeVisibleId || undefined}
+								onClick={() => setActiveSession(s.id)}
+								onDoubleClick={() => startRename(s)}
+								title={`${s.title} — double-click to rename`}
 							>
-								<CloseIcon size={12} />
-							</span>
-						</button>
-					),
-				)}
-				<div className={styles.newButtons}>{newButtons}</div>
-			</div>
+								{s.kind === "chat" ? <SparkleIcon size={12} /> : <TerminalIcon size={12} />}
+								<span className={styles.tabLabel}>{s.name ?? tabLabel(s)}</span>
+								<span
+									className={styles.tabClose}
+									onClick={(e) => {
+										e.stopPropagation();
+										endSession(s);
+									}}
+								>
+									<CloseIcon size={12} />
+								</span>
+							</button>
+						),
+					)}
+				</div>
+			)}
 
 			<div className={styles.body}>
 				{visible.length === 0 ? (
 					<div className={styles.empty}>
 						<p>No sessions in this worktree yet.</p>
-						<div className={styles.emptyActions}>{newButtons}</div>
+						<p className={styles.emptyHint}>Start a chat or terminal from the toolbar above.</p>
 					</div>
 				) : (
 					visible.map((s) => (
@@ -190,6 +135,7 @@ export function SessionWorkspace({
 									agentLabel={s.agentLabel}
 									renamed={s.renamed}
 									initialPrompt={s.initialPrompt}
+									active={s.id === activeVisibleId}
 								/>
 							) : (
 								<TerminalPane

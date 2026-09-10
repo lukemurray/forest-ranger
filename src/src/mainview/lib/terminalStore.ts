@@ -103,7 +103,7 @@ export function getRestorableSessions(worktreeId?: string): RestorableSession[] 
 }
 
 function persist() {
-	const data: RestorableSession[] = state.sessions.map((s) => ({
+	const open: RestorableSession[] = state.sessions.map((s) => ({
 		worktreeId: s.worktreeId,
 		projectId: s.projectId,
 		title: s.title,
@@ -119,7 +119,14 @@ function persist() {
 		name: s.name,
 		renamed: s.renamed,
 	}));
-	localStorage.setItem(RESTORE_KEY, JSON.stringify(data));
+	// Keep prior-run sessions we haven't reopened yet (worktrees not visited this
+	// run live only in `restorable`, not `state.sessions`) — otherwise the first
+	// save of the run would wipe every chat from an unvisited worktree. A session
+	// that has been reopened is in `consumed` (and now in `open`), so it's not
+	// double-counted; one that was explicitly closed is consumed but dropped from
+	// `open`, so it correctly falls out here too.
+	const pending = restorable.filter((s) => !consumed.has(restoreKey(s)));
+	localStorage.setItem(RESTORE_KEY, JSON.stringify([...open, ...pending]));
 }
 
 const listeners = new Set<() => void>();
