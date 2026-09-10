@@ -7,6 +7,52 @@
 	background: var(--bg);
 }
 
+/* ---- tiling tree ---- */
+.paneGroup {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+}
+.splitRow {
+	display: flex;
+	flex-direction: row;
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+}
+.splitCol {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+}
+.cell {
+	display: flex;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+}
+.resizerV {
+	width: 6px;
+	flex-shrink: 0;
+	cursor: ew-resize;
+	background: transparent;
+}
+.resizerH {
+	height: 6px;
+	flex-shrink: 0;
+	cursor: ns-resize;
+	background: transparent;
+}
+.resizerV:hover,
+.resizerH:hover {
+	background: var(--accent-soft);
+}
+
+/* ---- tab strip ---- */
 .tabs {
 	display: flex;
 	align-items: center;
@@ -44,6 +90,9 @@
 .tab[data-active] {
 	background: var(--bg-active);
 	color: var(--text);
+}
+.tab[data-dragging] {
+	opacity: 0.4;
 }
 .tab > svg {
 	color: var(--text-faint);
@@ -86,59 +135,7 @@
 	flex-shrink: 0;
 }
 
-.newButtons {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	flex-shrink: 0;
-}
-.add {
-	display: flex;
-	align-items: center;
-	gap: 5px;
-	padding: 5px 9px;
-	border-radius: var(--radius-sm);
-	font-size: 12px;
-	color: var(--text-muted);
-	border: 1px dashed var(--border-strong);
-}
-.add:hover {
-	background: var(--bg-hover);
-	color: var(--text);
-}
-
-/* Split button: "Chat" (new) + a dropdown arrow (reopen past chats), in one dashed
-   frame with a divider between the two hoverable regions. */
-.split {
-	display: inline-flex;
-	align-items: stretch;
-	border: 1px dashed var(--border-strong);
-	border-radius: var(--radius-sm);
-	color: var(--text-muted);
-	overflow: hidden;
-}
-.splitMain,
-.splitArrow {
-	display: flex;
-	align-items: center;
-	gap: 5px;
-	padding: 5px 9px;
-	font-size: 12px;
-	color: inherit;
-	background: transparent;
-}
-.splitMain {
-	border-right: 1px dashed var(--border-strong);
-}
-.splitArrow {
-	padding: 5px 6px;
-}
-.splitMain:hover,
-.splitArrow:hover {
-	background: var(--bg-hover);
-	color: var(--text);
-}
-
+/* ---- group body + panes ---- */
 .body {
 	flex: 1;
 	min-height: 0;
@@ -147,6 +144,52 @@
 .pane {
 	position: absolute;
 	inset: 0;
+}
+
+/* Sits above the panes only during a tab drag, so the drop lands here and not on
+   a pane's own drag handlers (e.g. ChatPane's file drop). */
+.dropCatch {
+	position: absolute;
+	inset: 0;
+	z-index: 30;
+}
+
+/* Live preview of where a dragged tab will land (move into group, or split off). */
+.dropHint {
+	position: absolute;
+	z-index: 40;
+	pointer-events: none;
+	background: var(--accent-soft);
+	border: 1px solid var(--accent);
+	border-radius: var(--radius-sm);
+	transition: inset 0.08s ease, width 0.08s ease, height 0.08s ease;
+}
+.dropHint[data-dir="center"] {
+	inset: 6px;
+}
+.dropHint[data-dir="left"] {
+	top: 6px;
+	bottom: 6px;
+	left: 6px;
+	width: calc(50% - 9px);
+}
+.dropHint[data-dir="right"] {
+	top: 6px;
+	bottom: 6px;
+	right: 6px;
+	width: calc(50% - 9px);
+}
+.dropHint[data-dir="top"] {
+	left: 6px;
+	right: 6px;
+	top: 6px;
+	height: calc(50% - 9px);
+}
+.dropHint[data-dir="bottom"] {
+	left: 6px;
+	right: 6px;
+	bottom: 6px;
+	height: calc(50% - 9px);
 }
 
 .empty {
