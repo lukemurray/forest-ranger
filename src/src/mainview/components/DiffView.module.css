@@ -17,6 +17,8 @@
 	font-size: 12px;
 }
 .path {
+	flex: 1;
+	min-width: 0;
 	color: var(--text);
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -32,7 +34,12 @@
 .body {
 	flex: 1;
 	min-height: 0;
-	overflow: auto;
+	overflow: hidden; /* Monaco owns its own scrolling */
+	position: relative;
+}
+.editor {
+	position: absolute;
+	inset: 0;
 }
 .note {
 	padding: 10px 14px;
@@ -40,8 +47,24 @@
 	color: var(--text-faint);
 	font-family: var(--font-mono);
 }
-/* react-diff-view's own `.diff` table is themed globally in index.css; this is just
-   the scroll wrapper. */
-.diff {
-	overflow-x: auto;
+/* file editor header actions */
+.actions {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.saveBtn {
+	font-size: 12px;
+	padding: 3px 10px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+}
+.saveBtn:hover:not(:disabled) {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.saveBtn:disabled {
+	opacity: 0.5;
 }

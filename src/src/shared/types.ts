@@ -383,6 +383,28 @@ export type RpcRequests = {
 				response: FileDiff;
 			};
 
+			/** Before/after file contents for a Monaco diff (a commit, a base, or the
+			 *  working tree). */
+			fileContents: {
+				params: { id: string; path: string; base: string | null; commit?: string | null };
+				response: { before: string; after: string; binary: boolean };
+			};
+			/** Every file in the worktree (tracked + untracked), for the file browser. */
+			listFiles: {
+				params: { id: string };
+				response: string[];
+			};
+			/** Read a working-tree file for the editor. */
+			readFile: {
+				params: { id: string; path: string };
+				response: { content: string; binary: boolean };
+			};
+			/** Save an edited file back to the working tree. */
+			writeFile: {
+				params: { id: string; path: string; content: string };
+				response: { ok: boolean; error?: string };
+			};
+
 			/** Commits on this worktree's branch not in `base` (newest first). */
 			listCommits: {
 				params: { id: string; base: string | null };

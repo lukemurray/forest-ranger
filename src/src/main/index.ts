@@ -70,6 +70,10 @@ import {
 	updateFromBase as gitUpdateFromBase,
 	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
+	fileContents as gitFileContents,
+	listFiles as gitListFiles,
+	readWorkingFile,
+	writeWorkingFile,
 	commitsVsBase,
 	commitFiles as gitCommitFiles,
 	recentCommits,
@@ -440,6 +444,29 @@ const handlers: RpcHandlers = {
 				if (!row) return { path, binary: false, diff: "" };
 				const { binary, text } = await gitFileDiff(row.path, path, base, commit);
 				return { path, binary, diff: text };
+			},
+
+			fileContents: async ({ id, path, base, commit }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { before: "", after: "", binary: false };
+				return gitFileContents(row.path, path, base, commit);
+			},
+
+			listFiles: async ({ id }) => {
+				const row = worktreesRepo.get(id);
+				return row ? gitListFiles(row.path) : [];
+			},
+
+			readFile: async ({ id, path }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { content: "", binary: false };
+				return readWorkingFile(row.path, path);
+			},
+
+			writeFile: async ({ id, path, content }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "worktree not found" };
+				return writeWorkingFile(row.path, path, content);
 			},
 
 			listCommits: async ({ id, base }) => {

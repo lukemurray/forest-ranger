@@ -27,6 +27,10 @@ export default defineConfig({
 			outDir: resolve(__dirname, "out/renderer"),
 			rollupOptions: { input: resolve(__dirname, "src/mainview/index.html") },
 		},
+		// Monaco's editor.api graph breaks Vite's dev dep pre-bundling (white screen);
+		// serve it as native ESM in dev instead. Dev-only — the production build is
+		// unaffected. Its `?worker` imports still resolve.
+		optimizeDeps: { exclude: ["monaco-editor"] },
 		server: { port: 5178, strictPort: true },
 	},
 });

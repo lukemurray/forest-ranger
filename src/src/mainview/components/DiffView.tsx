@@ -1,22 +1,22 @@
-import { useEffect, useState } from "react";
-import {
-	Diff as DiffViewer,
-	Hunk,
-	markEdits,
-	parseDiff,
-	tokenize,
-	type HunkData,
-} from "react-diff-view";
-import { refractor } from "refractor";
-import "react-diff-view/style/index.css";
-import type { FileDiff } from "../../shared/types";
+import { useEffect, useRef, useState } from "react";
+import * as monaco from "monaco-editor";
 import { api } from "../rpc";
+import { useThemeMode, type ThemeMode } from "../lib/theme";
+import { monacoLang, monacoTheme } from "../lib/monaco";
 import styles from "./DiffView.module.css";
 
+function isDark(mode: ThemeMode): boolean {
+	return (
+		mode === "dark" ||
+		(mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches)
+	);
+}
+
+type Contents = { before: string; after: string; binary: boolean };
+
 /**
- * A file's unified diff, fetched on demand — a single commit's change when
- * `commit` is given, else committed-vs-`base`, else the working-tree diff. Used
- * both inline (the review list) and as a standalone pane/tab in the workspace.
+ * A file's diff in a Monaco diff editor — a single commit's change when `commit`
+ * is given, else committed-vs-`base`, else HEAD vs the working tree.
  */
 export function DiffView({
 	worktreeId,
@@ -29,19 +29,49 @@ export function DiffView({
 	path: string;
 	base: string | null;
 	commit?: string;
-	/** Show the file-path header strip (for the standalone pane); off inline. */
 	header?: boolean;
 }) {
-	const [diff, setDiff] = useState<FileDiff | null>(null);
+	const [data, setData] = useState<Contents | null>(null);
+	const dark = isDark(useThemeMode());
+	const hostRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => {
 		let live = true;
-		setDiff(null);
-		api.fileDiff({ id: worktreeId, path, base, commit }).then((d) => live && setDiff(d));
+		setData(null);
+		api.fileContents({ id: worktreeId, path, base, commit }).then((d) => live && setData(d));
 		return () => {
 			live = false;
 		};
 	}, [worktreeId, path, base, commit]);
+
+	// Build the diff editor once the contents arrive; tear it down on change/unmount.
+	useEffect(() => {
+		const host = hostRef.current;
+		if (!host || !data || data.binary) return;
+		const lang = monacoLang(path);
+		const original = monaco.editor.createModel(data.before, lang);
+		const modified = monaco.editor.createModel(data.after, lang);
+		const editor = monaco.editor.createDiffEditor(host, {
+			readOnly: true,
+			renderSideBySide: true,
+			automaticLayout: true,
+			minimap: { enabled: false },
+			scrollBeyondLastLine: false,
+			renderOverviewRuler: false,
+			fontSize: 12,
+		});
+		editor.setModel({ original, modified });
+		return () => {
+			editor.dispose();
+			original.dispose();
+			modified.dispose();
+		};
+	}, [data, path]);
+
+	// Theme is a global Monaco setting — apply the app's resolved light/dark.
+	useEffect(() => {
+		monaco.editor.setTheme(monacoTheme(dark));
+	}, [dark]);
 
 	const ref = commit ? `@ ${commit.slice(0, 8)}` : base ? `vs ${base}` : "working tree";
 
@@ -56,62 +86,16 @@ export function DiffView({
 				</div>
 			)}
 			<div className={styles.body}>
-				{diff === null ? (
+				{data === null ? (
 					<div className={styles.note}>Loading diff…</div>
-				) : diff.binary ? (
+				) : data.binary ? (
 					<div className={styles.note}>Binary file — no text diff.</div>
-				) : diff.diff.trim() === "" ? (
-					<div className={styles.note}>No diff available.</div>
+				) : data.before === "" && data.after === "" ? (
+					<div className={styles.note}>No changes.</div>
 				) : (
-					<Rendered diffText={diff.diff} path={path} />
+					<div ref={hostRef} className={styles.editor} />
 				)}
 			</div>
 		</div>
 	);
-}
-
-function Rendered({ diffText, path }: { diffText: string; path: string }) {
-	const files = parseDiff(diffText);
-	const file = files[0];
-	if (!file || file.hunks.length === 0) {
-		return <div className={styles.note}>No diff available.</div>;
-	}
-
-	const lang = langForPath(path);
-	let tokens;
-	try {
-		tokens = tokenize(file.hunks as HunkData[], {
-			highlight: !!lang,
-			refractor,
-			language: lang as string,
-			enhancers: [markEdits(file.hunks as HunkData[], { type: "block" })],
-		});
-	} catch {
-		tokens = undefined;
-	}
-
-	return (
-		<div className={styles.diff}>
-			<DiffViewer viewType="unified" diffType={file.type} hunks={file.hunks} tokens={tokens}>
-				{(hunks) => hunks.map((h) => <Hunk key={h.content} hunk={h} />)}
-			</DiffViewer>
-		</div>
-	);
-}
-
-const LANG_BY_EXT: Record<string, string> = {
-	ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
-	mjs: "javascript", cjs: "javascript", json: "json", css: "css",
-	scss: "scss", less: "less", html: "markup", xml: "markup", vue: "markup",
-	svelte: "markup", md: "markdown", mdx: "markdown", py: "python", rb: "ruby",
-	go: "go", rs: "rust", java: "java", kt: "kotlin", c: "c", h: "c",
-	cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp", php: "php", swift: "swift",
-	sh: "bash", bash: "bash", zsh: "bash", yml: "yaml", yaml: "yaml",
-	toml: "toml", sql: "sql", graphql: "graphql", gql: "graphql",
-};
-
-function langForPath(path: string): string | undefined {
-	const ext = path.split(".").pop()?.toLowerCase();
-	const lang = ext ? LANG_BY_EXT[ext] : undefined;
-	return lang && refractor.registered(lang) ? lang : undefined;
 }

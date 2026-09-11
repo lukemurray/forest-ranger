@@ -23,6 +23,7 @@ import { bus } from "../rpc";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
 import { DiffView } from "./DiffView";
+import { FileEditor } from "./FileEditor";
 import { CloseIcon, FileIcon, SparkleIcon, TerminalIcon } from "./icons";
 import styles from "./SessionWorkspace.module.css";
 
@@ -269,13 +270,15 @@ function GroupView({ node }: { node: PaneGroup }) {
 									commandId={s.commandId}
 									command={s.command}
 								/>
-							) : s.diff ? (
+							) : s.kind === "diff" && s.diff ? (
 								<DiffView
 									worktreeId={s.worktreeId}
 									path={s.diff.path}
 									base={s.diff.base}
 									commit={s.diff.commit}
 								/>
+							) : s.kind === "file" && s.file ? (
+								<FileEditor worktreeId={s.worktreeId} path={s.file.path} />
 							) : null}
 						</div>
 					);

@@ -1,8 +1,8 @@
 /** Thin wrapper around the `git` CLI for worktree discovery. */
 
 import { spawn } from "node:child_process";
-import { existsSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 // A macOS GUI app inherits the minimal launchd PATH, which can omit the user's
 // git. Augment it with the usual locations so `git` resolves when launched as a
@@ -638,6 +638,89 @@ export async function fileDiff(
 	}
 
 	return { binary: false, text: "" };
+}
+
+/** Every file in the worktree (tracked + untracked, respecting .gitignore), sorted. */
+export async function listFiles(worktreePath: string): Promise<string[]> {
+	const [tracked, others] = await Promise.all([
+		git(worktreePath, ["ls-files", "-z"]),
+		git(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]),
+	]);
+	const set = new Set<string>();
+	for (const out of [tracked, others]) {
+		if (out.ok) for (const p of out.stdout.split("\0")) if (p) set.add(p);
+	}
+	return [...set].sort();
+}
+
+/** A path's content at a git ref (e.g. "HEAD", a sha, "abc^"); "" if absent there. */
+async function showFile(worktreePath: string, ref: string, relPath: string): Promise<string> {
+	const res = await git(worktreePath, ["show", `${ref}:${relPath}`]);
+	return res.ok ? res.stdout : "";
+}
+
+/** Resolve a repo-relative path to an absolute path inside the worktree, or null
+ *  if it would escape (traversal guard for read/write). */
+function safeResolve(worktreePath: string, relPath: string): string | null {
+	const root = resolve(worktreePath);
+	const full = resolve(worktreePath, relPath);
+	return full === root || full.startsWith(root + "/") ? full : null;
+}
+
+/** Read a working-tree file from disk. `binary` when it contains NUL bytes. */
+export function readWorkingFile(worktreePath: string, relPath: string): { content: string; binary: boolean } {
+	const full = safeResolve(worktreePath, relPath);
+	if (!full) return { content: "", binary: false };
+	try {
+		const content = readFileSync(full, "utf8");
+		return { content, binary: content.includes("\0") };
+	} catch {
+		return { content: "", binary: false };
+	}
+}
+
+/** Overwrite a working-tree file on disk (used by the editor's save). */
+export function writeWorkingFile(
+	worktreePath: string,
+	relPath: string,
+	content: string,
+): { ok: boolean; error?: string } {
+	const full = safeResolve(worktreePath, relPath);
+	if (!full) return { ok: false, error: "path is outside the worktree" };
+	try {
+		writeFileSync(full, content, "utf8");
+		return { ok: true };
+	} catch (e) {
+		return { ok: false, error: e instanceof Error ? e.message : String(e) };
+	}
+}
+
+/**
+ * Before/after contents of a file for a Monaco diff editor: a single commit if
+ * `commit` is given, else committed-vs-`base` (merge-base…HEAD), else HEAD vs the
+ * working tree. Missing sides (add/delete) come back as "".
+ */
+export async function fileContents(
+	worktreePath: string,
+	relPath: string,
+	base?: string | null,
+	commit?: string | null,
+): Promise<{ before: string; after: string; binary: boolean }> {
+	let before: string;
+	let after: string;
+	if (commit) {
+		before = await showFile(worktreePath, `${commit}^`, relPath);
+		after = await showFile(worktreePath, commit, relPath);
+	} else if (base) {
+		const mb = await git(worktreePath, ["merge-base", base, "HEAD"]);
+		const ref = mb.ok && mb.stdout.trim() ? mb.stdout.trim() : base;
+		before = await showFile(worktreePath, ref, relPath);
+		after = await showFile(worktreePath, "HEAD", relPath);
+	} else {
+		before = await showFile(worktreePath, "HEAD", relPath);
+		after = readWorkingFile(worktreePath, relPath).content;
+	}
+	return { before, after, binary: before.includes("\0") || after.includes("\0") };
 }
 
 /** How far a local branch is ahead/behind its `origin/<branch>` (no fetch). */

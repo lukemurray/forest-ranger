@@ -7,11 +7,11 @@ import type {
 	ListedCommit,
 	WorktreeDetail,
 } from "../../shared/types";
-import { openDiff } from "../lib/terminalStore";
+import { openDiff, openFile } from "../lib/terminalStore";
 import { BranchCombobox } from "./BranchCombobox";
 import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
-import { ChevronIcon, FolderIcon, RefreshIcon } from "./icons";
+import { ChevronIcon, FileIcon, FolderIcon, RefreshIcon } from "./icons";
 import { api, emitDataChanged } from "../rpc";
 import { openSession } from "../lib/terminalStore";
 import { providerLabel, useChatConfig } from "../lib/chatConfig";
@@ -71,6 +71,7 @@ export function ReviewPanel({
 	const [updating, setUpdating] = useState(false);
 	const [pushing, setPushing] = useState(false);
 	const [changesView, setChangesView] = useState<"files" | "commits">("files");
+	const [panelView, setPanelView] = useState<"review" | "files">("review");
 
 	// Drop optimistic overrides once fresh data (with real staged flags) arrives.
 	const stagedSig = uncommitted.map((f) => `${f.path}:${f.staged ? 1 : 0}`).join("|");
@@ -215,6 +216,25 @@ export function ReviewPanel({
 
 	return (
 		<div className={styles.panel}>
+			<div className={styles.panelTabs}>
+				<button
+					className={styles.panelTab}
+					data-active={panelView === "review" || undefined}
+					onClick={() => setPanelView("review")}
+				>
+					Review
+				</button>
+				<button
+					className={styles.panelTab}
+					data-active={panelView === "files" || undefined}
+					onClick={() => setPanelView("files")}
+				>
+					Files
+				</button>
+			</div>
+			{panelView === "files" ? (
+				<FileBrowser worktreeId={worktree.id} projectId={projectId} />
+			) : (
 			<div className={styles.scroll}>
 				<div className={styles.body}>
 					<section className={styles.summary}>
@@ -365,6 +385,7 @@ export function ReviewPanel({
 					/>
 				</div>
 			</div>
+			)}
 		</div>
 	);
 }
@@ -604,6 +625,161 @@ function CommitRow({
 				) : null}
 			</Collapsible.Panel>
 		</Collapsible.Root>
+	);
+}
+
+/** Whole-repo file browser (all tracked + untracked files). Clicking a file opens
+ *  it in a Monaco editor tab. */
+function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId: string }) {
+	const [paths, setPaths] = useState<string[] | null>(null);
+	const [query, setQuery] = useState("");
+	useEffect(() => {
+		let live = true;
+		api.listFiles({ id: worktreeId }).then((p) => live && setPaths(p));
+		return () => {
+			live = false;
+		};
+	}, [worktreeId]);
+
+	const q = query.trim().toLowerCase();
+	const filtered = useMemo(
+		() => (paths ? (q ? paths.filter((p) => p.toLowerCase().includes(q)) : paths) : []),
+		[paths, q],
+	);
+	const tree = useMemo(
+		() =>
+			buildTree(
+				filtered.map((p) => ({
+					path: p,
+					kind: "modified" as ChangeKind,
+					insertions: null,
+					deletions: null,
+					staged: false,
+				})),
+			),
+		[filtered],
+	);
+
+	return (
+		<div className={styles.browser}>
+			<div className={styles.browserTools}>
+				<input
+					className={styles.filterInput}
+					placeholder="Filter files…"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					spellCheck={false}
+				/>
+			</div>
+			<div className={styles.browserScroll}>
+				{paths === null ? (
+					<p className={styles.empty}>Loading…</p>
+				) : filtered.length === 0 ? (
+					<p className={styles.empty}>{q ? `No files match “${query}”.` : "No files."}</p>
+				) : (
+					<div className={styles.files}>
+						{tree.children.map((c) =>
+							c.type === "dir" ? (
+								<BrowserFolder
+									key={c.path}
+									node={c}
+									depth={0}
+									worktreeId={worktreeId}
+									projectId={projectId}
+									forceOpen={q !== ""}
+								/>
+							) : (
+								<BrowserFile
+									key={c.file.path}
+									file={c.file}
+									depth={0}
+									worktreeId={worktreeId}
+									projectId={projectId}
+								/>
+							),
+						)}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+function BrowserFolder({
+	node,
+	depth,
+	worktreeId,
+	projectId,
+	forceOpen,
+}: {
+	node: TreeDir;
+	depth: number;
+	worktreeId: string;
+	projectId: string;
+	forceOpen: boolean;
+}) {
+	const [open, setOpen] = useState(false);
+	const isOpen = forceOpen || open;
+	return (
+		<Collapsible.Root open={isOpen} onOpenChange={setOpen} className={styles.treeDir}>
+			<div className={styles.dirRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
+				<Collapsible.Trigger className={styles.dirRow}>
+					<ChevronIcon size={12} />
+					<FolderIcon size={13} />
+					<span className={styles.dirName}>{node.name}</span>
+					<span className={styles.dirMeta}>{node.count}</span>
+				</Collapsible.Trigger>
+			</div>
+			<Collapsible.Panel>
+				{node.children.map((c) =>
+					c.type === "dir" ? (
+						<BrowserFolder
+							key={c.path}
+							node={c}
+							depth={depth + 1}
+							worktreeId={worktreeId}
+							projectId={projectId}
+							forceOpen={forceOpen}
+						/>
+					) : (
+						<BrowserFile
+							key={c.file.path}
+							file={c.file}
+							depth={depth + 1}
+							worktreeId={worktreeId}
+							projectId={projectId}
+						/>
+					),
+				)}
+			</Collapsible.Panel>
+		</Collapsible.Root>
+	);
+}
+
+function BrowserFile({
+	file,
+	depth,
+	worktreeId,
+	projectId,
+}: {
+	file: ChangedFile;
+	depth: number;
+	worktreeId: string;
+	projectId: string;
+}) {
+	return (
+		<div className={styles.fileRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
+			<button
+				className={styles.fileRow}
+				onClick={() => openFile({ worktreeId, projectId, path: file.path })}
+				title={`${file.path} — open`}
+			>
+				<FileIcon size={13} />
+				<span className={styles.path} title={file.path}>
+					{basename(file.path)}
+				</span>
+			</button>
+		</div>
 	);
 }
 

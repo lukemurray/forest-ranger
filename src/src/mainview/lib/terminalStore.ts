@@ -19,10 +19,12 @@ export type TermSession = {
 	worktreeId: string;
 	projectId: string;
 	title: string;
-	/** What renders this session: a PTY terminal, a native chat, or a file diff. */
-	kind: "terminal" | "chat" | "diff";
+	/** What renders this session: PTY terminal, native chat, file diff, or editor. */
+	kind: "terminal" | "chat" | "diff" | "file";
 	/** diff only: which file diff to render (see DiffView). */
 	diff?: { path: string; base: string | null; commit?: string };
+	/** file only: which working-tree file the editor opens (see FileEditor). */
+	file?: { path: string };
 	commandId: string | null;
 	/** Explicit command to run (e.g. an agent CLI); takes precedence over commandId. */
 	command: string | null;
@@ -152,10 +154,10 @@ export function getRestorableSessions(worktreeId?: string): RestorableSession[] 
 }
 
 function persist() {
-	// Diff tabs are ephemeral views (no process, re-derived from git) — don't persist
-	// them across restarts; they'd just be stale entries reconciled away anyway.
+	// Diff/file tabs are ephemeral views (no process, re-derived from git/disk) —
+	// don't persist them across restarts; they'd just be reconciled away anyway.
 	const open: RestorableSession[] = state.sessions
-		.filter((s) => s.kind !== "diff")
+		.filter((s) => s.kind !== "diff" && s.kind !== "file")
 		.map((s) => ({
 		paneKey: s.paneKey,
 		worktreeId: s.worktreeId,
@@ -297,6 +299,30 @@ export function openDiff(o: {
 		diff: { path: o.path, base: o.base, commit: o.commit },
 		name,
 		title: `${name} · diff`,
+	});
+}
+
+/** Open (or focus, if already open) an editor tab for a working-tree file. */
+export function openFile(o: { worktreeId: string; projectId: string; path: string }): string {
+	const key = `file:${o.path}`;
+	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
+	if (existing) {
+		setActiveSession(existing.id);
+		return existing.id;
+	}
+	const name = o.path.split("/").pop() ?? o.path;
+	return openSession({
+		paneKey: key,
+		worktreeId: o.worktreeId,
+		projectId: o.projectId,
+		kind: "file",
+		commandId: null,
+		command: null,
+		resumeCommand: null,
+		sessionId: null,
+		file: { path: o.path },
+		name,
+		title: o.path,
 	});
 }
 
