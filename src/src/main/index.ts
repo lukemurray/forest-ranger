@@ -70,6 +70,8 @@ import {
 	updateFromBase as gitUpdateFromBase,
 	fetchProject as gitFetchProject,
 	fileDiff as gitFileDiff,
+	commitsVsBase,
+	commitFiles as gitCommitFiles,
 	recentCommits,
 	gitVersion,
 	removeWorktree as gitRemoveWorktree,
@@ -433,11 +435,23 @@ const handlers: RpcHandlers = {
 				};
 			},
 
-			fileDiff: async ({ id, path, base }) => {
+			fileDiff: async ({ id, path, base, commit }) => {
 				const row = worktreesRepo.get(id);
 				if (!row) return { path, binary: false, diff: "" };
-				const { binary, text } = await gitFileDiff(row.path, path, base);
+				const { binary, text } = await gitFileDiff(row.path, path, base, commit);
 				return { path, binary, diff: text };
+			},
+
+			listCommits: async ({ id, base }) => {
+				const row = worktreesRepo.get(id);
+				if (!row || !base) return [];
+				return commitsVsBase(row.path, base);
+			},
+
+			commitFiles: async ({ id, hash }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return [];
+				return (await gitCommitFiles(row.path, hash)).map(toChangedFile);
 			},
 
 			worktreeRemovalInfo: async ({ id }) => {

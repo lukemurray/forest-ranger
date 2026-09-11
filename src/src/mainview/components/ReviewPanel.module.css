@@ -107,14 +107,26 @@
 .changesTitle {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 10px 14px;
 	min-width: 0;
+	/* Grow so the controls sit at the right of the title row, not jammed against
+	   the "Changes" label; they wrap beneath (still right-aligned) when narrow. */
+	flex: 1;
+	flex-wrap: wrap;
+	justify-content: space-between;
 }
 .sectionTools {
 	display: flex;
 	align-items: center;
 	gap: 10px;
 	flex-shrink: 0;
+	/* Own line below the title row (filter + stat), so they never crowd or overlap
+	   the mode toggle / base selector. Collapses when empty (e.g. commits view). */
+	flex-basis: 100%;
+	justify-content: flex-end;
+}
+.sectionTools:empty {
+	display: none;
 }
 .filterInput {
 	width: 130px;
@@ -177,6 +189,95 @@
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	overflow: hidden;
+}
+
+/* Files | Commits toggle + base selector in the Changes header. */
+.changesControls {
+	display: flex;
+	align-items: center;
+	gap: 8px 12px;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+.segmented {
+	display: inline-flex;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+	flex-shrink: 0; /* never compress — its overflow:hidden would clip the labels */
+}
+.segmented button {
+	padding: 3px 9px;
+	font-size: 12px;
+	color: var(--text-muted);
+	background: transparent;
+}
+.segmented button:hover {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.segmented button[data-active] {
+	background: var(--accent-soft);
+	color: var(--text);
+}
+
+/* --- commits view --- */
+.commits {
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+.commit {
+	border-bottom: 1px solid var(--border);
+}
+.commit:last-child {
+	border-bottom: none;
+}
+.commitHead {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 7px 10px;
+	text-align: left;
+	color: var(--text);
+}
+.commitHead:hover {
+	background: var(--bg-hover);
+}
+.commitHead > svg {
+	color: var(--text-faint);
+	flex-shrink: 0;
+	transition: transform 0.15s ease;
+}
+.commitHead[data-panel-open] > svg {
+	transform: rotate(90deg);
+}
+.commitHash {
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	color: var(--text-faint);
+	flex-shrink: 0;
+}
+.commitSubject {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12.5px;
+}
+.commitMeta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+	font-size: 11.5px;
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+}
+.commitTime {
+	color: var(--text-faint);
 }
 
 /* --- directory tree --- */

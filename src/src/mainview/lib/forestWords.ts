@@ -99,7 +99,8 @@ export const FOREST_WORDS = [
 	"Trimming the hedge",
 	"Sowing wildflowers",
 	"Marking the trailhead",
-	"Truffle hunting"
+	"Truffle hunting",
+	"Tracking squirrels"
 ];
 
 /** A random forest word that isn't one of the recently-shown ones (pass the last

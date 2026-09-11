@@ -399,6 +399,61 @@ export type BaseChange = {
 	staged?: boolean;
 };
 
+export type CommitSummary = {
+	hash: string;
+	subject: string;
+	author: string;
+	relative: string;
+	insertions: number;
+	deletions: number;
+};
+
+/** Commits on this branch not in `base` (newest first), with per-commit +/− totals. */
+export async function commitsVsBase(
+	worktreePath: string,
+	base: string,
+): Promise<CommitSummary[]> {
+	// RS (\x1e) starts each commit record; US (\x1f) separates its fields. --shortstat
+	// appends the "N files changed, N insertions(+), N deletions(-)" line after each.
+	const res = await git(worktreePath, [
+		"log",
+		`${base}..HEAD`,
+		"--shortstat",
+		"--format=%x1e%h%x1f%s%x1f%an%x1f%cr",
+	]);
+	if (!res.ok) return [];
+	return res.stdout
+		.split("\x1e")
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map((chunk) => {
+			const nl = chunk.indexOf("\n");
+			const head = nl === -1 ? chunk : chunk.slice(0, nl);
+			const rest = nl === -1 ? "" : chunk.slice(nl + 1);
+			const [hash, subject, author, relative] = head.split("\x1f");
+			const ins = /(\d+) insertion/.exec(rest);
+			const del = /(\d+) deletion/.exec(rest);
+			return {
+				hash,
+				subject,
+				author,
+				relative,
+				insertions: ins ? Number(ins[1]) : 0,
+				deletions: del ? Number(del[1]) : 0,
+			};
+		});
+}
+
+/** The files a single commit changed (same shape as the committed/uncommitted lists). */
+export async function commitFiles(worktreePath: string, hash: string): Promise<BaseChange[]> {
+	const [ns, num] = await Promise.all([
+		git(worktreePath, ["show", "--name-status", "-M", "--format=", hash]),
+		git(worktreePath, ["show", "--numstat", "-M", "--format=", hash]),
+	]);
+	if (!ns.ok) return [];
+	return parseChanges(ns.stdout, num.ok ? num.stdout : "");
+}
+
 export type WorktreeChanges = {
 	base: string | null;
 	ahead: number;
@@ -536,7 +591,16 @@ export async function fileDiff(
 	worktreePath: string,
 	relPath: string,
 	base?: string | null,
+	commit?: string | null,
 ): Promise<RawFileDiff> {
+	// Single-commit view: the change this commit introduced to the file.
+	if (commit) {
+		let d = await git(worktreePath, ["diff", "-M", `${commit}^`, commit, "--", relPath]);
+		// Root commit has no parent — show its introduction of the file instead.
+		if (!d.ok) d = await git(worktreePath, ["show", "-M", "--format=", commit, "--", relPath]);
+		return { binary: isBinaryDiff(d.stdout), text: d.stdout };
+	}
+
 	// Committed view (base given): HEAD vs the merge-base — committed branch work.
 	if (base) {
 		const mb = await git(worktreePath, ["merge-base", base, "HEAD"]);

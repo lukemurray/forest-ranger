@@ -56,6 +56,16 @@ export type ChangedFile = {
 	staged: boolean;
 };
 
+/** One commit on a branch vs its base, for the review panel's Commits view. */
+export type ListedCommit = {
+	hash: string;
+	subject: string;
+	author: string;
+	relative: string;
+	insertions: number;
+	deletions: number;
+};
+
 /** A saved, runnable command for a project (e.g. "Run" → "npm run dev"). */
 /** The global default for where a command/agent runs. */
 export type RunTarget = "in-app" | "external";
@@ -366,10 +376,22 @@ export type RpcRequests = {
 				params: { id: string; base: string | null };
 				response: WorktreeDetail | null;
 			};
-			/** Unified diff for one changed file in a worktree (vs base if given). */
+			/** Unified diff for one changed file: a single commit if `commit` is given,
+			 *  else committed-vs-base when `base` is given, else the working-tree diff. */
 			fileDiff: {
-				params: { id: string; path: string; base: string | null };
+				params: { id: string; path: string; base: string | null; commit?: string | null };
 				response: FileDiff;
+			};
+
+			/** Commits on this worktree's branch not in `base` (newest first). */
+			listCommits: {
+				params: { id: string; base: string | null };
+				response: ListedCommit[];
+			};
+			/** The files a single commit changed. */
+			commitFiles: {
+				params: { id: string; hash: string };
+				response: ChangedFile[];
 			};
 
 			/** Pre-flight info for removing a worktree (safety check). */

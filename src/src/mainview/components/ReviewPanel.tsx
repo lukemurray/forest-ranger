@@ -15,6 +15,7 @@ import type {
 	ChangedFile,
 	ChangeKind,
 	FileDiff,
+	ListedCommit,
 	WorktreeDetail,
 } from "../../shared/types";
 import { BranchCombobox } from "./BranchCombobox";
@@ -79,6 +80,7 @@ export function ReviewPanel({
 	const [committing, setCommitting] = useState(false);
 	const [updating, setUpdating] = useState(false);
 	const [pushing, setPushing] = useState(false);
+	const [changesView, setChangesView] = useState<"files" | "commits">("files");
 
 	// Drop optimistic overrides once fresh data (with real staged flags) arrives.
 	const stagedSig = uncommitted.map((f) => `${f.path}:${f.staged ? 1 : 0}`).join("|");
@@ -327,20 +329,41 @@ export function ReviewPanel({
 						files={committed}
 						base={base}
 						worktreeId={worktree.id}
+						bodyOverride={
+							changesView === "commits" ? (
+								<CommitsView worktreeId={worktree.id} base={base} head={worktree.head} />
+							) : undefined
+						}
 						emptyText={
 							base
 								? `No commits on this branch vs ${base}.`
 								: "Pick a base branch to compare against."
 						}
 						right={
-							<label className={styles.baseSelect}>
-								vs
-								<BranchCombobox
-									value={base}
-									branches={branches.filter((b) => b !== branch)}
-									onSelect={onSelectBase}
-								/>
-							</label>
+							<div className={styles.changesControls}>
+								<div className={styles.segmented}>
+									<button
+										data-active={changesView === "files" || undefined}
+										onClick={() => setChangesView("files")}
+									>
+										Files
+									</button>
+									<button
+										data-active={changesView === "commits" || undefined}
+										onClick={() => setChangesView("commits")}
+									>
+										Commits
+									</button>
+								</div>
+								<label className={styles.baseSelect}>
+									vs
+									<BranchCombobox
+										value={base}
+										branches={branches.filter((b) => b !== branch)}
+										onSelect={onSelectBase}
+									/>
+								</label>
+							</div>
 						}
 					/>
 				</div>
@@ -357,6 +380,7 @@ function ChangeSection({
 	right,
 	emptyText,
 	staging,
+	bodyOverride,
 }: {
 	title: string;
 	files: ChangedFile[];
@@ -365,6 +389,8 @@ function ChangeSection({
 	right?: ReactNode;
 	emptyText?: string;
 	staging?: Staging;
+	/** Replaces the file tree + its filter/stat tools (e.g. the Commits view). */
+	bodyOverride?: ReactNode;
 }) {
 	const [query, setQuery] = useState("");
 	const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
@@ -401,7 +427,7 @@ function ChangeSection({
 					{right}
 				</div>
 				<div className={styles.sectionTools}>
-					{showTools && (
+					{!bodyOverride && showTools && (
 						<input
 							className={styles.filterInput}
 							placeholder="Filter files…"
@@ -410,12 +436,12 @@ function ChangeSection({
 							spellCheck={false}
 						/>
 					)}
-					{openFiles.size > 0 && (
+					{!bodyOverride && openFiles.size > 0 && (
 						<button className={styles.toolButton} onClick={() => setOpenFiles(new Set())}>
 							Collapse all
 						</button>
 					)}
-					{files.length > 0 && (
+					{!bodyOverride && files.length > 0 && (
 						<span className={styles.diffStat}>
 							{files.length} file{files.length === 1 ? "" : "s"}
 							{ins > 0 && <span className={styles.add}> +{ins}</span>}
@@ -425,7 +451,9 @@ function ChangeSection({
 				</div>
 			</div>
 			<Collapsible.Panel className={styles.sectionPanel}>
-				{files.length === 0 ? (
+				{bodyOverride ? (
+					bodyOverride
+				) : files.length === 0 ? (
 					emptyText ? <p className={styles.empty}>{emptyText}</p> : null
 				) : filtered.length === 0 ? (
 					<p className={styles.empty}>No files match “{query}”.</p>
@@ -490,6 +518,113 @@ function filePaths(node: TreeDir): string[] {
 		else out.push(c.file.path);
 	}
 	return out;
+}
+
+/** Commits view: the branch's commits vs base, each expandable to its files.
+ *  Re-fetches when `head` changes (a new commit landed) so it tracks agent work. */
+function CommitsView({
+	worktreeId,
+	base,
+	head,
+}: {
+	worktreeId: string;
+	base: string | null;
+	head: string | null;
+}) {
+	const [commits, setCommits] = useState<ListedCommit[] | null>(null);
+	useEffect(() => {
+		let live = true;
+		if (!base) return setCommits([]);
+		api.listCommits({ id: worktreeId, base }).then((c) => live && setCommits(c));
+		return () => {
+			live = false;
+		};
+		// head is a dep so a fresh commit re-fetches the list; base/worktree too.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [worktreeId, base, head]);
+
+	if (!base) return <p className={styles.empty}>Pick a base branch to compare against.</p>;
+	if (commits === null) return <p className={styles.empty}>Loading commits…</p>;
+	if (commits.length === 0) return <p className={styles.empty}>No commits on this branch vs {base}.</p>;
+	return (
+		<div className={styles.commits}>
+			{commits.map((c) => (
+				<CommitRow key={c.hash} worktreeId={worktreeId} commit={c} />
+			))}
+		</div>
+	);
+}
+
+function CommitRow({ worktreeId, commit }: { worktreeId: string; commit: ListedCommit }) {
+	const [open, setOpen] = useState(false);
+	const [files, setFiles] = useState<ChangedFile[] | null>(null);
+	const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
+
+	useEffect(() => {
+		if (open && files === null) {
+			api.commitFiles({ id: worktreeId, hash: commit.hash }).then(setFiles);
+		}
+	}, [open, files, worktreeId, commit.hash]);
+
+	const setFileOpen = useCallback((path: string, next: boolean) => {
+		setOpenFiles((prev) => {
+			const n = new Set(prev);
+			if (next) n.add(path);
+			else n.delete(path);
+			return n;
+		});
+	}, []);
+
+	const tree = useMemo(() => (files ? buildTree(files) : null), [files]);
+
+	return (
+		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.commit}>
+			<Collapsible.Trigger className={styles.commitHead}>
+				<ChevronIcon size={12} />
+				<code className={styles.commitHash}>{commit.hash}</code>
+				<span className={styles.commitSubject}>{commit.subject}</span>
+				<span className={styles.commitMeta}>
+					{commit.insertions > 0 && <span className={styles.add}>+{commit.insertions}</span>}
+					{commit.deletions > 0 && <span className={styles.del}>−{commit.deletions}</span>}
+					<span className={styles.commitTime}>{commit.relative}</span>
+				</span>
+			</Collapsible.Trigger>
+			<Collapsible.Panel>
+				{files === null ? (
+					<p className={styles.empty}>Loading…</p>
+				) : tree ? (
+					<div className={styles.files}>
+						{tree.children.map((c) =>
+							c.type === "dir" ? (
+								<FolderNode
+									key={c.path}
+									node={c}
+									depth={0}
+									base={null}
+									commit={commit.hash}
+									worktreeId={worktreeId}
+									openFiles={openFiles}
+									setFileOpen={setFileOpen}
+									forceOpen={false}
+								/>
+							) : (
+								<FileRow
+									key={c.file.path}
+									file={c.file}
+									depth={0}
+									base={null}
+									commit={commit.hash}
+									worktreeId={worktreeId}
+									open={openFiles.has(c.file.path)}
+									onOpenChange={(o) => setFileOpen(c.file.path, o)}
+								/>
+							),
+						)}
+					</div>
+				) : null}
+			</Collapsible.Panel>
+		</Collapsible.Root>
+	);
 }
 
 function buildTree(files: ChangedFile[]): TreeDir {
@@ -559,6 +694,7 @@ function FolderNode({
 	node,
 	depth,
 	base,
+	commit,
 	worktreeId,
 	openFiles,
 	setFileOpen,
@@ -568,6 +704,7 @@ function FolderNode({
 	node: TreeDir;
 	depth: number;
 	base: string | null;
+	commit?: string;
 	worktreeId: string;
 	openFiles: Set<string>;
 	setFileOpen: (path: string, next: boolean) => void;
@@ -618,6 +755,7 @@ function FolderNode({
 							node={c}
 							depth={depth + 1}
 							base={base}
+							commit={commit}
 							worktreeId={worktreeId}
 							openFiles={openFiles}
 							setFileOpen={setFileOpen}
@@ -630,6 +768,7 @@ function FolderNode({
 							file={c.file}
 							depth={depth + 1}
 							base={base}
+							commit={commit}
 							worktreeId={worktreeId}
 							open={openFiles.has(c.file.path)}
 							onOpenChange={(o) => setFileOpen(c.file.path, o)}
@@ -646,6 +785,7 @@ function FileRow({
 	worktreeId,
 	file,
 	base,
+	commit,
 	depth,
 	open,
 	onOpenChange,
@@ -654,6 +794,8 @@ function FileRow({
 	worktreeId: string;
 	file: ChangedFile;
 	base: string | null;
+	/** When set, the diff shows this single commit's change to the file. */
+	commit?: string;
 	depth: number;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -668,13 +810,13 @@ function FileRow({
 		if (open && diff === null && !fetching.current) {
 			fetching.current = true;
 			api
-				.fileDiff({ id: worktreeId, path: file.path, base })
+				.fileDiff({ id: worktreeId, path: file.path, base, commit })
 				.then(setDiff)
 				.finally(() => {
 					fetching.current = false;
 				});
 		}
-	}, [open, diff, worktreeId, file.path, base]);
+	}, [open, diff, worktreeId, file.path, base, commit]);
 
 	return (
 		<Collapsible.Root
