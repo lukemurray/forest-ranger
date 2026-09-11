@@ -301,10 +301,15 @@ export function setActiveSession(id: string) {
 	});
 }
 
+/** Session id for a pane key (activeId is a session id, not a key). */
+function idForKey(key: string): string | null {
+	return state.sessions.find((s) => sessionKey(s) === key)?.id ?? null;
+}
+
 /** Move a tab into another group (or reorder within one) at an optional index. */
 export function moveTab(worktreeId: string, tab: string, groupId: string, index?: number) {
 	set({
-		activeId: tab,
+		activeId: idForKey(tab) ?? state.activeId, // dropping a pane focuses it
 		layouts: withLayout(worktreeId, moveTabToGroup(layoutFor(worktreeId), tab, groupId, index)),
 	});
 }
@@ -318,7 +323,7 @@ export function splitTab(
 	before: boolean,
 ) {
 	set({
-		activeId: tab,
+		activeId: idForKey(tab) ?? state.activeId, // the split-off pane becomes focused
 		layouts: withLayout(worktreeId, splitOffTab(layoutFor(worktreeId), tab, groupId, dir, before)),
 	});
 }
