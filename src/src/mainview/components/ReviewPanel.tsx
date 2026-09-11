@@ -20,7 +20,7 @@ import type {
 import { BranchCombobox } from "./BranchCombobox";
 import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
-import { ChevronIcon, FolderIcon } from "./icons";
+import { ChevronIcon, FolderIcon, RefreshIcon } from "./icons";
 import { api, emitDataChanged } from "../rpc";
 import { openSession } from "../lib/terminalStore";
 import { providerLabel, useChatConfig } from "../lib/chatConfig";
@@ -85,6 +85,32 @@ export function ReviewPanel({
 	useEffect(() => {
 		setOptimistic(new Map());
 	}, [stagedSig]);
+
+	// Keep the change list live as the agent edits/commits: refresh when the window
+	// regains focus, and poll gently while it's focused. (invalidate re-runs the
+	// worktree loader — git status/log — which is where the changes come from.)
+	useEffect(() => {
+		let timer: ReturnType<typeof setInterval> | null = null;
+		const stop = () => {
+			if (timer) clearInterval(timer);
+			timer = null;
+		};
+		const start = () => {
+			if (!timer) timer = setInterval(() => router.invalidate(), 4000);
+		};
+		const onFocus = () => {
+			router.invalidate();
+			start();
+		};
+		if (document.hasFocus()) start();
+		window.addEventListener("focus", onFocus);
+		window.addEventListener("blur", stop);
+		return () => {
+			stop();
+			window.removeEventListener("focus", onFocus);
+			window.removeEventListener("blur", stop);
+		};
+	}, [router]);
 
 	const isStaged = (path: string) => {
 		if (optimistic.has(path)) return !!optimistic.get(path);
@@ -254,6 +280,15 @@ export function ReviewPanel({
 							{worktree.isDetached && <span className={styles.detached}>detached</span>}
 							{worktree.isLocked && <span className={styles.locked}>locked</span>}
 						</div>
+						<button
+							className={styles.refreshBtn}
+							onClick={() => router.invalidate()}
+							data-tip="Refresh changes"
+							data-tip-align="end"
+							aria-label="Refresh changes"
+						>
+							<RefreshIcon size={14} />
+						</button>
 					</section>
 
 					{branch && (
