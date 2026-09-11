@@ -7,6 +7,7 @@
  * Worker specifiers follow monaco-editor 0.56's `exports` map ("./*" →
  * "./esm/vs/*.js"), i.e. no "esm/vs/" prefix in the import path.
  */
+import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/language/css/css.worker?worker";
@@ -28,23 +29,40 @@ export function monacoTheme(dark: boolean): string {
 	return dark ? "vs-dark" : "vs";
 }
 
-const LANG_BY_EXT: Record<string, string> = {
-	ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-	js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-	json: "json", jsonc: "json", css: "css", scss: "scss", less: "less",
-	html: "html", htm: "html", xml: "xml", svg: "xml", vue: "html",
-	md: "markdown", mdx: "markdown", py: "python", rb: "ruby", go: "go",
-	rs: "rust", java: "java", kt: "kotlin", c: "c", h: "c", cpp: "cpp",
-	cc: "cpp", hpp: "cpp", cs: "csharp", php: "php", swift: "swift",
-	sh: "shell", bash: "shell", zsh: "shell", fish: "shell",
-	yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", sql: "sql",
-	graphql: "graphql", gql: "graphql", dockerfile: "dockerfile", tf: "hcl",
+// Built once from Monaco's own language registry, so every bundled language
+// matches by its registered extensions/filenames — no hand-maintained map.
+let byExt: Map<string, string> | null = null;
+let byName: Map<string, string> | null = null;
+function ensureMaps() {
+	if (byExt) return;
+	byExt = new Map();
+	byName = new Map();
+	for (const lang of monaco.languages.getLanguages()) {
+		for (const ext of lang.extensions ?? []) byExt.set(ext.toLowerCase(), lang.id); // ".ts"
+		for (const fn of lang.filenames ?? []) byName.set(fn.toLowerCase(), lang.id); // "dockerfile"
+	}
+}
+
+// A few extensions Monaco's registry doesn't cover, mapped to a close language.
+const ALIASES: Record<string, string> = {
+	".vue": "html",
+	".svelte": "html",
+	".svg": "xml",
+	".mdx": "markdown",
+	".jsonc": "json",
+	".gql": "graphql",
+	".tf": "hcl",
+	".tfvars": "hcl",
 };
 
-/** Monaco language id inferred from a path's extension (or filename). */
+/** Monaco language id for a path, resolved from Monaco's registry (filename first,
+ *  then extension), with a small alias fallback; "plaintext" when nothing matches. */
 export function monacoLang(path: string): string {
-	const name = path.split("/").pop() ?? path;
-	if (name.toLowerCase() === "dockerfile") return "dockerfile";
-	const ext = name.split(".").pop()?.toLowerCase();
-	return (ext && LANG_BY_EXT[ext]) || "plaintext";
+	ensureMaps();
+	const name = (path.split("/").pop() ?? path).toLowerCase();
+	const byFilename = byName!.get(name);
+	if (byFilename) return byFilename;
+	const dot = name.lastIndexOf(".");
+	const ext = dot >= 0 ? name.slice(dot) : "";
+	return (ext && (byExt!.get(ext) || ALIASES[ext])) || "plaintext";
 }
