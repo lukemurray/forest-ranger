@@ -151,22 +151,29 @@
 .projectRow[data-within] {
 	box-shadow: inset 2px 0 0 color-mix(in srgb, var(--green) 55%, transparent);
 }
-.projectRefresh {
-	display: grid;
+/* Project-level shortcut actions (review / new worktree / rescan). Hidden until
+   the row is hovered, so a resting row shows just the name + status dot. */
+.projectAction {
+	display: none;
 	place-items: center;
 	width: 24px;
 	height: 24px;
 	flex-shrink: 0;
 	border-radius: var(--radius-sm);
 	color: var(--text-faint);
-	opacity: 0;
 }
-.projectRow:hover .projectRefresh {
-	opacity: 1;
+.projectRow:hover .projectAction {
+	display: grid;
 }
-.projectRefresh:hover {
+.projectAction:hover {
 	background: var(--bg-active);
 	color: var(--text);
+}
+/* On hover the actions take the row's right edge — hide the status dot so the
+   narrow row doesn't crowd. */
+.projectRow:hover .runningDot,
+.projectRow:hover .resumeDot {
+	display: none;
 }
 
 .chevron {

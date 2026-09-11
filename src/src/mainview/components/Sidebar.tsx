@@ -12,6 +12,7 @@ import {
 	PlusIcon,
 	RefreshIcon,
 	RevealIcon,
+	SparkleIcon,
 	SproutIcon,
 	TreeIcon,
 	TrashIcon,
@@ -19,8 +20,11 @@ import {
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RenameWorktreeDialog } from "./RenameWorktreeDialog";
+import { NewWorktreeDialog } from "./NewWorktreeDialog";
+import { ReviewDialog } from "./ReviewDialog";
 import { SettingsMenu } from "./SettingsMenu";
 import { getRestorableSessions, useTerminals } from "../lib/terminalStore";
+import { useProjectActions } from "../lib/useProjectActions";
 import styles from "./Sidebar.module.css";
 
 export function Sidebar({ projects }: { projects: Project[] }) {
@@ -164,7 +168,10 @@ function ProjectNode({
 	const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const [renaming, setRenaming] = useState<Worktree | null>(null);
+	const [newOpen, setNewOpen] = useState(false);
+	const [reviewOpen, setReviewOpen] = useState(false);
 	const fetching = useRef(false);
+	const { onWorktreeCreated, startReview } = useProjectActions(project.id);
 
 	async function removeProject() {
 		await api.removeProject({ id: project.id });
@@ -231,13 +238,39 @@ function ProjectNode({
 							{project.name}
 						</button>
 						<button
-							className={styles.projectRefresh}
+							className={styles.projectAction}
+							onClick={(e) => {
+								e.stopPropagation();
+								setReviewOpen(true);
+							}}
+							data-tip="Review a branch"
+							data-tip-align="end"
+							aria-label="Review a branch"
+						>
+							<SparkleIcon size={13} />
+						</button>
+						<button
+							className={styles.projectAction}
+							onClick={(e) => {
+								e.stopPropagation();
+								setNewOpen(true);
+							}}
+							data-tip="New worktree"
+							data-tip-align="end"
+							aria-label="New worktree"
+						>
+							<PlusIcon size={14} />
+						</button>
+						<button
+							className={styles.projectAction}
 							onClick={(e) => {
 								e.stopPropagation();
 								emitDataChanged("worktrees"); // reloads sidebar list, branches, sync bar
 								router.invalidate(); // reloads the project view's worktree grid
 							}}
-							title="Rescan worktrees"
+							data-tip="Rescan worktrees"
+							data-tip-align="end"
+							aria-label="Rescan worktrees"
 						>
 							<RefreshIcon size={13} />
 						</button>
@@ -343,6 +376,19 @@ function ProjectNode({
 				confirmLabel="Remove"
 				danger
 				onConfirm={removeProject}
+			/>
+
+			<NewWorktreeDialog
+				open={newOpen}
+				onOpenChange={setNewOpen}
+				projectId={project.id}
+				onCreated={onWorktreeCreated}
+			/>
+			<ReviewDialog
+				open={reviewOpen}
+				onOpenChange={setReviewOpen}
+				projectId={project.id}
+				onSubmit={startReview}
 			/>
 		</Collapsible.Root>
 	);

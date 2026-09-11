@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useRouter } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 import type { CommandRunTarget, ProjectCommand } from "../../shared/types";
 import { projectRoute, rootRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
@@ -20,9 +20,7 @@ import {
 	TrashIcon,
 } from "../components/icons";
 import { api, emitDataChanged } from "../rpc";
-import { openSession } from "../lib/terminalStore";
-import { getChatConfig, providerLabel } from "../lib/chatConfig";
-import { notify } from "../lib/toast";
+import { useProjectActions } from "../lib/useProjectActions";
 import tb from "../components/Titlebar.module.css";
 import styles from "./Page.module.css";
 
@@ -33,7 +31,6 @@ export function ProjectView() {
 	const { projectId } = projectRoute.useParams();
 	const projects = rootRoute.useLoaderData();
 	const project = projects.find((p) => p.id === projectId);
-	const navigate = useNavigate();
 	const router = useRouter();
 
 	const [commands, setCommands] = useState<ProjectCommand[]>([]);
@@ -43,71 +40,7 @@ export function ProjectView() {
 	const [reviewOpen, setReviewOpen] = useState(false);
 	const [tab, setTab] = useState<Tab>("worktrees");
 
-	function onWorktreeCreated(worktreeId: string, _path: string, startChat: boolean) {
-		emitDataChanged("worktrees"); // refresh sidebar + project grid
-		navigate({
-			to: "/project/$projectId/worktree/$worktreeId",
-			params: { projectId, worktreeId },
-		});
-		if (startChat) {
-			const config = getChatConfig();
-			const agent = providerLabel(config.defaultProvider);
-			openSession({
-				worktreeId,
-				projectId,
-				kind: "chat",
-				commandId: null,
-				command: null,
-				resumeCommand: null,
-				sessionId: crypto.randomUUID(),
-				provider: config.defaultProvider,
-				permissionMode: config.defaultPermissionMode,
-				model: config.defaultModel,
-				agentLabel: agent,
-				name: "New chat",
-				title: agent,
-			});
-		}
-	}
-
-	// Review a branch: detached worktree at its tip + a chat seeded to review it.
-	async function startReview(branch: string, _base: string | null, prompt: string) {
-		const res = await api.createWorktree({
-			projectId,
-			name: "",
-			base: branch,
-			location: null,
-			detach: true,
-		});
-		if (!res.ok || !res.worktreeId) {
-			notify(res.error ?? "Failed to create review worktree", "error");
-			return;
-		}
-		emitDataChanged("worktrees");
-		navigate({
-			to: "/project/$projectId/worktree/$worktreeId",
-			params: { projectId, worktreeId: res.worktreeId },
-		});
-		const config = getChatConfig();
-		const agent = providerLabel(config.defaultProvider);
-		openSession({
-			worktreeId: res.worktreeId,
-			projectId,
-			kind: "chat",
-			commandId: null,
-			command: null,
-			resumeCommand: null,
-			sessionId: crypto.randomUUID(),
-			provider: config.defaultProvider,
-			permissionMode: config.defaultPermissionMode,
-			model: config.defaultModel,
-			agentLabel: agent,
-			name: `Review ${branch}`,
-			renamed: true,
-			title: `Review ${branch}`,
-			initialPrompt: prompt,
-		});
-	}
+	const { onWorktreeCreated, startReview } = useProjectActions(projectId);
 
 	const loadCommands = useCallback(() => {
 		api.listCommands({ projectId }).then(setCommands);
