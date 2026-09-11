@@ -18,10 +18,11 @@ export function CommandPalette() {
 	const [sel, setSel] = useState(0);
 	const inputRef = useRef<HTMLInputElement>(null);
 
-	// Global ⌘K / Ctrl+K toggle.
+	// Global ⌘K / ⌘T (jump to a worktree across any project) toggle.
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+			const k = e.key.toLowerCase();
+			if ((e.metaKey || e.ctrlKey) && (k === "k" || k === "t")) {
 				e.preventDefault();
 				setOpen((o) => !o);
 			}

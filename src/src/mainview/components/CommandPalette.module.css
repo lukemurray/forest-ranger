@@ -54,4 +54,19 @@
 	font-size: 12px;
 	color: var(--text-faint);
 	flex-shrink: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 55%;
+}
+.rowTag {
+	flex-shrink: 0;
+	font-size: 10.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	color: var(--amber);
+	background: rgba(226, 179, 65, 0.16);
 }

@@ -8,6 +8,7 @@ import type {
 	WorktreeDetail,
 } from "../../shared/types";
 import { openDiff, openFile } from "../lib/terminalStore";
+import { setPanelView, usePanel } from "../lib/panelStore";
 import { BranchCombobox } from "./BranchCombobox";
 import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
@@ -71,7 +72,7 @@ export function ReviewPanel({
 	const [updating, setUpdating] = useState(false);
 	const [pushing, setPushing] = useState(false);
 	const [changesView, setChangesView] = useState<"files" | "commits">("files");
-	const [panelView, setPanelView] = useState<"review" | "files">("review");
+	const { view: panelView } = usePanel();
 
 	// Drop optimistic overrides once fresh data (with real staged flags) arrives.
 	const stagedSig = uncommitted.map((f) => `${f.path}:${f.staged ? 1 : 0}`).join("|");
@@ -221,6 +222,8 @@ export function ReviewPanel({
 					className={styles.panelTab}
 					data-active={panelView === "review" || undefined}
 					onClick={() => setPanelView("review")}
+					data-tip="⌘1"
+					data-tip-align="end"
 				>
 					Review
 				</button>
@@ -228,6 +231,8 @@ export function ReviewPanel({
 					className={styles.panelTab}
 					data-active={panelView === "files" || undefined}
 					onClick={() => setPanelView("files")}
+					data-tip="⌘2"
+					data-tip-align="end"
 				>
 					Files
 				</button>
