@@ -94,6 +94,10 @@
 .tab[data-dragging] {
 	opacity: 0.4;
 }
+/* preview (temporary) tab — italic like VS Code until promoted */
+.tab[data-preview] .tabLabel {
+	font-style: italic;
+}
 .tab > svg {
 	color: var(--text-faint);
 	flex-shrink: 0;

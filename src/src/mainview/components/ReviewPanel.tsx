@@ -473,7 +473,7 @@ function ChangeSection({
 						staging={staging}
 						defaultExpanded
 						forceOpen={q !== ""}
-						onOpen={(f) => openDiff({ worktreeId, projectId, path: f.path, base })}
+						onOpen={(f, o) => openDiff({ worktreeId, projectId, path: f.path, base, preview: o?.preview })}
 					/>
 				)}
 			</Collapsible.Panel>
@@ -574,7 +574,9 @@ function CommitRow({
 						files={files}
 						showStats
 						defaultExpanded
-						onOpen={(f) => openDiff({ worktreeId, projectId, path: f.path, base: null, commit: commit.hash })}
+						onOpen={(f, o) =>
+							openDiff({ worktreeId, projectId, path: f.path, base: null, commit: commit.hash, preview: o?.preview })
+						}
 					/>
 				)}
 			</Collapsible.Panel>
@@ -635,7 +637,8 @@ function FileTree({
 	defaultExpanded,
 }: {
 	files: ChangedFile[];
-	onOpen: (file: ChangedFile) => void;
+	/** Activate a file: single click/Enter previews; double-click opens permanent. */
+	onOpen: (file: ChangedFile, opts?: { preview?: boolean }) => void;
 	showStats?: boolean;
 	staging?: Staging;
 	forceOpen?: boolean;
@@ -770,6 +773,9 @@ function FileTree({
 							setFocusIdx(i);
 							activate(n);
 						}}
+						onDoubleClick={() => {
+							if (n.file) onOpen(n.file, { preview: false }); // double-click → keep open
+						}}
 						title={n.path}
 					>
 						{staging && (
@@ -864,7 +870,7 @@ function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId:
 					<FileTree
 						files={files}
 						forceOpen={q !== ""}
-						onOpen={(f) => openFile({ worktreeId, projectId, path: f.path })}
+						onOpen={(f, o) => openFile({ worktreeId, projectId, path: f.path, preview: o?.preview })}
 					/>
 				)}
 			</div>

@@ -3,6 +3,7 @@ import {
 	closeSession,
 	getRestorableSessions,
 	moveTab,
+	promoteTab,
 	reopenSessions,
 	resizePane,
 	sessionKey,
@@ -91,6 +92,21 @@ export function SessionWorkspace({ worktreeId }: { worktreeId: string }) {
 		if (toReopen.length) reopenSessions(toReopen);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [worktreeId]);
+
+	// ⌘W closes the focused tab (window-close is ⇧⌘W, set in the app menu).
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "w") {
+				const s = visible.find((x) => x.id === activeId);
+				if (s) {
+					e.preventDefault();
+					endSession(s);
+				}
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [visible, activeId]);
 
 	function startRename(s: TermSession) {
 		setEditingId(s.id);
@@ -278,7 +294,7 @@ function GroupView({ node }: { node: PaneGroup }) {
 									commit={s.diff.commit}
 								/>
 							) : s.kind === "file" && s.file ? (
-								<FileEditor worktreeId={s.worktreeId} path={s.file.path} />
+								<FileEditor sessionId={s.id} worktreeId={s.worktreeId} path={s.file.path} />
 							) : null}
 						</div>
 					);
@@ -334,6 +350,7 @@ function Tab({
 		<button
 			className={styles.tab}
 			data-active={active || undefined}
+			data-preview={s.preview || undefined}
 			data-dragging={c.dragging === paneKey || undefined}
 			draggable
 			onDragStart={(e) => {
@@ -352,8 +369,8 @@ function Tab({
 				moveTab(c.worktreeId, tab, groupId, index); // insert before this tab
 			}}
 			onClick={() => setActiveSession(s.id)}
-			onDoubleClick={() => c.startRename(s)}
-			title={`${s.title} — double-click to rename`}
+			onDoubleClick={() => (s.preview ? promoteTab(s.id) : c.startRename(s))}
+			title={s.preview ? `${s.title} — double-click to keep open` : `${s.title} — double-click to rename`}
 		>
 			{s.kind === "chat" ? (
 				<SparkleIcon size={12} />

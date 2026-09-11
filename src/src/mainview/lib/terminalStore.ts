@@ -6,6 +6,7 @@ import {
 	moveTabToGroup,
 	reconcile,
 	removeTab,
+	renameTab,
 	setActive as setGroupActive,
 	setSizes,
 	splitOffTab,
@@ -26,6 +27,9 @@ export type TermSession = {
 	diff?: { path: string; base: string | null; commit?: string };
 	/** file only: which working-tree file the editor opens (see FileEditor). */
 	file?: { path: string };
+	/** diff/file: a temporary "preview" tab (italic) reused by the next open until
+	 *  promoted by an edit or a double-click (VS Code-style). */
+	preview?: boolean;
 	commandId: string | null;
 	/** Explicit command to run (e.g. an agent CLI); takes precedence over commandId. */
 	command: string | null;
@@ -84,6 +88,9 @@ type State = {
 	open: boolean;
 	/** Per-worktree pane-tiling arrangement (in memory; see paneLayout.ts). */
 	layouts: Record<string, PaneNode>;
+	/** Session ids in most-recently-focused order — so closing a tab returns to the
+	 *  last one you were on, not the neighbour. In memory. */
+	mru: string[];
 };
 
 const LAYOUTS_KEY = "forest-ranger:layouts";
@@ -109,6 +116,7 @@ let state: State = {
 	dock: storedDock === "side" ? "side" : "bottom",
 	open: false,
 	layouts: storedLayouts,
+	mru: [],
 };
 
 /** Pane keys of a worktree's sessions, in tab order. */
@@ -191,7 +199,13 @@ function persist() {
 
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
-	state = { ...state, ...patch };
+	// Maintain the focus MRU automatically: any activeId change bumps it to the
+	// front (using the patch's own mru as the base when it provides one).
+	let mru = patch.mru ?? state.mru;
+	if (patch.activeId && patch.activeId !== state.activeId) {
+		mru = [patch.activeId, ...mru.filter((m) => m !== patch.activeId)].slice(0, 200);
+	}
+	state = { ...state, ...patch, mru };
 	persist();
 	for (const fn of listeners) fn();
 }
@@ -272,61 +286,97 @@ export function openSession(
 	return id;
 }
 
-/** Open (or focus, if already open) a tab showing one file's diff. */
+type Content = Pick<TermSession, "paneKey" | "kind" | "name" | "title" | "file" | "diff">;
+
+/**
+ * Open a diff/file tab. New opens are "preview" (temporary) by default: a single
+ * preview tab per worktree is reused for the next open — its content swaps and its
+ * pane key is renamed in place — until an edit or double-click promotes it. An
+ * exact tab already open (preview or not) is just focused.
+ */
+function openContent(worktreeId: string, projectId: string, content: Content, preview: boolean): string {
+	const exact = state.sessions.find((s) => s.worktreeId === worktreeId && s.paneKey === content.paneKey);
+	if (exact) {
+		setActiveSession(exact.id);
+		if (!preview) promoteTab(exact.id); // a permanent open (double-click) pins it
+		return exact.id;
+	}
+	if (preview) {
+		const prev = state.sessions.find((s) => s.worktreeId === worktreeId && s.preview);
+		if (prev) {
+			const sessions = state.sessions.map((s) =>
+				s.id === prev.id
+					? { ...s, ...content, diff: content.diff, file: content.file, preview: true }
+					: s,
+			);
+			const layouts = withLayout(
+				worktreeId,
+				renameTab(layoutFor(worktreeId), prev.paneKey, content.paneKey),
+			);
+			set({ sessions, activeId: prev.id, layouts });
+			return prev.id;
+		}
+	}
+	return openSession({
+		...content,
+		worktreeId,
+		projectId,
+		commandId: null,
+		command: null,
+		resumeCommand: null,
+		sessionId: null,
+		preview,
+	});
+}
+
+/** Open (or focus/preview-reuse) a tab showing one file's diff. */
 export function openDiff(o: {
 	worktreeId: string;
 	projectId: string;
 	path: string;
 	base: string | null;
 	commit?: string;
+	preview?: boolean;
 }): string {
 	recordRecentFile(o.worktreeId, o.path);
-	// Deterministic key → clicking the same file+ref focuses its tab, no duplicates.
-	const key = `diff:${o.commit ?? ""}:${o.base ?? ""}:${o.path}`;
-	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
-	if (existing) {
-		setActiveSession(existing.id);
-		return existing.id;
-	}
 	const name = o.path.split("/").pop() ?? o.path;
-	return openSession({
-		paneKey: key,
-		worktreeId: o.worktreeId,
-		projectId: o.projectId,
-		kind: "diff",
-		commandId: null,
-		command: null,
-		resumeCommand: null,
-		sessionId: null,
-		diff: { path: o.path, base: o.base, commit: o.commit },
-		name,
-		title: `${name} · diff`,
-	});
+	return openContent(
+		o.worktreeId,
+		o.projectId,
+		{
+			// Deterministic key → the same file+ref focuses its tab, no duplicates.
+			paneKey: `diff:${o.commit ?? ""}:${o.base ?? ""}:${o.path}`,
+			kind: "diff",
+			diff: { path: o.path, base: o.base, commit: o.commit },
+			file: undefined,
+			name,
+			title: `${name} · diff`,
+		},
+		o.preview ?? true,
+	);
 }
 
-/** Open (or focus, if already open) an editor tab for a working-tree file. */
-export function openFile(o: { worktreeId: string; projectId: string; path: string }): string {
+/** Open (or focus/preview-reuse) an editor tab for a working-tree file. */
+export function openFile(o: {
+	worktreeId: string;
+	projectId: string;
+	path: string;
+	preview?: boolean;
+}): string {
 	recordRecentFile(o.worktreeId, o.path);
-	const key = `file:${o.path}`;
-	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
-	if (existing) {
-		setActiveSession(existing.id);
-		return existing.id;
-	}
 	const name = o.path.split("/").pop() ?? o.path;
-	return openSession({
-		paneKey: key,
-		worktreeId: o.worktreeId,
-		projectId: o.projectId,
-		kind: "file",
-		commandId: null,
-		command: null,
-		resumeCommand: null,
-		sessionId: null,
-		file: { path: o.path },
-		name,
-		title: o.path,
-	});
+	return openContent(
+		o.worktreeId,
+		o.projectId,
+		{ paneKey: `file:${o.path}`, kind: "file", file: { path: o.path }, diff: undefined, name, title: o.path },
+		o.preview ?? true,
+	);
+}
+
+/** Promote a preview tab to a permanent one (on edit or double-click). */
+export function promoteTab(id: string) {
+	if (!state.sessions.some((s) => s.id === id && s.preview)) return;
+	set({ sessions: state.sessions.map((s) => (s.id === id ? { ...s, preview: false } : s)) });
 }
 
 /** Pane key of the focused session if it's in this worktree (else null). */
@@ -346,13 +396,28 @@ export function markExited(id: string) {
 
 export function closeSession(id: string) {
 	const closing = state.sessions.find((s) => s.id === id);
+	const wasActive = state.activeId === id;
 	const sessions = state.sessions.filter((s) => s.id !== id);
-	const activeId =
-		state.activeId === id ? (sessions.at(-1)?.id ?? null) : state.activeId;
+	const mru = state.mru.filter((m) => m !== id);
 	const layouts = closing
 		? withLayout(closing.worktreeId, removeTab(layoutFor(closing.worktreeId), sessionKey(closing)))
 		: state.layouts;
-	set({ sessions, activeId, open: sessions.length > 0 ? state.open : false, layouts });
+
+	// When closing the focused tab, go to the last tab we were on in the same
+	// worktree (per the MRU), not the array neighbour; fall back to the last
+	// remaining tab there, then anything.
+	let activeId = state.activeId;
+	if (wasActive) {
+		const wt = closing?.worktreeId;
+		activeId =
+			mru.find((m) => sessions.some((s) => s.id === m && s.worktreeId === wt)) ??
+			sessions.filter((s) => s.worktreeId === wt).at(-1)?.id ??
+			sessions.at(-1)?.id ??
+			null;
+	}
+	set({ sessions, activeId, open: sessions.length > 0 ? state.open : false, layouts, mru });
+	// Reflect the new focus in its group's active tab.
+	if (wasActive && activeId) setActiveSession(activeId);
 }
 
 export function setActiveSession(id: string) {

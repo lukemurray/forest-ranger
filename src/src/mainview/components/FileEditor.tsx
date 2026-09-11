@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { api } from "../rpc";
+import { promoteTab } from "../lib/terminalStore";
 import { notify } from "../lib/toast";
 import { useThemeMode, type ThemeMode } from "../lib/theme";
 import { monacoLang, monacoTheme } from "../lib/monaco";
@@ -14,7 +15,15 @@ function isDark(mode: ThemeMode): boolean {
 }
 
 /** Edit a working-tree file in Monaco. ⌘S / the Save button writes it to disk. */
-export function FileEditor({ worktreeId, path }: { worktreeId: string; path: string }) {
+export function FileEditor({
+	sessionId,
+	worktreeId,
+	path,
+}: {
+	sessionId: string;
+	worktreeId: string;
+	path: string;
+}) {
 	const [state, setState] = useState<{ content: string; binary: boolean } | null>(null);
 	const [dirty, setDirty] = useState(false);
 	const [saving, setSaving] = useState(false);
@@ -59,14 +68,17 @@ export function FileEditor({ worktreeId, path }: { worktreeId: string; path: str
 			fontSize: 12,
 		});
 		editorRef.current = editor;
-		editor.onDidChangeModelContent(() => setDirty(true));
+		editor.onDidChangeModelContent(() => {
+			setDirty(true);
+			promoteTab(sessionId); // an edit makes the preview tab permanent
+		});
 		editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void save());
 		saveRef.current = save;
 		return () => {
 			editor.dispose();
 			editorRef.current = null;
 		};
-	}, [state, path, worktreeId]);
+	}, [state, path, worktreeId, sessionId]);
 
 	// Theme is a global Monaco setting.
 	useEffect(() => {

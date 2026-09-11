@@ -149,6 +149,19 @@ export function setActive(root: PaneNode, groupId: string, tab: string): PaneNod
 	return mapGroup(root, groupId, (g) => ({ ...g, active: tab }));
 }
 
+/** Rename a tab key in place (used when a reused preview tab swaps its file). */
+export function renameTab(root: PaneNode, oldKey: string, newKey: string): PaneNode {
+	if (root.kind === "group") {
+		if (!root.tabs.includes(oldKey)) return root;
+		return {
+			...root,
+			tabs: root.tabs.map((t) => (t === oldKey ? newKey : t)),
+			active: root.active === oldKey ? newKey : root.active,
+		};
+	}
+	return { ...root, children: root.children.map((c) => renameTab(c, oldKey, newKey)) };
+}
+
 /** Set the fraction sizes of the split with `splitId`. */
 export function setSizes(root: PaneNode, splitId: string, sizes: number[]): PaneNode {
 	if (root.kind === "group") return root;

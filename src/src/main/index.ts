@@ -1080,7 +1080,17 @@ app.whenReady().then(() => {
 		Menu.buildFromTemplate([
 			{ role: "appMenu" },
 			{ role: "editMenu" },
-			{ role: "windowMenu" },
+			{
+				// Custom window menu so ⌘W is free for "close the focused tab" (handled in
+				// the renderer); window-close moves to ⇧⌘W.
+				label: "Window",
+				submenu: [
+					{ role: "minimize" },
+					{ role: "zoom" },
+					{ type: "separator" },
+					{ role: "close", accelerator: "Shift+CmdOrCtrl+W", label: "Close Window" },
+				],
+			},
 		]),
 	);
 
