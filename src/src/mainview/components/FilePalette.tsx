@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 import { api } from "../rpc";
 import { openDiff, openFile } from "../lib/terminalStore";
+import { recentRank } from "../lib/recentFiles";
 import { Modal } from "./ui/Modal";
 import { FileIcon } from "./icons";
 import styles from "./CommandPalette.module.css";
@@ -24,6 +25,7 @@ export function FilePalette() {
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [items, setItems] = useState<Item[]>([]);
+	const [recent, setRecent] = useState<Map<string, number>>(() => new Map());
 	const [sel, setSel] = useState(0);
 
 	// ⌘P / Ctrl+P — only meaningful inside a worktree.
@@ -46,6 +48,7 @@ export function FilePalette() {
 		if (!open || !worktreeId) return;
 		setQuery("");
 		setSel(0);
+		setRecent(recentRank(worktreeId));
 		Promise.all([
 			api.listFiles({ id: worktreeId }),
 			api.worktreeDetail({ id: worktreeId, base: null }),
@@ -68,20 +71,30 @@ export function FilePalette() {
 	}, [open, worktreeId]);
 
 	const results = useMemo(() => {
+		const rec = (p: string) => recent.get(p) ?? Infinity;
 		const q = query.trim().toLowerCase();
-		if (!q) return items.slice(0, 60);
+		if (!q) {
+			// No query: recently-opened first (in recency order), then the rest in
+			// listFiles order. Each file's diff entry stays right after it.
+			return items
+				.map((it, idx) => ({ it, idx }))
+				.sort((a, b) => rec(a.it.path) - rec(b.it.path) || a.idx - b.idx)
+				.slice(0, 60)
+				.map((x) => x.it);
+		}
 		const scored = items
-			.map((it) => {
+			.map((it, idx) => {
 				const i = it.path.toLowerCase().indexOf(q);
 				if (i === -1) return null;
 				// Prefer matches in the filename over the directory portion.
 				const rank = basename(it.path).toLowerCase().includes(q) ? 0 : 1;
-				return { it, rank, i };
+				return { it, rank, i, idx };
 			})
-			.filter((x): x is { it: Item; rank: number; i: number } => x !== null)
-			.sort((a, b) => a.rank - b.rank || a.i - b.i);
+			.filter((x): x is { it: Item; rank: number; i: number; idx: number } => x !== null)
+			// Relevance first, then recency, then original order.
+			.sort((a, b) => a.rank - b.rank || rec(a.it.path) - rec(b.it.path) || a.i - b.i || a.idx - b.idx);
 		return scored.slice(0, 60).map((x) => x.it);
-	}, [items, query]);
+	}, [items, query, recent]);
 
 	function activate(it: Item | undefined) {
 		if (!it || !worktreeId || !projectId) return;

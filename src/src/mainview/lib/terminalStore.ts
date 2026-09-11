@@ -10,6 +10,7 @@ import {
 	setSizes,
 	splitOffTab,
 } from "./paneLayout";
+import { recordRecentFile } from "./recentFiles";
 
 export type TermSession = {
 	id: string;
@@ -279,6 +280,7 @@ export function openDiff(o: {
 	base: string | null;
 	commit?: string;
 }): string {
+	recordRecentFile(o.worktreeId, o.path);
 	// Deterministic key → clicking the same file+ref focuses its tab, no duplicates.
 	const key = `diff:${o.commit ?? ""}:${o.base ?? ""}:${o.path}`;
 	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
@@ -304,6 +306,7 @@ export function openDiff(o: {
 
 /** Open (or focus, if already open) an editor tab for a working-tree file. */
 export function openFile(o: { worktreeId: string; projectId: string; path: string }): string {
+	recordRecentFile(o.worktreeId, o.path);
 	const key = `file:${o.path}`;
 	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
 	if (existing) {
