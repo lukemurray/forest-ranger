@@ -22,13 +22,15 @@ import {
 import { bus } from "../rpc";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
-import { CloseIcon, SparkleIcon, TerminalIcon } from "./icons";
+import { DiffView } from "./DiffView";
+import { CloseIcon, FileIcon, SparkleIcon, TerminalIcon } from "./icons";
 import styles from "./SessionWorkspace.module.css";
 
 /** Stop a session's process (explicit close) and drop the tab. */
 function endSession(s: TermSession) {
 	if (s.kind === "chat") bus.agentChatStop({ sessionId: s.sessionId ?? s.id });
-	else bus.termKill({ sessionId: s.id });
+	else if (s.kind === "terminal") bus.termKill({ sessionId: s.id });
+	// diff tabs have no process — just drop them.
 	closeSession(s.id);
 }
 
@@ -260,14 +262,21 @@ function GroupView({ node }: { node: PaneGroup }) {
 									initialPrompt={s.initialPrompt}
 									active={key === node.active}
 								/>
-							) : (
+							) : s.kind === "terminal" ? (
 								<TerminalPane
 									sessionId={s.id}
 									worktreeId={s.worktreeId}
 									commandId={s.commandId}
 									command={s.command}
 								/>
-							)}
+							) : s.diff ? (
+								<DiffView
+									worktreeId={s.worktreeId}
+									path={s.diff.path}
+									base={s.diff.base}
+									commit={s.diff.commit}
+								/>
+							) : null}
 						</div>
 					);
 				})}
@@ -343,7 +352,13 @@ function Tab({
 			onDoubleClick={() => c.startRename(s)}
 			title={`${s.title} — double-click to rename`}
 		>
-			{s.kind === "chat" ? <SparkleIcon size={12} /> : <TerminalIcon size={12} />}
+			{s.kind === "chat" ? (
+				<SparkleIcon size={12} />
+			) : s.kind === "terminal" ? (
+				<TerminalIcon size={12} />
+			) : (
+				<FileIcon size={12} />
+			)}
 			<span className={styles.tabLabel}>{s.name ?? tabLabel(s)}</span>
 			<span
 				className={styles.tabClose}

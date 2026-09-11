@@ -227,13 +227,13 @@
 	border-radius: var(--radius);
 	overflow: hidden;
 }
-.commit {
+.commitEntry {
 	border-bottom: 1px solid var(--border);
 }
-.commit:last-child {
+.commitEntry:last-child {
 	border-bottom: none;
 }
-.commitHead {
+.commitEntryHead {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -242,15 +242,15 @@
 	text-align: left;
 	color: var(--text);
 }
-.commitHead:hover {
+.commitEntryHead:hover {
 	background: var(--bg-hover);
 }
-.commitHead > svg {
+.commitEntryHead > svg {
 	color: var(--text-faint);
 	flex-shrink: 0;
 	transition: transform 0.15s ease;
 }
-.commitHead[data-panel-open] > svg {
+.commitEntryHead[data-panel-open] > svg {
 	transform: rotate(90deg);
 }
 .commitHash {
@@ -373,20 +373,20 @@
 	background: var(--bg-active);
 	color: var(--text-muted);
 }
-.file[data-kind="modified"] .kind {
+.fileRowOuter[data-kind="modified"] .kind {
 	color: var(--amber);
 	background: rgba(226, 179, 65, 0.16);
 }
-.file[data-kind="added"] .kind,
-.file[data-kind="untracked"] .kind {
+.fileRowOuter[data-kind="added"] .kind,
+.fileRowOuter[data-kind="untracked"] .kind {
 	color: var(--green);
 	background: rgba(78, 201, 165, 0.16);
 }
-.file[data-kind="deleted"] .kind {
+.fileRowOuter[data-kind="deleted"] .kind {
 	color: #e5746f;
 	background: rgba(229, 116, 111, 0.16);
 }
-.file[data-kind="conflicted"] .kind {
+.fileRowOuter[data-kind="conflicted"] .kind {
 	color: #e5484d;
 	background: rgba(229, 72, 77, 0.18);
 }

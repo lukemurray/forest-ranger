@@ -1,0 +1,47 @@
+.pane {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+	background: var(--bg-sidebar);
+}
+.header {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	flex-shrink: 0;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg);
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+.path {
+	color: var(--text);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	direction: rtl; /* keep the filename (right end) visible when truncating */
+	text-align: left;
+}
+.ref {
+	margin-left: auto;
+	flex-shrink: 0;
+	color: var(--text-faint);
+}
+.body {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+}
+.note {
+	padding: 10px 14px;
+	font-size: 12.5px;
+	color: var(--text-faint);
+	font-family: var(--font-mono);
+}
+/* react-diff-view's own `.diff` table is themed globally in index.css; this is just
+   the scroll wrapper. */
+.diff {
+	overflow-x: auto;
+}

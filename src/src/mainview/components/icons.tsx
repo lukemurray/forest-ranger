@@ -85,6 +85,15 @@ export const GitBranchIcon = ({ size = 15 }: Props) =>
 export const FolderIcon = ({ size = 15 }: Props) =>
 	svg(size, <path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z" />);
 
+export const FileIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+			<path d="M14 2v6h6" />
+		</>,
+	);
+
 export const CheckIcon = ({ size = 16 }: Props) =>
 	svg(size, <path d="m5 12 5 5L20 7" />);
 

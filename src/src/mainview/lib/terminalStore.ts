@@ -19,8 +19,10 @@ export type TermSession = {
 	worktreeId: string;
 	projectId: string;
 	title: string;
-	/** What renders this session in the dock: a PTY terminal or a native chat. */
-	kind: "terminal" | "chat";
+	/** What renders this session: a PTY terminal, a native chat, or a file diff. */
+	kind: "terminal" | "chat" | "diff";
+	/** diff only: which file diff to render (see DiffView). */
+	diff?: { path: string; base: string | null; commit?: string };
 	commandId: string | null;
 	/** Explicit command to run (e.g. an agent CLI); takes precedence over commandId. */
 	command: string | null;
@@ -150,7 +152,11 @@ export function getRestorableSessions(worktreeId?: string): RestorableSession[] 
 }
 
 function persist() {
-	const open: RestorableSession[] = state.sessions.map((s) => ({
+	// Diff tabs are ephemeral views (no process, re-derived from git) — don't persist
+	// them across restarts; they'd just be stale entries reconciled away anyway.
+	const open: RestorableSession[] = state.sessions
+		.filter((s) => s.kind !== "diff")
+		.map((s) => ({
 		paneKey: s.paneKey,
 		worktreeId: s.worktreeId,
 		projectId: s.projectId,
@@ -261,6 +267,37 @@ export function openSession(
 		layouts: withLayout(s.worktreeId, layout),
 	});
 	return id;
+}
+
+/** Open (or focus, if already open) a tab showing one file's diff. */
+export function openDiff(o: {
+	worktreeId: string;
+	projectId: string;
+	path: string;
+	base: string | null;
+	commit?: string;
+}): string {
+	// Deterministic key → clicking the same file+ref focuses its tab, no duplicates.
+	const key = `diff:${o.commit ?? ""}:${o.base ?? ""}:${o.path}`;
+	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === key);
+	if (existing) {
+		setActiveSession(existing.id);
+		return existing.id;
+	}
+	const name = o.path.split("/").pop() ?? o.path;
+	return openSession({
+		paneKey: key,
+		worktreeId: o.worktreeId,
+		projectId: o.projectId,
+		kind: "diff",
+		commandId: null,
+		command: null,
+		resumeCommand: null,
+		sessionId: null,
+		diff: { path: o.path, base: o.base, commit: o.commit },
+		name,
+		title: `${name} · diff`,
+	});
 }
 
 /** Pane key of the focused session if it's in this worktree (else null). */

@@ -1,23 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
-import {
-	Diff as DiffViewer,
-	Hunk,
-	markEdits,
-	parseDiff,
-	tokenize,
-	type HunkData,
-} from "react-diff-view";
-import { refractor } from "refractor";
-import "react-diff-view/style/index.css";
 import type {
 	ChangedFile,
 	ChangeKind,
-	FileDiff,
 	ListedCommit,
 	WorktreeDetail,
 } from "../../shared/types";
+import { openDiff } from "../lib/terminalStore";
 import { BranchCombobox } from "./BranchCombobox";
 import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
@@ -319,6 +309,7 @@ export function ReviewPanel({
 								files={uncommitted}
 								base={null}
 								worktreeId={worktree.id}
+								projectId={projectId}
 								staging={staging}
 							/>
 						</>
@@ -329,9 +320,15 @@ export function ReviewPanel({
 						files={committed}
 						base={base}
 						worktreeId={worktree.id}
+						projectId={projectId}
 						bodyOverride={
 							changesView === "commits" ? (
-								<CommitsView worktreeId={worktree.id} base={base} head={worktree.head} />
+								<CommitsView
+									worktreeId={worktree.id}
+									projectId={projectId}
+									base={base}
+									head={worktree.head}
+								/>
 							) : undefined
 						}
 						emptyText={
@@ -377,6 +374,7 @@ function ChangeSection({
 	files,
 	base,
 	worktreeId,
+	projectId,
 	right,
 	emptyText,
 	staging,
@@ -386,6 +384,7 @@ function ChangeSection({
 	files: ChangedFile[];
 	base: string | null;
 	worktreeId: string;
+	projectId: string;
 	right?: ReactNode;
 	emptyText?: string;
 	staging?: Staging;
@@ -393,7 +392,6 @@ function ChangeSection({
 	bodyOverride?: ReactNode;
 }) {
 	const [query, setQuery] = useState("");
-	const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
 
 	const ins = files.reduce((n, f) => n + (f.insertions ?? 0), 0);
 	const del = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
@@ -404,15 +402,6 @@ function ChangeSection({
 		[files, q],
 	);
 	const tree = useMemo(() => buildTree(filtered), [filtered]);
-
-	const setFileOpen = useCallback((path: string, next: boolean) => {
-		setOpenFiles((prev) => {
-			const n = new Set(prev);
-			if (next) n.add(path);
-			else n.delete(path);
-			return n;
-		});
-	}, []);
 
 	const showTools = files.length > 3;
 
@@ -435,11 +424,6 @@ function ChangeSection({
 							onChange={(e) => setQuery(e.target.value)}
 							spellCheck={false}
 						/>
-					)}
-					{!bodyOverride && openFiles.size > 0 && (
-						<button className={styles.toolButton} onClick={() => setOpenFiles(new Set())}>
-							Collapse all
-						</button>
 					)}
 					{!bodyOverride && files.length > 0 && (
 						<span className={styles.diffStat}>
@@ -467,8 +451,7 @@ function ChangeSection({
 									depth={0}
 									base={base}
 									worktreeId={worktreeId}
-									openFiles={openFiles}
-									setFileOpen={setFileOpen}
+									projectId={projectId}
 									forceOpen={q !== ""}
 									staging={staging}
 								/>
@@ -479,8 +462,7 @@ function ChangeSection({
 									depth={0}
 									base={base}
 									worktreeId={worktreeId}
-									open={openFiles.has(c.file.path)}
-									onOpenChange={(o) => setFileOpen(c.file.path, o)}
+									projectId={projectId}
 									staging={staging}
 								/>
 							),
@@ -526,10 +508,12 @@ function CommitsView({
 	worktreeId,
 	base,
 	head,
+	projectId,
 }: {
 	worktreeId: string;
 	base: string | null;
 	head: string | null;
+	projectId: string;
 }) {
 	const [commits, setCommits] = useState<ListedCommit[] | null>(null);
 	useEffect(() => {
@@ -549,16 +533,23 @@ function CommitsView({
 	return (
 		<div className={styles.commits}>
 			{commits.map((c) => (
-				<CommitRow key={c.hash} worktreeId={worktreeId} commit={c} />
+				<CommitRow key={c.hash} worktreeId={worktreeId} projectId={projectId} commit={c} />
 			))}
 		</div>
 	);
 }
 
-function CommitRow({ worktreeId, commit }: { worktreeId: string; commit: ListedCommit }) {
+function CommitRow({
+	worktreeId,
+	projectId,
+	commit,
+}: {
+	worktreeId: string;
+	projectId: string;
+	commit: ListedCommit;
+}) {
 	const [open, setOpen] = useState(false);
 	const [files, setFiles] = useState<ChangedFile[] | null>(null);
-	const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
 
 	useEffect(() => {
 		if (open && files === null) {
@@ -566,20 +557,11 @@ function CommitRow({ worktreeId, commit }: { worktreeId: string; commit: ListedC
 		}
 	}, [open, files, worktreeId, commit.hash]);
 
-	const setFileOpen = useCallback((path: string, next: boolean) => {
-		setOpenFiles((prev) => {
-			const n = new Set(prev);
-			if (next) n.add(path);
-			else n.delete(path);
-			return n;
-		});
-	}, []);
-
 	const tree = useMemo(() => (files ? buildTree(files) : null), [files]);
 
 	return (
-		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.commit}>
-			<Collapsible.Trigger className={styles.commitHead}>
+		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.commitEntry}>
+			<Collapsible.Trigger className={styles.commitEntryHead}>
 				<ChevronIcon size={12} />
 				<code className={styles.commitHash}>{commit.hash}</code>
 				<span className={styles.commitSubject}>{commit.subject}</span>
@@ -603,8 +585,7 @@ function CommitRow({ worktreeId, commit }: { worktreeId: string; commit: ListedC
 									base={null}
 									commit={commit.hash}
 									worktreeId={worktreeId}
-									openFiles={openFiles}
-									setFileOpen={setFileOpen}
+									projectId={projectId}
 									forceOpen={false}
 								/>
 							) : (
@@ -615,8 +596,7 @@ function CommitRow({ worktreeId, commit }: { worktreeId: string; commit: ListedC
 									base={null}
 									commit={commit.hash}
 									worktreeId={worktreeId}
-									open={openFiles.has(c.file.path)}
-									onOpenChange={(o) => setFileOpen(c.file.path, o)}
+									projectId={projectId}
 								/>
 							),
 						)}
@@ -696,8 +676,7 @@ function FolderNode({
 	base,
 	commit,
 	worktreeId,
-	openFiles,
-	setFileOpen,
+	projectId,
 	forceOpen,
 	staging,
 }: {
@@ -706,8 +685,7 @@ function FolderNode({
 	base: string | null;
 	commit?: string;
 	worktreeId: string;
-	openFiles: Set<string>;
-	setFileOpen: (path: string, next: boolean) => void;
+	projectId: string;
 	forceOpen: boolean;
 	staging?: Staging;
 }) {
@@ -757,8 +735,7 @@ function FolderNode({
 							base={base}
 							commit={commit}
 							worktreeId={worktreeId}
-							openFiles={openFiles}
-							setFileOpen={setFileOpen}
+							projectId={projectId}
 							forceOpen={forceOpen}
 							staging={staging}
 						/>
@@ -770,8 +747,7 @@ function FolderNode({
 							base={base}
 							commit={commit}
 							worktreeId={worktreeId}
-							open={openFiles.has(c.file.path)}
-							onOpenChange={(o) => setFileOpen(c.file.path, o)}
+							projectId={projectId}
 							staging={staging}
 						/>
 					),
@@ -783,89 +759,57 @@ function FolderNode({
 
 function FileRow({
 	worktreeId,
+	projectId,
 	file,
 	base,
 	commit,
 	depth,
-	open,
-	onOpenChange,
 	staging,
 }: {
 	worktreeId: string;
+	projectId: string;
 	file: ChangedFile;
 	base: string | null;
-	/** When set, the diff shows this single commit's change to the file. */
+	/** When set, the diff opens scoped to this single commit's change. */
 	commit?: string;
 	depth: number;
-	open: boolean;
-	onOpenChange: (open: boolean) => void;
 	staging?: Staging;
 }) {
-	const [diff, setDiff] = useState<FileDiff | null>(null);
-	const fetching = useRef(false);
 	const name = basename(file.path);
 	const staged = staging?.isStaged(file.path) ?? false;
 
-	useEffect(() => {
-		if (open && diff === null && !fetching.current) {
-			fetching.current = true;
-			api
-				.fileDiff({ id: worktreeId, path: file.path, base, commit })
-				.then(setDiff)
-				.finally(() => {
-					fetching.current = false;
-				});
-		}
-	}, [open, diff, worktreeId, file.path, base, commit]);
-
 	return (
-		<Collapsible.Root
-			open={open}
-			onOpenChange={onOpenChange}
-			className={styles.file}
-			data-kind={file.kind}
-		>
-			<div className={styles.fileRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
-				{staging && (
-					<input
-						type="checkbox"
-						className={styles.stageCheck}
-						checked={staged}
-						onChange={() => staging.onToggle(file.path)}
-						title={staged ? "Staged — click to unstage" : "Click to stage"}
-					/>
-				)}
-				<Collapsible.Trigger className={styles.fileRow}>
-					<ChevronIcon size={13} />
-					<span className={styles.kind} title={file.kind}>
-						{KIND_LABEL[file.kind]}
-					</span>
-					<span className={styles.path} title={file.path}>
-						{name}
-					</span>
-					<span className={styles.lines}>
-						{file.insertions != null && file.insertions > 0 && (
-							<span className={styles.add}>+{file.insertions}</span>
-						)}
-						{file.deletions != null && file.deletions > 0 && (
-							<span className={styles.del}>−{file.deletions}</span>
-						)}
-					</span>
-				</Collapsible.Trigger>
-			</div>
-
-			<Collapsible.Panel className={styles.diffPanel}>
-				{diff === null ? (
-					<div className={styles.diffNote}>Loading diff…</div>
-				) : diff.binary ? (
-					<div className={styles.diffNote}>Binary file — no text diff.</div>
-				) : diff.diff.trim() === "" ? (
-					<div className={styles.diffNote}>No diff available.</div>
-				) : (
-					<Diff diffText={diff.diff} path={diff.path} />
-				)}
-			</Collapsible.Panel>
-		</Collapsible.Root>
+		<div className={styles.fileRowOuter} style={{ paddingLeft: 12 + depth * 14 }} data-kind={file.kind}>
+			{staging && (
+				<input
+					type="checkbox"
+					className={styles.stageCheck}
+					checked={staged}
+					onChange={() => staging.onToggle(file.path)}
+					title={staged ? "Staged — click to unstage" : "Click to stage"}
+				/>
+			)}
+			<button
+				className={styles.fileRow}
+				onClick={() => openDiff({ worktreeId, projectId, path: file.path, base, commit })}
+				title={`${file.path} — open diff`}
+			>
+				<span className={styles.kind} title={file.kind}>
+					{KIND_LABEL[file.kind]}
+				</span>
+				<span className={styles.path} title={file.path}>
+					{name}
+				</span>
+				<span className={styles.lines}>
+					{file.insertions != null && file.insertions > 0 && (
+						<span className={styles.add}>+{file.insertions}</span>
+					)}
+					{file.deletions != null && file.deletions > 0 && (
+						<span className={styles.del}>−{file.deletions}</span>
+					)}
+				</span>
+			</button>
+		</div>
 	);
 }
 
@@ -920,48 +864,3 @@ function CommitBox({
 	);
 }
 
-const LANG_BY_EXT: Record<string, string> = {
-	ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
-	mjs: "javascript", cjs: "javascript", json: "json", css: "css",
-	scss: "scss", less: "less", html: "markup", xml: "markup", vue: "markup",
-	svelte: "markup", md: "markdown", mdx: "markdown", py: "python", rb: "ruby",
-	go: "go", rs: "rust", java: "java", kt: "kotlin", c: "c", h: "c",
-	cpp: "cpp", cc: "cpp", hpp: "cpp", cs: "csharp", php: "php", swift: "swift",
-	sh: "bash", bash: "bash", zsh: "bash", yml: "yaml", yaml: "yaml",
-	toml: "toml", sql: "sql", graphql: "graphql", gql: "graphql",
-};
-
-function langForPath(path: string): string | undefined {
-	const ext = path.split(".").pop()?.toLowerCase();
-	const lang = ext ? LANG_BY_EXT[ext] : undefined;
-	return lang && refractor.registered(lang) ? lang : undefined;
-}
-
-function Diff({ diffText, path }: { diffText: string; path: string }) {
-	const files = parseDiff(diffText);
-	const file = files[0];
-	if (!file || file.hunks.length === 0) {
-		return <div className={styles.diffNote}>No diff available.</div>;
-	}
-
-	const lang = langForPath(path);
-	let tokens;
-	try {
-		tokens = tokenize(file.hunks as HunkData[], {
-			highlight: !!lang,
-			refractor,
-			language: lang as string,
-			enhancers: [markEdits(file.hunks as HunkData[], { type: "block" })],
-		});
-	} catch {
-		tokens = undefined;
-	}
-
-	return (
-		<div className={styles.diff}>
-			<DiffViewer viewType="unified" diffType={file.type} hunks={file.hunks} tokens={tokens}>
-				{(hunks) => hunks.map((h) => <Hunk key={h.content} hunk={h} />)}
-			</DiffViewer>
-		</div>
-	);
-}
