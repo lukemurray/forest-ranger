@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
 import type {
@@ -422,7 +422,6 @@ function ChangeSection({
 		() => (q ? files.filter((f) => f.path.toLowerCase().includes(q)) : files),
 		[files, q],
 	);
-	const tree = useMemo(() => buildTree(filtered), [filtered]);
 
 	const showTools = files.length > 3;
 
@@ -463,32 +462,14 @@ function ChangeSection({
 				) : filtered.length === 0 ? (
 					<p className={styles.empty}>No files match “{query}”.</p>
 				) : (
-					<div className={styles.files}>
-						{tree.children.map((c) =>
-							c.type === "dir" ? (
-								<FolderNode
-									key={c.path}
-									node={c}
-									depth={0}
-									base={base}
-									worktreeId={worktreeId}
-									projectId={projectId}
-									forceOpen={q !== ""}
-									staging={staging}
-								/>
-							) : (
-								<FileRow
-									key={c.file.path}
-									file={c.file}
-									depth={0}
-									base={base}
-									worktreeId={worktreeId}
-									projectId={projectId}
-									staging={staging}
-								/>
-							),
-						)}
-					</div>
+					<FileTree
+						files={filtered}
+						showStats
+						staging={staging}
+						defaultExpanded
+						forceOpen={q !== ""}
+						onOpen={(f) => openDiff({ worktreeId, projectId, path: f.path, base })}
+					/>
 				)}
 			</Collapsible.Panel>
 		</Collapsible.Root>
@@ -511,16 +492,6 @@ type TreeEntry = TreeFile | TreeDir;
 
 function basename(path: string): string {
 	return path.split("/").pop() ?? path;
-}
-
-/** All file paths under a tree node, depth-first. */
-function filePaths(node: TreeDir): string[] {
-	const out: string[] = [];
-	for (const c of node.children) {
-		if (c.type === "dir") out.push(...filePaths(c));
-		else out.push(c.file.path);
-	}
-	return out;
 }
 
 /** Commits view: the branch's commits vs base, each expandable to its files.
@@ -578,8 +549,6 @@ function CommitRow({
 		}
 	}, [open, files, worktreeId, commit.hash]);
 
-	const tree = useMemo(() => (files ? buildTree(files) : null), [files]);
-
 	return (
 		<Collapsible.Root open={open} onOpenChange={setOpen} className={styles.commitEntry}>
 			<Collapsible.Trigger className={styles.commitEntryHead}>
@@ -595,44 +564,258 @@ function CommitRow({
 			<Collapsible.Panel>
 				{files === null ? (
 					<p className={styles.empty}>Loading…</p>
-				) : tree ? (
-					<div className={styles.files}>
-						{tree.children.map((c) =>
-							c.type === "dir" ? (
-								<FolderNode
-									key={c.path}
-									node={c}
-									depth={0}
-									base={null}
-									commit={commit.hash}
-									worktreeId={worktreeId}
-									projectId={projectId}
-									forceOpen={false}
-								/>
-							) : (
-								<FileRow
-									key={c.file.path}
-									file={c.file}
-									depth={0}
-									base={null}
-									commit={commit.hash}
-									worktreeId={worktreeId}
-									projectId={projectId}
-								/>
-							),
-						)}
-					</div>
-				) : null}
+				) : (
+					<FileTree
+						files={files}
+						showStats
+						defaultExpanded
+						onOpen={(f) => openDiff({ worktreeId, projectId, path: f.path, base: null, commit: commit.hash })}
+					/>
+				)}
 			</Collapsible.Panel>
 		</Collapsible.Root>
 	);
 }
 
-/** Whole-repo file browser (all tracked + untracked files). Clicking a file opens
- *  it in a Monaco editor tab. */
+/** One visible row of the flattened file tree. */
+type FlatNode = {
+	path: string;
+	name: string;
+	depth: number;
+	isDir: boolean;
+	count?: number;
+	ins?: number;
+	del?: number;
+	expanded?: boolean;
+	file?: ChangedFile;
+};
+
+/** Flatten the tree to the rows currently visible (a folder's children only when
+ *  it's expanded), in display order — the model the keyboard nav walks. */
+function flattenTree(dir: TreeDir, isOpen: (path: string) => boolean, depth = 0): FlatNode[] {
+	const out: FlatNode[] = [];
+	for (const child of dir.children) {
+		if (child.type === "dir") {
+			const open = isOpen(child.path);
+			out.push({
+				path: child.path,
+				name: child.name,
+				depth,
+				isDir: true,
+				count: child.count,
+				ins: child.ins,
+				del: child.del,
+				expanded: open,
+			});
+			if (open) out.push(...flattenTree(child, isOpen, depth + 1));
+		} else {
+			out.push({ path: child.file.path, name: basename(child.file.path), depth, isDir: false, file: child.file });
+		}
+	}
+	return out;
+}
+
+/**
+ * The shared file tree: a keyboard-navigable ARIA tree (↑/↓ move, →/← expand or
+ * step, Enter/Space activate a file or toggle a folder, "s" stages when staging is
+ * enabled, Home/End jump). `showStats` adds the change kind + ±line counts; `onOpen`
+ * is what activating a file does (open a diff, or a file in the editor).
+ */
+function FileTree({
+	files,
+	onOpen,
+	showStats,
+	staging,
+	forceOpen,
+	defaultExpanded,
+}: {
+	files: ChangedFile[];
+	onOpen: (file: ChangedFile) => void;
+	showStats?: boolean;
+	staging?: Staging;
+	forceOpen?: boolean;
+	/** Start with all folders open (they can still be collapsed individually). */
+	defaultExpanded?: boolean;
+}) {
+	// `overrides` holds folders toggled *away* from the default: when defaultExpanded
+	// it's the collapsed ones, otherwise the expanded ones. So new folders follow the
+	// default and manual toggles are remembered across data refreshes.
+	const [overrides, setOverrides] = useState<Set<string>>(() => new Set());
+	const [focusIdx, setFocusIdx] = useState(0);
+	const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+	const isOpen = useCallback(
+		(path: string) => forceOpen || (defaultExpanded ? !overrides.has(path) : overrides.has(path)),
+		[forceOpen, defaultExpanded, overrides],
+	);
+	const tree = useMemo(() => buildTree(files), [files]);
+	const flat = useMemo(() => flattenTree(tree, isOpen), [tree, isOpen]);
+
+	useEffect(() => {
+		if (focusIdx > flat.length - 1) setFocusIdx(Math.max(0, flat.length - 1));
+	}, [flat.length, focusIdx]);
+
+	function focusRow(i: number) {
+		const n = Math.max(0, Math.min(i, flat.length - 1));
+		setFocusIdx(n);
+		itemRefs.current[n]?.focus();
+	}
+	function toggle(path: string, open?: boolean) {
+		const want = open ?? !isOpen(path);
+		setOverrides((prev) => {
+			const s = new Set(prev);
+			// membership means collapsed (defaultExpanded) or expanded (otherwise)
+			const member = defaultExpanded ? !want : want;
+			if (member) s.add(path);
+			else s.delete(path);
+			return s;
+		});
+	}
+	function stageNode(node: FlatNode) {
+		if (!staging) return;
+		if (node.file) {
+			staging.onToggle(node.file.path);
+		} else {
+			const under = files.filter((f) => f.path === node.path || f.path.startsWith(node.path + "/"));
+			const allStaged = under.length > 0 && under.every((f) => staging.isStaged(f.path));
+			staging.onSetMany(under.map((f) => f.path), !allStaged);
+		}
+	}
+	function activate(node: FlatNode) {
+		if (node.isDir) toggle(node.path);
+		else if (node.file) onOpen(node.file);
+	}
+	function onKeyDown(e: React.KeyboardEvent) {
+		const node = flat[focusIdx];
+		if (!node) return;
+		switch (e.key) {
+			case "ArrowDown":
+				e.preventDefault();
+				focusRow(focusIdx + 1);
+				break;
+			case "ArrowUp":
+				e.preventDefault();
+				focusRow(focusIdx - 1);
+				break;
+			case "Home":
+				e.preventDefault();
+				focusRow(0);
+				break;
+			case "End":
+				e.preventDefault();
+				focusRow(flat.length - 1);
+				break;
+			case "ArrowRight":
+				e.preventDefault();
+				if (node.isDir && !node.expanded) toggle(node.path, true);
+				else if (node.isDir) focusRow(focusIdx + 1);
+				break;
+			case "ArrowLeft":
+				e.preventDefault();
+				if (node.isDir && node.expanded) {
+					toggle(node.path, false);
+				} else {
+					for (let i = focusIdx - 1; i >= 0; i--) {
+						if (flat[i].depth < node.depth) {
+							focusRow(i);
+							break;
+						}
+					}
+				}
+				break;
+			case "s":
+			case "S":
+				if (staging) {
+					e.preventDefault();
+					stageNode(node);
+				}
+				break;
+			case "Enter":
+			case " ":
+				e.preventDefault();
+				activate(node);
+				break;
+		}
+	}
+
+	return (
+		// eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+		<div className={styles.files} role="tree" onKeyDown={onKeyDown}>
+			{flat.map((n, i) => {
+				const under =
+					staging && n.isDir
+						? files.filter((f) => f.path === n.path || f.path.startsWith(n.path + "/"))
+						: null;
+				const stagedN = under ? under.reduce((c, f) => c + (staging!.isStaged(f.path) ? 1 : 0), 0) : 0;
+				const allStaged = under ? under.length > 0 && stagedN === under.length : false;
+				return (
+					<div
+						key={n.path}
+						ref={(el) => {
+							itemRefs.current[i] = el;
+						}}
+						role="treeitem"
+						aria-level={n.depth + 1}
+						aria-expanded={n.isDir ? !!n.expanded : undefined}
+						tabIndex={i === focusIdx ? 0 : -1}
+						className={styles.treeRow}
+						data-kind={n.file?.kind}
+						style={{ paddingLeft: 10 + n.depth * 14 }}
+						onClick={() => {
+							setFocusIdx(i);
+							activate(n);
+						}}
+						title={n.path}
+					>
+						{staging && (
+							<input
+								type="checkbox"
+								className={styles.stageCheck}
+								checked={n.file ? staging.isStaged(n.file.path) : allStaged}
+								ref={(el) => {
+									if (el) el.indeterminate = !n.file && stagedN > 0 && !allStaged;
+								}}
+								onClick={(e) => e.stopPropagation()}
+								onChange={() => stageNode(n)}
+								tabIndex={-1}
+								title={n.isDir ? "Stage folder" : "Stage file"}
+							/>
+						)}
+						{n.isDir ? (
+							<span className={styles.treeChevron} data-open={n.expanded || undefined}>
+								<ChevronIcon size={12} />
+							</span>
+						) : (
+							<span className={styles.treeChevronSpacer} />
+						)}
+						{n.isDir ? (
+							<FolderIcon size={13} />
+						) : showStats && n.file ? (
+							<span className={styles.kind} title={n.file.kind}>
+								{KIND_LABEL[n.file.kind]}
+							</span>
+						) : (
+							<FileIcon size={13} />
+						)}
+						<span className={styles.treeName}>{n.name}</span>
+						<span className={styles.treeMeta}>
+							{n.isDir && <span className={styles.dirMeta}>{n.count}</span>}
+							{showStats && (n.ins ?? 0) > 0 && <span className={styles.add}>+{n.ins}</span>}
+							{showStats && (n.del ?? 0) > 0 && <span className={styles.del}>−{n.del}</span>}
+						</span>
+					</div>
+				);
+			})}
+		</div>
+	);
+}
+
+/** Whole-repo file browser (all tracked + untracked files). Clicking/activating a
+ *  file opens it in a Monaco editor tab. */
 function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId: string }) {
 	const [paths, setPaths] = useState<string[] | null>(null);
 	const [query, setQuery] = useState("");
+
 	useEffect(() => {
 		let live = true;
 		api.listFiles({ id: worktreeId }).then((p) => live && setPaths(p));
@@ -642,22 +825,18 @@ function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId:
 	}, [worktreeId]);
 
 	const q = query.trim().toLowerCase();
-	const filtered = useMemo(
-		() => (paths ? (q ? paths.filter((p) => p.toLowerCase().includes(q)) : paths) : []),
-		[paths, q],
-	);
-	const tree = useMemo(
+	const files = useMemo(
 		() =>
-			buildTree(
-				filtered.map((p) => ({
+			(paths ?? [])
+				.filter((p) => !q || p.toLowerCase().includes(q))
+				.map((p) => ({
 					path: p,
 					kind: "modified" as ChangeKind,
 					insertions: null,
 					deletions: null,
 					staged: false,
 				})),
-			),
-		[filtered],
+		[paths, q],
 	);
 
 	return (
@@ -674,111 +853,16 @@ function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId:
 			<div className={styles.browserScroll}>
 				{paths === null ? (
 					<p className={styles.empty}>Loading…</p>
-				) : filtered.length === 0 ? (
+				) : files.length === 0 ? (
 					<p className={styles.empty}>{q ? `No files match “${query}”.` : "No files."}</p>
 				) : (
-					<div className={styles.files}>
-						{tree.children.map((c) =>
-							c.type === "dir" ? (
-								<BrowserFolder
-									key={c.path}
-									node={c}
-									depth={0}
-									worktreeId={worktreeId}
-									projectId={projectId}
-									forceOpen={q !== ""}
-								/>
-							) : (
-								<BrowserFile
-									key={c.file.path}
-									file={c.file}
-									depth={0}
-									worktreeId={worktreeId}
-									projectId={projectId}
-								/>
-							),
-						)}
-					</div>
+					<FileTree
+						files={files}
+						forceOpen={q !== ""}
+						onOpen={(f) => openFile({ worktreeId, projectId, path: f.path })}
+					/>
 				)}
 			</div>
-		</div>
-	);
-}
-
-function BrowserFolder({
-	node,
-	depth,
-	worktreeId,
-	projectId,
-	forceOpen,
-}: {
-	node: TreeDir;
-	depth: number;
-	worktreeId: string;
-	projectId: string;
-	forceOpen: boolean;
-}) {
-	const [open, setOpen] = useState(false);
-	const isOpen = forceOpen || open;
-	return (
-		<Collapsible.Root open={isOpen} onOpenChange={setOpen} className={styles.treeDir}>
-			<div className={styles.dirRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
-				<Collapsible.Trigger className={styles.dirRow}>
-					<ChevronIcon size={12} />
-					<FolderIcon size={13} />
-					<span className={styles.dirName}>{node.name}</span>
-					<span className={styles.dirMeta}>{node.count}</span>
-				</Collapsible.Trigger>
-			</div>
-			<Collapsible.Panel>
-				{node.children.map((c) =>
-					c.type === "dir" ? (
-						<BrowserFolder
-							key={c.path}
-							node={c}
-							depth={depth + 1}
-							worktreeId={worktreeId}
-							projectId={projectId}
-							forceOpen={forceOpen}
-						/>
-					) : (
-						<BrowserFile
-							key={c.file.path}
-							file={c.file}
-							depth={depth + 1}
-							worktreeId={worktreeId}
-							projectId={projectId}
-						/>
-					),
-				)}
-			</Collapsible.Panel>
-		</Collapsible.Root>
-	);
-}
-
-function BrowserFile({
-	file,
-	depth,
-	worktreeId,
-	projectId,
-}: {
-	file: ChangedFile;
-	depth: number;
-	worktreeId: string;
-	projectId: string;
-}) {
-	return (
-		<div className={styles.fileRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
-			<button
-				className={styles.fileRow}
-				onClick={() => openFile({ worktreeId, projectId, path: file.path })}
-				title={`${file.path} — open`}
-			>
-				<FileIcon size={13} />
-				<span className={styles.path} title={file.path}>
-					{basename(file.path)}
-				</span>
-			</button>
 		</div>
 	);
 }
@@ -844,149 +928,6 @@ function aggregate(entry: TreeEntry): { count: number; ins: number; del: number 
 	entry.ins = ins;
 	entry.del = del;
 	return { count, ins, del };
-}
-
-function FolderNode({
-	node,
-	depth,
-	base,
-	commit,
-	worktreeId,
-	projectId,
-	forceOpen,
-	staging,
-}: {
-	node: TreeDir;
-	depth: number;
-	base: string | null;
-	commit?: string;
-	worktreeId: string;
-	projectId: string;
-	forceOpen: boolean;
-	staging?: Staging;
-}) {
-	const [open, setOpen] = useState(true);
-	const isOpen = forceOpen || open;
-
-	const paths = useMemo(() => filePaths(node), [node]);
-	const stagedN = staging ? paths.reduce((n, p) => n + (staging.isStaged(p) ? 1 : 0), 0) : 0;
-	const allStaged = staging != null && paths.length > 0 && stagedN === paths.length;
-	const someStaged = stagedN > 0 && !allStaged;
-	const checkRef = useRef<HTMLInputElement>(null);
-	useEffect(() => {
-		if (checkRef.current) checkRef.current.indeterminate = someStaged;
-	}, [someStaged]);
-
-	return (
-		<Collapsible.Root open={isOpen} onOpenChange={setOpen} className={styles.treeDir}>
-			<div className={styles.dirRowOuter} style={{ paddingLeft: 12 + depth * 14 }}>
-				{staging && (
-					<input
-						ref={checkRef}
-						type="checkbox"
-						className={styles.stageCheck}
-						checked={allStaged}
-						onChange={() => staging.onSetMany(paths, !allStaged)}
-						title={allStaged ? "Staged — click to unstage folder" : "Click to stage folder"}
-					/>
-				)}
-				<Collapsible.Trigger className={styles.dirRow}>
-					<ChevronIcon size={12} />
-					<FolderIcon size={13} />
-					<span className={styles.dirName}>{node.name}</span>
-					<span className={styles.dirMeta}>
-						{node.count}
-						{node.ins > 0 && <span className={styles.add}> +{node.ins}</span>}
-						{node.del > 0 && <span className={styles.del}> −{node.del}</span>}
-					</span>
-				</Collapsible.Trigger>
-			</div>
-			<Collapsible.Panel>
-				{node.children.map((c) =>
-					c.type === "dir" ? (
-						<FolderNode
-							key={c.path}
-							node={c}
-							depth={depth + 1}
-							base={base}
-							commit={commit}
-							worktreeId={worktreeId}
-							projectId={projectId}
-							forceOpen={forceOpen}
-							staging={staging}
-						/>
-					) : (
-						<FileRow
-							key={c.file.path}
-							file={c.file}
-							depth={depth + 1}
-							base={base}
-							commit={commit}
-							worktreeId={worktreeId}
-							projectId={projectId}
-							staging={staging}
-						/>
-					),
-				)}
-			</Collapsible.Panel>
-		</Collapsible.Root>
-	);
-}
-
-function FileRow({
-	worktreeId,
-	projectId,
-	file,
-	base,
-	commit,
-	depth,
-	staging,
-}: {
-	worktreeId: string;
-	projectId: string;
-	file: ChangedFile;
-	base: string | null;
-	/** When set, the diff opens scoped to this single commit's change. */
-	commit?: string;
-	depth: number;
-	staging?: Staging;
-}) {
-	const name = basename(file.path);
-	const staged = staging?.isStaged(file.path) ?? false;
-
-	return (
-		<div className={styles.fileRowOuter} style={{ paddingLeft: 12 + depth * 14 }} data-kind={file.kind}>
-			{staging && (
-				<input
-					type="checkbox"
-					className={styles.stageCheck}
-					checked={staged}
-					onChange={() => staging.onToggle(file.path)}
-					title={staged ? "Staged — click to unstage" : "Click to stage"}
-				/>
-			)}
-			<button
-				className={styles.fileRow}
-				onClick={() => openDiff({ worktreeId, projectId, path: file.path, base, commit })}
-				title={`${file.path} — open diff`}
-			>
-				<span className={styles.kind} title={file.kind}>
-					{KIND_LABEL[file.kind]}
-				</span>
-				<span className={styles.path} title={file.path}>
-					{name}
-				</span>
-				<span className={styles.lines}>
-					{file.insertions != null && file.insertions > 0 && (
-						<span className={styles.add}>+{file.insertions}</span>
-					)}
-					{file.deletions != null && file.deletions > 0 && (
-						<span className={styles.del}>−{file.deletions}</span>
-					)}
-				</span>
-			</button>
-		</div>
-	);
 }
 
 function CommitBox({
