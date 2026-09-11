@@ -116,6 +116,10 @@
 	/* Allow the list to shrink below its content and scroll, so the pinned
 	   Settings footer never gets pushed off-screen. */
 	min-height: 0;
+	/* Full-bleed to the sidebar's right edge so the scrollbar sits at the edge, not
+	   inset by the sidebar's 8px padding; padding-right keeps the rows aligned. */
+	margin-right: -8px;
+	padding-right: 8px;
 }
 
 .empty {
