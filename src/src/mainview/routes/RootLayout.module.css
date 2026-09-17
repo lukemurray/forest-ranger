@@ -15,7 +15,7 @@
 	position: absolute;
 	top: 0;
 	bottom: 0;
-	width: 6px;
+	width: 8px;
 	transform: translateX(-50%);
 	cursor: ew-resize;
 	z-index: 10;

@@ -204,12 +204,14 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 	const activities = await Promise.all(
 		gitEntries.map((e) => worktreeActivity(e.path)),
 	);
+	const chatActivity = latestChatByWorktree();
 
 	return gitEntries
 		.map((entry, i): Worktree => {
 			const row = stored.get(entry.path);
+			const id = worktreeId(project.id, entry.path);
 			return {
-				id: worktreeId(project.id, entry.path),
+				id,
 				projectId: project.id,
 				path: entry.path,
 				branch: entry.branch,
@@ -219,10 +221,22 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 				isDetached: entry.isDetached,
 				isLocked: entry.isLocked,
 				lastOpenedAt: row?.last_opened_at ?? null,
-				lastActivityAt: activities[i]!,
+				// Recency = the most recent of commit, uncommitted edit, or chat here.
+				lastActivityAt: Math.max(activities[i]!, chatActivity.get(id) ?? 0),
 			};
 		})
 		.sort(recencyDesc);
+}
+
+/** Newest chat `updatedAt` per worktree, so recency reflects agent work too. */
+function latestChatByWorktree(): Map<string, number> {
+	const m = new Map<string, number>();
+	for (const meta of listChatLogs()) {
+		if (!meta.worktreeId) continue;
+		const cur = m.get(meta.worktreeId) ?? 0;
+		if (meta.updatedAt > cur) m.set(meta.worktreeId, meta.updatedAt);
+	}
+	return m;
 }
 
 function recencyDesc(a: Worktree, b: Worktree): number {
@@ -420,7 +434,7 @@ const handlers: RpcHandlers = {
 					isDetached: entry.isDetached,
 					isLocked: entry.isLocked,
 					lastOpenedAt: row.last_opened_at,
-					lastActivityAt: activity,
+					lastActivityAt: Math.max(activity, latestChatByWorktree().get(id) ?? 0),
 				};
 
 				return {
@@ -643,10 +657,12 @@ const handlers: RpcHandlers = {
 				// out that branch (named `foo`) so the worktree reflects it; otherwise
 				// fall back to a generated name.
 				const remoteBase = base && /^origin\//.test(base) ? base.slice("origin/".length) : null;
-				// Detached review: the dir is named after the reviewed ref (base), prefixed.
-				const reviewName = detach && base ? `review-${remoteBase ?? base}` : null;
+				// Review checks out the *actual* branch (so edits land on it). `detach`
+				// from the dialog now means "review mode": the target branch is `base`
+				// (its local name when remote).
+				const reviewBranch = detach && base ? (remoteBase ?? base) : null;
 				const branch =
-					reviewName ||
+					reviewBranch ||
 					name.trim() ||
 					remoteBase ||
 					`worktree-${Math.random().toString(36).slice(2, 8)}`;
@@ -668,14 +684,23 @@ const handlers: RpcHandlers = {
 					wtPath = join(parent, `${dirName}-${n}`);
 				}
 
-				// Detached review checks out `base` (the ref to review) directly.
-				const resolvedBase = detach ? null : await resolveBaseBranch(project.path, base);
+				// Review mode: if the branch already has a worktree (usually your own),
+				// reuse it — you review there with a fresh chat, no second checkout (git
+				// forbids checking a branch out twice). Otherwise (the common case: some-
+				// one else's branch) check it out on its real branch so edits land on it.
+				if (reviewBranch) {
+					const entries = await gitListWorktrees(project.path);
+					const existing = entries.find((e) => e.branch === reviewBranch);
+					if (existing) {
+						return { ok: true, worktreeId: worktreeId(projectId, existing.path), path: existing.path };
+					}
+				}
 				const res = await gitAddWorktree(
 					project.path,
 					wtPath,
-					detach && base ? base : branch,
-					resolvedBase,
-					!!detach,
+					branch,
+					reviewBranch ? base : await resolveBaseBranch(project.path, base),
+					false,
 				);
 				if (!res.ok) return { ok: false, error: res.error };
 
@@ -686,11 +711,6 @@ const handlers: RpcHandlers = {
 					path: wtPath,
 					createdAt: now(),
 				});
-				// A review worktree is detached (no branch label), so name it after the
-				// branch under review — otherwise it shows as "detached" everywhere.
-				if (detach && base) {
-					worktreesRepo.setName(id, `review/${remoteBase ?? base}`);
-				}
 				console.log(`[createWorktree] ${branch} -> ${wtPath}`);
 				return { ok: true, worktreeId: id, path: wtPath };
 			},

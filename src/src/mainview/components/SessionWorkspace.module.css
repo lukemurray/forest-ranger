@@ -35,21 +35,30 @@
 	min-height: 0;
 	overflow: hidden;
 }
+/* Resizers double as the visible divider between panes: a persistent 1px line
+   drawn in the content box, with transparent padding as a wider grab zone. */
 .resizerV {
-	width: 6px;
+	width: 8px;
 	flex-shrink: 0;
 	cursor: ew-resize;
-	background: transparent;
+	padding: 0 3.5px;
+	background: var(--border-strong);
+	background-clip: content-box;
 }
 .resizerH {
-	height: 6px;
+	height: 8px;
 	flex-shrink: 0;
 	cursor: ns-resize;
-	background: transparent;
+	padding: 3.5px 0;
+	background: var(--border-strong);
+	background-clip: content-box;
 }
+/* Hover fills the whole grab zone with a soft green band, matching the sidebar
+   resize handle (background-clip back to border-box so it spans the padding). */
 .resizerV:hover,
 .resizerH:hover {
 	background: var(--accent-soft);
+	background-clip: border-box;
 }
 
 /* ---- tab strip ---- */
@@ -129,13 +138,13 @@
 	flex-shrink: 0;
 	animation: tabAttentionPulse 1.2s ease-in-out infinite;
 }
-/* finished-unread: green dot with a soft halo */
+/* finished-unread: a bold bullseye (solid dot, gap, accent ring) */
 .tabUnread {
 	width: 8px;
 	height: 8px;
 	border-radius: 50%;
 	background: var(--accent);
-	box-shadow: 0 0 0 3px var(--accent-soft);
+	box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
 	flex-shrink: 0;
 }
 

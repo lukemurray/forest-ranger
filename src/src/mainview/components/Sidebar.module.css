@@ -281,10 +281,12 @@
 	background: var(--accent);
 	animation: runningPulse 1.4s ease-in-out infinite;
 }
-/* a chat finished with output you haven't read — solid green with a soft halo */
+/* a chat finished with output you haven't read — a bold bullseye (solid dot, a
+   gap, then an accent ring) so it clearly stands out from the plain/working dots.
+   The gap uses the sidebar ground; it reads fine on hover/selected rows too. */
 .unreadDot {
 	background: var(--accent);
-	box-shadow: 0 0 0 3px var(--accent-soft);
+	box-shadow: 0 0 0 2px var(--bg-sidebar), 0 0 0 4px var(--accent);
 }
 /* A chat here is waiting on you (permission / input) — amber, pulsing, takes
    precedence over the working/unread dots. */

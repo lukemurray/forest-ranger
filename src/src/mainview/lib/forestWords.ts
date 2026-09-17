@@ -69,7 +69,6 @@ export const FOREST_WORDS = [
 	"Watering saplings",
 	"Planting seedlings",
 	"Transplanting",
-	"Deadheading",
 	"Weeding the beds",
 	"Raking leaves",
 	"Stacking firewood",
@@ -100,7 +99,10 @@ export const FOREST_WORDS = [
 	"Sowing wildflowers",
 	"Marking the trailhead",
 	"Truffle hunting",
-	"Tracking squirrels"
+	"Tracking squirrels",
+	"Observing the clouds",
+	"Sketching the landscape",
+	"Observing the stars"
 ];
 
 /** A random forest word that isn't one of the recently-shown ones (pass the last

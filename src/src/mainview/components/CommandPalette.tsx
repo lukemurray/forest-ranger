@@ -42,9 +42,11 @@ export function CommandPalette() {
 					...worktrees.map(
 						(w): Item => ({
 							kind: "worktree",
+							// Match the sidebar: a review worktree is detached (no branch) but
+							// named "review/…", so fall back to the name before "detached".
 							id: w.id,
 							projectId: w.projectId,
-							label: w.branch ?? "detached",
+							label: w.name ?? w.branch ?? "detached",
 							sub: w.projectName,
 						}),
 					),
