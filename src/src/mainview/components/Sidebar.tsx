@@ -24,6 +24,7 @@ import { NewWorktreeDialog } from "./NewWorktreeDialog";
 import { ReviewDialog } from "./ReviewDialog";
 import { SettingsMenu } from "./SettingsMenu";
 import { getRestorableSessions, useTerminals } from "../lib/terminalStore";
+import { useChatStatus } from "../lib/attentionStore";
 import { useProjectActions } from "../lib/useProjectActions";
 import styles from "./Sidebar.module.css";
 
@@ -35,22 +36,20 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 
 	const { sessions } = useTerminals();
 	const runningCount = sessions.filter((s) => s.running).length;
-	const runningWorktrees = new Set(
-		sessions.filter((s) => s.running).map((s) => s.worktreeId),
-	);
-	const runningProjects = new Set(
-		sessions.filter((s) => s.running).map((s) => s.projectId),
-	);
-	// Chats saved from a previous run that haven't been reopened yet (e.g. right
-	// after launch). Marked with a hollow dot so you can see where work is waiting
-	// to resume; once a worktree is opened its chats relaunch and become "running".
-	const resumableChats = getRestorableSessions().filter(
-		(s) => s.kind === "chat" && s.sessionId && !runningWorktrees.has(s.worktreeId),
-	);
-	const resumableWorktrees = new Set(resumableChats.map((s) => s.worktreeId));
-	const resumableProjects = new Set(
-		resumableChats.map((s) => s.projectId).filter((id) => !runningProjects.has(id)),
-	);
+	// "A chat exists here, at rest" — a single calm hollow dot covering both an open
+	// (but idle) chat and one that's only saved-and-resumable. The distinction (live
+	// in memory vs persisted) isn't something you act on, so it doesn't earn a
+	// separate colour; the working / unread / needs-answer dots are what stand out.
+	const openChats = sessions.filter((s) => s.kind === "chat");
+	const restorableChats = getRestorableSessions().filter((s) => s.kind === "chat" && s.sessionId);
+	const chatWorktrees = new Set([
+		...openChats.map((s) => s.worktreeId),
+		...restorableChats.map((s) => s.worktreeId),
+	]);
+	const chatProjects = new Set([
+		...openChats.map((s) => s.projectId),
+		...restorableChats.map((s) => s.projectId),
+	]);
 
 	async function addProject() {
 		setAdding(true);
@@ -129,10 +128,8 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 						<ProjectNode
 							key={p.id}
 							project={p}
-							runningProjects={runningProjects}
-							runningWorktrees={runningWorktrees}
-							resumableProjects={resumableProjects}
-							resumableWorktrees={resumableWorktrees}
+							chatProjects={chatProjects}
+							chatWorktrees={chatWorktrees}
 						/>
 					))
 				)}
@@ -145,20 +142,17 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 
 function ProjectNode({
 	project,
-	runningProjects,
-	runningWorktrees,
-	resumableProjects,
-	resumableWorktrees,
+	chatProjects,
+	chatWorktrees,
 }: {
 	project: Project;
-	runningProjects: Set<string>;
-	runningWorktrees: Set<string>;
-	resumableProjects: Set<string>;
-	resumableWorktrees: Set<string>;
+	chatProjects: Set<string>;
+	chatWorktrees: Set<string>;
 }) {
 	const navigate = useNavigate();
 	const router = useRouter();
 	const params = useParams({ strict: false });
+	const status = useChatStatus();
 	const onThisProject = params.projectId === project.id;
 	// Only the project row itself is "selected" on the project route; when a
 	// worktree under it is open, the highlighted child carries the selection.
@@ -274,11 +268,15 @@ function ProjectNode({
 						>
 							<RefreshIcon size={13} />
 						</button>
-						{runningProjects.has(project.id) ? (
-							<span className={styles.runningDot} title="task running" />
+						{status.attention.projects.has(project.id) ? (
+							<span className={styles.attentionDot} title="a chat here needs your answer" />
+						) : status.working.projects.has(project.id) ? (
+							<span className={styles.workingDot} title="a chat here is working" />
+						) : status.unread.projects.has(project.id) ? (
+							<span className={styles.unreadDot} title="a chat here finished — unread" />
 						) : (
-							resumableProjects.has(project.id) && (
-								<span className={styles.resumeDot} title="a chat here can resume" />
+							chatProjects.has(project.id) && (
+								<span className={styles.resumeDot} title="a chat here" />
 							)
 						)}
 					</div>
@@ -327,18 +325,16 @@ function ProjectNode({
 										)}
 										{wt.name ?? wt.branch ?? "detached"}
 									</span>
-									{runningWorktrees.has(wt.id) ? (
-										<span className={styles.runningDot} title="task running" />
-									) : (
-										<>
-											{resumableWorktrees.has(wt.id) && (
-												<span className={styles.resumeDot} title="a chat here can resume" />
-											)}
-											<span className={styles.worktreeTime}>
-												{relativeTime(wt.lastActivityAt)}
-											</span>
-										</>
-									)}
+									<span className={styles.worktreeTime}>{relativeTime(wt.lastActivityAt)}</span>
+									{status.attention.worktrees.has(wt.id) ? (
+										<span className={styles.attentionDot} title="needs your answer" />
+									) : status.working.worktrees.has(wt.id) ? (
+										<span className={styles.workingDot} title="working" />
+									) : status.unread.worktrees.has(wt.id) ? (
+										<span className={styles.unreadDot} title="finished — unread" />
+									) : chatWorktrees.has(wt.id) ? (
+										<span className={styles.resumeDot} title="a chat here" />
+									) : null}
 								</button>
 							}
 						>

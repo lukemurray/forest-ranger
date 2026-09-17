@@ -394,6 +394,11 @@ export type RpcRequests = {
 				params: { id: string };
 				response: string[];
 			};
+			/** Case-insensitive literal text search across the worktree's tracked files. */
+			searchText: {
+				params: { id: string; query: string };
+				response: { path: string; line: number; column: number; text: string }[];
+			};
 			/** Read a working-tree file for the editor. */
 			readFile: {
 				params: { id: string; path: string };
@@ -686,7 +691,9 @@ export type ViewMessage =
 	/** Cancel the in-flight turn but keep the session alive (the Stop button). */
 	| { type: "agentChatCancel"; sessionId: string }
 	/** Stop (kill) a chat agent session. History on disk is preserved for reopen. */
-	| { type: "agentChatStop"; sessionId: string };
+	| { type: "agentChatStop"; sessionId: string }
+	/** The chat the user is now viewing (focused), or null — clears its "unread". */
+	| { type: "chatRead"; sessionId: string | null };
 
 /** Push events from the main process to the renderer. */
 export type MainEvent =
@@ -696,7 +703,15 @@ export type MainEvent =
 	| { type: "termData"; sessionId: string; data: string }
 	| { type: "termExit"; sessionId: string; exitCode: number }
 	/** A normalized event from a native chat agent session. */
-	| { type: "agentChatEvent"; sessionId: string; event: AgentChatEvent };
+	| { type: "agentChatEvent"; sessionId: string; event: AgentChatEvent }
+	/** Jump to a worktree (e.g. from clicking an attention notification). */
+	| { type: "navigate"; projectId: string; worktreeId: string }
+	/** Per-state chat status (which chats are working / awaiting an answer / have
+	 *  unread finished output), each with the worktrees + projects it touches. */
+	| { type: "chatStatus"; attention: StatusSets; working: StatusSets; unread: StatusSets };
+
+/** Session ids in a state, plus the worktrees and projects they belong to. */
+export type StatusSets = { sessions: string[]; worktrees: string[]; projects: string[] };
 
 /** The bridge the preload exposes on `window` for the renderer. */
 export type ForestRangerBridge = {

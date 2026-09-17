@@ -236,9 +236,20 @@ export function ReviewPanel({
 				>
 					Files
 				</button>
+				<button
+					className={styles.panelTab}
+					data-active={panelView === "search" || undefined}
+					onClick={() => setPanelView("search")}
+					data-tip="⌘⇧F"
+					data-tip-align="end"
+				>
+					Search
+				</button>
 			</div>
 			{panelView === "files" ? (
 				<FileBrowser worktreeId={worktree.id} projectId={projectId} />
+			) : panelView === "search" ? (
+				<SearchView worktreeId={worktree.id} projectId={projectId} />
 			) : (
 			<div className={styles.scroll}>
 				<div className={styles.body}>
@@ -817,6 +828,91 @@ function FileTree({
 					</div>
 				);
 			})}
+		</div>
+	);
+}
+
+/** Project-wide text search (git grep over tracked files). Results are grouped by
+ *  file; clicking a hit opens the file at that line in a Monaco tab. */
+function SearchView({ worktreeId, projectId }: { worktreeId: string; projectId: string }) {
+	const [query, setQuery] = useState("");
+	const [hits, setHits] = useState<{ path: string; line: number; column: number; text: string }[] | null>(null);
+	const inputRef = useRef<HTMLInputElement>(null);
+
+	useEffect(() => {
+		inputRef.current?.focus();
+	}, []);
+
+	// Debounce the query so we don't grep on every keystroke.
+	useEffect(() => {
+		const q = query.trim();
+		if (!q) {
+			setHits(null);
+			return;
+		}
+		let live = true;
+		const t = setTimeout(() => {
+			api.searchText({ id: worktreeId, query: q }).then((r) => live && setHits(r));
+		}, 200);
+		return () => {
+			live = false;
+			clearTimeout(t);
+		};
+	}, [query, worktreeId]);
+
+	// Group hits by file, preserving order.
+	const groups = useMemo(() => {
+		const m = new Map<string, { path: string; line: number; column: number; text: string }[]>();
+		for (const h of hits ?? []) {
+			const g = m.get(h.path);
+			if (g) g.push(h);
+			else m.set(h.path, [h]);
+		}
+		return [...m.entries()];
+	}, [hits]);
+
+	return (
+		<div className={styles.browser}>
+			<div className={styles.browserTools}>
+				<input
+					ref={inputRef}
+					className={styles.filterInput}
+					placeholder="Search in tracked files…"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					spellCheck={false}
+				/>
+			</div>
+			<div className={styles.browserScroll}>
+				{hits === null ? (
+					<p className={styles.empty}>Type to search the worktree.</p>
+				) : hits.length === 0 ? (
+					<p className={styles.empty}>No matches for “{query.trim()}”.</p>
+				) : (
+					<div className={styles.searchResults}>
+						{groups.map(([path, fileHits]) => (
+							<div key={path} className={styles.searchGroup}>
+								<div className={styles.searchFile} title={path}>
+									<span className={styles.searchFileName}>{basename(path)}</span>
+									<span className={styles.searchFileDir}>{path}</span>
+									<span className={styles.searchCount}>{fileHits.length}</span>
+								</div>
+								{fileHits.map((h, i) => (
+									<button
+										key={i}
+										className={styles.searchHit}
+										onClick={() => openFile({ worktreeId, projectId, path, line: h.line })}
+										title={`${path}:${h.line}`}
+									>
+										<span className={styles.searchLine}>{h.line}</span>
+										<span className={styles.searchText}>{h.text.trim()}</span>
+									</button>
+								))}
+							</div>
+						))}
+					</div>
+				)}
+			</div>
 		</div>
 	);
 }

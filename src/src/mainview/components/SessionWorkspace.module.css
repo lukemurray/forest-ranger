@@ -98,6 +98,68 @@
 .tab[data-preview] .tabLabel {
 	font-style: italic;
 }
+/* chat awaiting an answer (permission/input) — amber pulsing dot in place of the
+   tab icon, and an amber-tinted tab so it's easy to spot. */
+.tabAttention {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--amber);
+	flex-shrink: 0;
+	animation: tabAttentionPulse 1.2s ease-in-out infinite;
+}
+@keyframes tabAttentionPulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.5;
+	}
+}
+.tab[data-attention] {
+	color: var(--amber);
+}
+/* working: green pulsing dot in place of the tab icon */
+.tabWorking {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--accent);
+	flex-shrink: 0;
+	animation: tabAttentionPulse 1.2s ease-in-out infinite;
+}
+/* finished-unread: green dot with a soft halo */
+.tabUnread {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--accent);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+	flex-shrink: 0;
+}
+
+/* unsaved-edits dot; swaps with the close button on hover (VS Code style) */
+.tabDirty {
+	display: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--text-muted);
+	flex-shrink: 0;
+}
+.tab[data-dirty] .tabDirty {
+	display: block;
+}
+.tab[data-dirty] .tabClose {
+	display: none;
+}
+.tab[data-dirty]:hover .tabDirty {
+	display: none;
+}
+.tab[data-dirty]:hover .tabClose {
+	display: grid;
+}
 .tab > svg {
 	color: var(--text-faint);
 	flex-shrink: 0;

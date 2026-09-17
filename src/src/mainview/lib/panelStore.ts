@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 /** Which top-level view the right side panel shows. */
-export type PanelView = "review" | "files";
+export type PanelView = "review" | "files" | "search";
 
 type State = { open: boolean; view: PanelView };
 
@@ -9,7 +9,8 @@ const OPEN_KEY = "forest-ranger:review-open"; // kept for continuity with the ol
 const VIEW_KEY = "forest-ranger:panel-view";
 
 function readView(): PanelView {
-	return localStorage.getItem(VIEW_KEY) === "files" ? "files" : "review";
+	const v = localStorage.getItem(VIEW_KEY);
+	return v === "files" || v === "search" ? v : "review";
 }
 
 let state: State = { open: localStorage.getItem(OPEN_KEY) !== "0", view: readView() };

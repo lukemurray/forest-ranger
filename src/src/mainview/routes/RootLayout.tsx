@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { Outlet } from "@tanstack/react-router";
+import { Outlet, useNavigate } from "@tanstack/react-router";
+import { onNavigate } from "../rpc";
+import { saveAllFiles } from "../components/FileEditor";
 import { Sidebar } from "../components/Sidebar";
 import { CommandPalette } from "../components/CommandPalette";
 import { FilePalette } from "../components/FilePalette";
@@ -13,12 +15,30 @@ const SIDEBAR_WIDTH_KEY = "forest-ranger:sidebar-width";
 export function RootLayout() {
 	const projects = rootRoute.useLoaderData();
 	const [slot, setSlot] = useState<HTMLElement | null>(null);
+	const navigate = useNavigate();
+
+	// Attention notifications ask us to jump to a worktree when clicked.
+	useEffect(() => {
+		const off = onNavigate(({ projectId, worktreeId }) => {
+			navigate({
+				to: "/project/$projectId/worktree/$worktreeId",
+				params: { projectId, worktreeId },
+			});
+		});
+		return () => void off();
+	}, [navigate]);
 
 	// Panel shortcuts: ⌘B toggles the review panel, ⌘1 shows the changes/review
 	// view, ⌘2 the files view. (⌘P and ⌘T/⌘K are owned by the palettes.)
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+			if (!(e.metaKey || e.ctrlKey)) return;
+			if (e.altKey && e.key.toLowerCase() === "s") {
+				e.preventDefault();
+				void saveAllFiles(); // ⌥⌘S — save every open editor
+				return;
+			}
+			if (e.altKey) return;
 			if (e.key.toLowerCase() === "b") {
 				e.preventDefault();
 				togglePanel();
@@ -28,6 +48,9 @@ export function RootLayout() {
 			} else if (e.key === "2") {
 				e.preventDefault();
 				showPanelView("files");
+			} else if (e.shiftKey && e.key.toLowerCase() === "f") {
+				e.preventDefault();
+				showPanelView("search");
 			}
 		};
 		window.addEventListener("keydown", onKey);

@@ -38,6 +38,7 @@ import {
 	restart as agentChatRestart,
 	send as agentChatSend,
 	setAgentChatCallback,
+	setAgentStatusCallback,
 	startSession as agentChatStart,
 	stop as agentChatStop,
 } from "./agentChat";
@@ -72,6 +73,7 @@ import {
 	fileDiff as gitFileDiff,
 	fileContents as gitFileContents,
 	listFiles as gitListFiles,
+	searchText as gitSearchText,
 	readWorkingFile,
 	writeWorkingFile,
 	commitsVsBase,
@@ -455,6 +457,11 @@ const handlers: RpcHandlers = {
 			listFiles: async ({ id }) => {
 				const row = worktreesRepo.get(id);
 				return row ? gitListFiles(row.path) : [];
+			},
+
+			searchText: async ({ id, query }) => {
+				const row = worktreesRepo.get(id);
+				return row ? gitSearchText(row.path, query) : [];
 			},
 
 			readFile: async ({ id, path }) => {
@@ -904,6 +911,9 @@ function dispatchMessage(msg: ViewMessage): void {
 		case "agentChatStop":
 			agentChatStop(msg.sessionId);
 			break;
+		case "chatRead":
+			markChatRead(msg.sessionId);
+			break;
 	}
 }
 
@@ -933,54 +943,151 @@ setTerminalCallbacks({
 		broadcast({ type: "termExit", sessionId, exitCode }),
 });
 
-// Attention routing: a dock badge + OS notification when an agent needs input
-// (permission / elicitation) or finishes a turn while the app is in the background,
-// so parallel agents across worktrees don't need babysitting.
-const pendingAttention = new Set<string>();
+// Chat status routing: a dock badge + OS notification when an agent needs input or
+// finishes in the background, plus in-app dots (which chat/worktree is working,
+// awaiting an answer, or has unread output) — so parallel agents don't need babysitting.
+const attention = new Map<string, Set<string>>(); // sessionId -> unanswered request keys
+const working = new Set<string>(); // sessionId currently processing a turn
+const unread = new Set<string>(); // sessionId finished a turn you haven't read
+let readSession: string | null = null; // the chat the user is currently viewing (focused)
+
 function focused(): boolean {
 	return BrowserWindow.getAllWindows().some((w) => w.isFocused());
 }
-function notifyUser(title: string, body: string): void {
+function addAttention(sessionId: string, key: string): void {
+	const set = attention.get(sessionId) ?? new Set<string>();
+	set.add(key);
+	attention.set(sessionId, set);
+}
+function clearAttention(sessionId: string, key?: string): void {
+	if (key === undefined) {
+		attention.delete(sessionId);
+		return;
+	}
+	const set = attention.get(sessionId);
+	if (!set) return;
+	set.delete(key);
+	if (set.size === 0) attention.delete(sessionId);
+}
+/** Expand a session-id list to the worktrees/projects it touches (from chat meta). */
+function statusSets(sessions: string[]): { sessions: string[]; worktrees: string[]; projects: string[] } {
+	const worktrees = new Set<string>();
+	const projects = new Set<string>();
+	for (const s of sessions) {
+		const t = sessionTarget(s);
+		if (t) {
+			worktrees.add(t.worktreeId);
+			projects.add(t.projectId);
+		}
+	}
+	return { sessions, worktrees: [...worktrees], projects: [...projects] };
+}
+/** Push the current chat status (badge + working/attention/unread) to the renderer. */
+function broadcastStatus(): void {
+	const count = [...attention.values()].reduce((n, s) => n + s.size, 0);
+	app.setBadgeCount(count);
+	broadcast({
+		type: "chatStatus",
+		attention: statusSets([...attention.keys()]),
+		working: statusSets([...working]),
+		unread: statusSets([...unread]),
+	});
+}
+/** The renderer tells us which chat the user is looking at, so its finished turns
+ *  read immediately and don't pile up as "unread". */
+function markChatRead(sessionId: string | null): void {
+	readSession = sessionId;
+	if (sessionId && unread.delete(sessionId)) broadcastStatus();
+}
+/** The worktree a chat session belongs to, plus a label, from its persisted meta. */
+function sessionTarget(sessionId: string): { projectId: string; worktreeId: string; label: string } | null {
+	const meta = listChatLogs().find((m) => m.sessionId === sessionId);
+	if (!meta || !meta.worktreeId || !meta.projectId) return null;
+	return { projectId: meta.projectId, worktreeId: meta.worktreeId, label: meta.name || "a chat" };
+}
+function notifyUser(
+	title: string,
+	body: string,
+	target: { projectId: string; worktreeId: string } | null,
+): void {
 	if (!Notification.isSupported()) return;
 	const n = new Notification({ title, body });
 	n.on("click", () => {
 		const win = BrowserWindow.getAllWindows()[0];
-		if (!win) return;
-		if (win.isMinimized()) win.restore();
-		win.show();
-		win.focus();
+		if (win) {
+			if (win.isMinimized()) win.restore();
+			win.show();
+			win.focus();
+		}
+		if (target) broadcast({ type: "navigate", ...target }); // jump to that worktree
 	});
 	n.show();
 }
-function handleAttention(sessionId: string, event: AgentChatEvent): void {
+function handleChatStatus(sessionId: string, event: AgentChatEvent): void {
 	switch (event.type) {
-		case "permission":
-			pendingAttention.add(`${sessionId}:p:${event.id}`);
-			app.setBadgeCount(pendingAttention.size);
-			if (!focused()) notifyUser("Permission needed", `Allow ${event.toolName}?`);
+		case "user_text":
+			// A new turn started (user sent, or an auto/initial prompt) — the user is
+			// engaged with this chat, so it's working and not unread.
+			working.add(sessionId);
+			unread.delete(sessionId);
+			broadcastStatus();
 			break;
-		case "elicitation":
-			pendingAttention.add(`${sessionId}:e:${event.id}`);
-			app.setBadgeCount(pendingAttention.size);
-			if (!focused()) notifyUser("Input needed", event.message);
+		case "assistant_text":
+		case "thinking":
+		case "tool_use":
+		case "tool_result":
+		case "plan":
+			if (!working.has(sessionId)) {
+				working.add(sessionId);
+				broadcastStatus();
+			}
 			break;
+		case "permission": {
+			addAttention(sessionId, `p:${event.id}`);
+			broadcastStatus();
+			const t = sessionTarget(sessionId);
+			if (!focused()) notifyUser("Permission needed", `${t?.label ?? "A chat"}: allow ${event.toolName}?`, t);
+			break;
+		}
+		case "elicitation": {
+			addAttention(sessionId, `e:${event.id}`);
+			broadcastStatus();
+			const t = sessionTarget(sessionId);
+			if (!focused()) notifyUser("Input needed", `${t?.label ?? "A chat"}: ${event.message}`, t);
+			break;
+		}
 		case "permission_resolved":
-		case "elicitation_resolved":
-			pendingAttention.delete(`${sessionId}:p:${event.id}`);
-			pendingAttention.delete(`${sessionId}:e:${event.id}`);
-			app.setBadgeCount(pendingAttention.size);
+			clearAttention(sessionId, `p:${event.id}`);
+			broadcastStatus();
 			break;
-		case "result":
-			if (!focused()) notifyUser("Chat finished", "The agent finished its turn.");
+		case "elicitation_resolved":
+			clearAttention(sessionId, `e:${event.id}`);
+			broadcastStatus();
+			break;
+		case "result": {
+			working.delete(sessionId);
+			// Finished — unread unless the user is looking at this chat right now.
+			if (!(focused() && readSession === sessionId)) unread.add(sessionId);
+			broadcastStatus();
+			const t = sessionTarget(sessionId);
+			if (!focused()) notifyUser("Chat finished", `${t?.label ?? "The agent"} finished its turn.`, t);
+			break;
+		}
+		case "error":
+		case "exited":
+			working.delete(sessionId);
+			if (event.type === "exited") clearAttention(sessionId);
+			broadcastStatus();
 			break;
 	}
 }
 
 // Stream normalized chat-agent events from the main process to the renderer.
 setAgentChatCallback((sessionId, event) => {
-	handleAttention(sessionId, event);
 	broadcast({ type: "agentChatEvent", sessionId, event });
 });
+// Status (attention/working/unread) is driven by live events only (never replay).
+setAgentStatusCallback(handleChatStatus);
 
 // Persisted window size + position, so the app reopens where you left it.
 const WINDOW_STATE_FILE = join(DATA_DIR, "window-state.json");
@@ -1046,6 +1153,19 @@ function createWindow(): void {
 	win.on("resize", scheduleSave);
 	win.on("move", scheduleSave);
 	win.on("close", () => saveWindowState(win));
+
+	// Flag fullscreen on the document so the renderer can drop the traffic-light
+	// spacer (no traffic lights in native fullscreen → no gap above the brand).
+	const syncFullscreen = () => {
+		win.webContents
+			.executeJavaScript(
+				`document.documentElement.toggleAttribute("data-fullscreen", ${win.isFullScreen()})`,
+			)
+			.catch(() => {});
+	};
+	win.on("enter-full-screen", syncFullscreen);
+	win.on("leave-full-screen", syncFullscreen);
+	win.webContents.on("did-finish-load", syncFullscreen);
 
 	if (process.env.ELECTRON_RENDERER_URL) {
 		win.loadURL(process.env.ELECTRON_RENDERER_URL);

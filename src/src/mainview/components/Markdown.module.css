@@ -83,6 +83,36 @@
 	border-radius: var(--radius-sm);
 	overflow-x: auto;
 }
+/* wrapper so the copy button can sit in the corner of the block */
+.codeWrap {
+	position: relative;
+}
+.copyBtn {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	z-index: 1;
+	padding: 2px 8px;
+	font-size: 11px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--bg-elevated);
+	color: var(--text-muted);
+	opacity: 0;
+	transition: opacity 0.1s ease;
+}
+.codeWrap:hover .copyBtn {
+	opacity: 1;
+}
+.copyBtn:hover {
+	color: var(--text);
+	background: var(--bg-hover);
+}
+.copyBtn[data-copied] {
+	opacity: 1;
+	color: var(--accent);
+	border-color: var(--accent);
+}
 .md pre code {
 	font-family: var(--font-mono);
 	font-size: 12px;

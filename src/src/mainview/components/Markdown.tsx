@@ -1,8 +1,39 @@
-import { memo } from "react";
+import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../rpc";
 import styles from "./Markdown.module.css";
+
+/** Pull the raw text out of a fenced block's `<code>` child. */
+function codeText(children: ReactNode): string {
+	for (const c of Array.isArray(children) ? children : [children]) {
+		if (c && typeof c === "object" && "props" in c) {
+			const inner = (c as { props?: { children?: ReactNode } }).props?.children;
+			if (typeof inner === "string") return inner;
+			if (Array.isArray(inner)) return inner.map((x) => (typeof x === "string" ? x : "")).join("");
+		}
+	}
+	return "";
+}
+
+/** A fenced code block with a hover copy button (for commands/snippets). */
+function CodeBlock({ children }: { children?: ReactNode }) {
+	const [copied, setCopied] = useState(false);
+	function copy() {
+		navigator.clipboard?.writeText(codeText(children)).then(() => {
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1200);
+		});
+	}
+	return (
+		<div className={styles.codeWrap}>
+			<button className={styles.copyBtn} onClick={copy} data-copied={copied || undefined}>
+				{copied ? "Copied" : "Copy"}
+			</button>
+			<pre>{children}</pre>
+		</div>
+	);
+}
 
 /**
  * Stabilize a still-streaming markdown tail so incomplete constructs don't flash
@@ -51,6 +82,8 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
 					// Models sprinkle `---` between narration steps; in a chat that's just
 					// a stack of full-width rules (noise), so drop thematic breaks.
 					hr: () => null,
+					// Fenced code blocks get a hover copy button.
+					pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
 				}}
 			>
 				{stabilizeStreamingTail(text)}

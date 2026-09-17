@@ -166,6 +166,7 @@ const buffers = new Map<string, AgentChatEvent[]>();
 const MAX_BUFFER = 5000;
 
 let emitGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = null;
+let statusGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = null;
 
 /** An emitter that records events to the session's buffer, then pushes them out. */
 function emitterFor(sessionId: string): Emit {
@@ -180,7 +181,17 @@ function emitterFor(sessionId: string): Emit {
 			schedulePersist(sessionId);
 		}
 		emitGlobal?.(sessionId, stamped);
+		// Status (working/unread/attention) tracks *live* events only — replay must
+		// not re-fire it, or reopening a chat would re-mark old turns.
+		statusGlobal?.(sessionId, stamped);
 	};
+}
+
+/** Wire the live-only status callback (attention/working/unread), never on replay. */
+export function setAgentStatusCallback(
+	fn: (sessionId: string, event: AgentChatEvent) => void,
+) {
+	statusGlobal = fn;
 }
 
 /** Re-push a live session's buffered events to the (re)subscribed view. */

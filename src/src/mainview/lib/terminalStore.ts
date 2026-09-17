@@ -26,10 +26,12 @@ export type TermSession = {
 	/** diff only: which file diff to render (see DiffView). */
 	diff?: { path: string; base: string | null; commit?: string };
 	/** file only: which working-tree file the editor opens (see FileEditor). */
-	file?: { path: string };
+	file?: { path: string; line?: number };
 	/** diff/file: a temporary "preview" tab (italic) reused by the next open until
 	 *  promoted by an edit or a double-click (VS Code-style). */
 	preview?: boolean;
+	/** file: has unsaved edits (shows a dot on the tab). */
+	dirty?: boolean;
 	commandId: string | null;
 	/** Explicit command to run (e.g. an agent CLI); takes precedence over commandId. */
 	command: string | null;
@@ -356,19 +358,31 @@ export function openDiff(o: {
 	);
 }
 
-/** Open (or focus/preview-reuse) an editor tab for a working-tree file. */
+/** Open (or focus/preview-reuse) an editor tab for a working-tree file, optionally
+ *  revealing a line. Reopening an already-open file just updates its target line. */
 export function openFile(o: {
 	worktreeId: string;
 	projectId: string;
 	path: string;
+	line?: number;
 	preview?: boolean;
 }): string {
 	recordRecentFile(o.worktreeId, o.path);
+	const paneKey = `file:${o.path}`;
+	const existing = state.sessions.find((s) => s.worktreeId === o.worktreeId && s.paneKey === paneKey);
+	if (existing) {
+		if (o.line !== undefined) {
+			set({ sessions: state.sessions.map((s) => (s.id === existing.id ? { ...s, file: { path: o.path, line: o.line } } : s)) });
+		}
+		if (!(o.preview ?? true)) promoteTab(existing.id);
+		setActiveSession(existing.id);
+		return existing.id;
+	}
 	const name = o.path.split("/").pop() ?? o.path;
 	return openContent(
 		o.worktreeId,
 		o.projectId,
-		{ paneKey: `file:${o.path}`, kind: "file", file: { path: o.path }, diff: undefined, name, title: o.path },
+		{ paneKey, kind: "file", file: { path: o.path, line: o.line }, diff: undefined, name, title: o.path },
 		o.preview ?? true,
 	);
 }
@@ -377,6 +391,12 @@ export function openFile(o: {
 export function promoteTab(id: string) {
 	if (!state.sessions.some((s) => s.id === id && s.preview)) return;
 	set({ sessions: state.sessions.map((s) => (s.id === id ? { ...s, preview: false } : s)) });
+}
+
+/** Flag a file tab's unsaved-edits state (drives the tab's dirty dot). */
+export function setSessionDirty(id: string, dirty: boolean) {
+	if (!state.sessions.some((s) => s.id === id && !!s.dirty !== dirty)) return;
+	set({ sessions: state.sessions.map((s) => (s.id === id ? { ...s, dirty } : s)) });
 }
 
 /** Pane key of the focused session if it's in this worktree (else null). */

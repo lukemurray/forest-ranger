@@ -653,6 +653,41 @@ export async function listFiles(worktreePath: string): Promise<string[]> {
 	return [...set].sort();
 }
 
+export type SearchHit = { path: string; line: number; column: number; text: string };
+
+/** Case-insensitive literal text search across tracked files (via `git grep`). */
+export async function searchText(
+	worktreePath: string,
+	query: string,
+	max = 500,
+): Promise<SearchHit[]> {
+	if (query.trim() === "") return [];
+	// -I skip binaries, -F literal, -i case-insensitive, -n line, --column column.
+	const res = await git(worktreePath, [
+		"grep",
+		"-n",
+		"--column",
+		"-I",
+		"-F",
+		"-i",
+		"-e",
+		query,
+		"--",
+		".",
+	]);
+	// Exit 1 = no matches (not an error); anything else with no stdout = nothing.
+	if (!res.stdout) return [];
+	const hits: SearchHit[] = [];
+	for (const line of res.stdout.split("\n")) {
+		if (!line) continue;
+		const m = /^(.+?):(\d+):(\d+):(.*)$/.exec(line);
+		if (!m) continue;
+		hits.push({ path: m[1], line: Number(m[2]), column: Number(m[3]), text: m[4].slice(0, 300) });
+		if (hits.length >= max) break;
+	}
+	return hits;
+}
+
 /** A path's content at a git ref (e.g. "HEAD", a sha, "abc^"); "" if absent there. */
 async function showFile(worktreePath: string, ref: string, relPath: string): Promise<string> {
 	const res = await git(worktreePath, ["show", `${ref}:${relPath}`]);

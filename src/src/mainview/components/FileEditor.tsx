@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { api } from "../rpc";
-import { promoteTab } from "../lib/terminalStore";
+import { promoteTab, setSessionDirty } from "../lib/terminalStore";
 import { notify } from "../lib/toast";
+
+// Registry of mounted editors' save fns, so ⌥⌘S can save them all at once.
+const savers = new Map<string, () => Promise<void>>();
+export async function saveAllFiles() {
+	await Promise.all([...savers.values()].map((fn) => fn()));
+}
 import { useThemeMode, type ThemeMode } from "../lib/theme";
 import { monacoLang, monacoTheme } from "../lib/monaco";
 import styles from "./DiffView.module.css";
@@ -19,10 +25,12 @@ export function FileEditor({
 	sessionId,
 	worktreeId,
 	path,
+	line,
 }: {
 	sessionId: string;
 	worktreeId: string;
 	path: string;
+	line?: number;
 }) {
 	const [state, setState] = useState<{ content: string; binary: boolean } | null>(null);
 	const [dirty, setDirty] = useState(false);
@@ -74,7 +82,9 @@ export function FileEditor({
 		});
 		editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void save());
 		saveRef.current = save;
+		savers.set(sessionId, save);
 		return () => {
+			savers.delete(sessionId);
 			editor.dispose();
 			editorRef.current = null;
 		};
@@ -84,6 +94,21 @@ export function FileEditor({
 	useEffect(() => {
 		monaco.editor.setTheme(monacoTheme(dark));
 	}, [dark]);
+
+	// Mirror dirty state onto the tab (only fires on clean↔dirty transitions).
+	useEffect(() => {
+		setSessionDirty(sessionId, dirty);
+	}, [dirty, sessionId]);
+	useEffect(() => () => setSessionDirty(sessionId, false), [sessionId]);
+
+	// Reveal a target line (from search / go-to), on load and when it changes.
+	useEffect(() => {
+		const ed = editorRef.current;
+		if (ed && line) {
+			ed.setPosition({ lineNumber: line, column: 1 });
+			ed.revealLineInCenter(line);
+		}
+	}, [line, state]);
 
 	return (
 		<div className={styles.pane}>

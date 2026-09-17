@@ -21,6 +21,7 @@ import {
 	type PaneNode,
 } from "../lib/paneLayout";
 import { bus } from "../rpc";
+import { useChatStatus } from "../lib/attentionStore";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
 import { DiffView } from "./DiffView";
@@ -81,6 +82,20 @@ export function SessionWorkspace({ worktreeId }: { worktreeId: string }) {
 			setActiveSession(visible[0].id);
 		}
 	}, [visible, activeId]);
+
+	// Tell main which chat we're viewing (focused) so its finished turns read
+	// immediately instead of piling up as unread; null while the window is unfocused.
+	const activeChatSid = visible.find((s) => s.id === activeId && s.kind === "chat")?.sessionId ?? null;
+	useEffect(() => {
+		const send = () => bus.chatRead({ sessionId: document.hasFocus() ? activeChatSid : null });
+		send();
+		window.addEventListener("focus", send);
+		window.addEventListener("blur", send);
+		return () => {
+			window.removeEventListener("focus", send);
+			window.removeEventListener("blur", send);
+		};
+	}, [activeChatSid]);
 
 	// Reopen everything that was open for this worktree last time — chats resume by
 	// their session id; terminals relaunch (a fresh pty, since the old one died with
@@ -294,7 +309,12 @@ function GroupView({ node }: { node: PaneGroup }) {
 									commit={s.diff.commit}
 								/>
 							) : s.kind === "file" && s.file ? (
-								<FileEditor sessionId={s.id} worktreeId={s.worktreeId} path={s.file.path} />
+								<FileEditor
+									sessionId={s.id}
+									worktreeId={s.worktreeId}
+									path={s.file.path}
+									line={s.file.line}
+								/>
 							) : null}
 						</div>
 					);
@@ -330,6 +350,11 @@ function Tab({
 	active: boolean;
 }) {
 	const c = usePane();
+	const status = useChatStatus();
+	const sid = s.kind === "chat" ? s.sessionId : null;
+	const needsAttention = !!sid && status.attention.sessions.has(sid);
+	const isWorking = !!sid && status.working.sessions.has(sid);
+	const isUnread = !!sid && status.unread.sessions.has(sid);
 	if (c.editingId === s.id) {
 		return (
 			<input
@@ -351,6 +376,8 @@ function Tab({
 			className={styles.tab}
 			data-active={active || undefined}
 			data-preview={s.preview || undefined}
+			data-dirty={s.dirty || undefined}
+			data-attention={needsAttention || undefined}
 			data-dragging={c.dragging === paneKey || undefined}
 			draggable
 			onDragStart={(e) => {
@@ -372,7 +399,13 @@ function Tab({
 			onDoubleClick={() => (s.preview ? promoteTab(s.id) : c.startRename(s))}
 			title={s.preview ? `${s.title} — double-click to keep open` : `${s.title} — double-click to rename`}
 		>
-			{s.kind === "chat" ? (
+			{needsAttention ? (
+				<span className={styles.tabAttention} title="needs your answer" />
+			) : isWorking ? (
+				<span className={styles.tabWorking} title="working" />
+			) : isUnread ? (
+				<span className={styles.tabUnread} title="finished — unread" />
+			) : s.kind === "chat" ? (
 				<SparkleIcon size={12} />
 			) : s.kind === "terminal" ? (
 				<TerminalIcon size={12} />
@@ -380,6 +413,7 @@ function Tab({
 				<FileIcon size={12} />
 			)}
 			<span className={styles.tabLabel}>{s.name ?? tabLabel(s)}</span>
+			<span className={styles.tabDirty} aria-hidden />
 			<span
 				className={styles.tabClose}
 				onClick={(e) => {

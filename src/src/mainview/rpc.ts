@@ -5,6 +5,7 @@ import type {
 	RpcRequests,
 	ViewMessage,
 } from "../shared/types";
+import { setChatStatus } from "./lib/attentionStore";
 
 const bridge = (window as unknown as { forestRanger: ForestRangerBridge }).forestRanger;
 
@@ -29,6 +30,15 @@ const termSubs = new Map<string, TermSub>();
 export function subscribeTerminal(sessionId: string, sub: TermSub) {
 	termSubs.set(sessionId, sub);
 	return () => termSubs.delete(sessionId);
+}
+
+type NavTarget = { projectId: string; worktreeId: string };
+const navSubs = new Set<(t: NavTarget) => void>();
+
+/** Subscribe to navigation requests from main (e.g. attention-notification clicks). */
+export function onNavigate(fn: (t: NavTarget) => void) {
+	navSubs.add(fn);
+	return () => navSubs.delete(fn);
 }
 
 const chatSubs = new Map<string, (event: AgentChatEvent) => void>();
@@ -56,6 +66,12 @@ bridge.onEvent((e: MainEvent) => {
 			break;
 		case "agentChatEvent":
 			chatSubs.get(e.sessionId)?.(e.event);
+			break;
+		case "navigate":
+			for (const fn of navSubs) fn({ projectId: e.projectId, worktreeId: e.worktreeId });
+			break;
+		case "chatStatus":
+			setChatStatus(e.attention, e.working, e.unread);
 			break;
 	}
 });
