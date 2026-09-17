@@ -10,7 +10,7 @@ export async function saveAllFiles() {
 	await Promise.all([...savers.values()].map((fn) => fn()));
 }
 import { useThemeMode, type ThemeMode } from "../lib/theme";
-import { monacoLang, monacoTheme } from "../lib/monaco";
+import { getViewState, monacoLang, monacoTheme, saveViewState } from "../lib/monaco";
 import styles from "./DiffView.module.css";
 
 function isDark(mode: ThemeMode): boolean {
@@ -38,7 +38,13 @@ export function FileEditor({
 	const hostRef = useRef<HTMLDivElement>(null);
 	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const saveRef = useRef<() => void>(() => {});
+	// The last line we jumped to this mount — restoring saved scroll seeds it with
+	// the current line so a remount doesn't yank you back to the original target;
+	// a genuinely new line (another search hit) still reveals.
+	const lastLine = useRef<number | undefined>(undefined);
 	const dark = isDark(useThemeMode());
+	// Stable per-file key for the view-state cache (survives unmount/remount).
+	const viewKey = `file:${worktreeId}:${path}`;
 
 	useEffect(() => {
 		let live = true;
@@ -76,6 +82,13 @@ export function FileEditor({
 			fontSize: 12,
 		});
 		editorRef.current = editor;
+		// Land back where you left off. Seed lastLine so the line-reveal effect below
+		// treats the current target as already applied (don't clobber the restore).
+		const saved = getViewState(viewKey) as monaco.editor.ICodeEditorViewState | null;
+		if (saved) {
+			editor.restoreViewState(saved);
+			lastLine.current = line;
+		}
 		editor.onDidChangeModelContent(() => {
 			setDirty(true);
 			promoteTab(sessionId); // an edit makes the preview tab permanent
@@ -84,10 +97,14 @@ export function FileEditor({
 		saveRef.current = save;
 		savers.set(sessionId, save);
 		return () => {
+			saveViewState(viewKey, editor.saveViewState());
 			savers.delete(sessionId);
 			editor.dispose();
 			editorRef.current = null;
 		};
+		// line/viewKey are read for the one-time restore seed only — rebuilding the
+		// editor when the target line changes would be wrong (the line effect handles it).
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [state, path, worktreeId, sessionId]);
 
 	// Theme is a global Monaco setting.
@@ -101,12 +118,14 @@ export function FileEditor({
 	}, [dirty, sessionId]);
 	useEffect(() => () => setSessionDirty(sessionId, false), [sessionId]);
 
-	// Reveal a target line (from search / go-to), on load and when it changes.
+	// Reveal a target line (from search / go-to) when it's a new target — but not
+	// when it merely equals the line we restored scroll to on remount.
 	useEffect(() => {
 		const ed = editorRef.current;
-		if (ed && line) {
+		if (ed && line && line !== lastLine.current) {
 			ed.setPosition({ lineNumber: line, column: 1 });
 			ed.revealLineInCenter(line);
+			lastLine.current = line;
 		}
 	}, [line, state]);
 

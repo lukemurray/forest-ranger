@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { api } from "../rpc";
 import { useThemeMode, type ThemeMode } from "../lib/theme";
-import { monacoLang, monacoTheme } from "../lib/monaco";
+import { getViewState, monacoLang, monacoTheme, saveViewState } from "../lib/monaco";
 import styles from "./DiffView.module.css";
 
 function isDark(mode: ThemeMode): boolean {
@@ -61,12 +61,17 @@ export function DiffView({
 			fontSize: 12,
 		});
 		editor.setModel({ original, modified });
+		// Land back on the same scroll position when returning to this diff tab.
+		const viewKey = `diff:${worktreeId}:${commit ?? ""}:${base ?? ""}:${path}`;
+		const saved = getViewState(viewKey) as monaco.editor.IDiffEditorViewState | null;
+		if (saved) editor.restoreViewState(saved);
 		return () => {
+			saveViewState(viewKey, editor.saveViewState());
 			editor.dispose();
 			original.dispose();
 			modified.dispose();
 		};
-	}, [data, path]);
+	}, [data, path, worktreeId, base, commit]);
 
 	// Theme is a global Monaco setting — apply the app's resolved light/dark.
 	useEffect(() => {

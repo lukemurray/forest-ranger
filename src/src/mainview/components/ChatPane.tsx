@@ -5,6 +5,7 @@ import type {
 	AgentPermissionMode,
 	AgentProvider,
 	ChatAttachment,
+	ChatDiff,
 	ConfigOption,
 	ElicitationField,
 	ElicitationValue,
@@ -12,7 +13,8 @@ import type {
 	PlanEntryStatus,
 } from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
-import { markExited, updateSession } from "../lib/terminalStore";
+import { markExited, openDiff, updateSession } from "../lib/terminalStore";
+import { AgentDiff } from "./AgentDiff";
 import { FOREST_WORDS, nextForestWord } from "../lib/forestWords";
 import {
 	PERMISSION_MODES,
@@ -52,6 +54,8 @@ type ChatItem =
 			input: unknown;
 			status: "running" | "ok" | "error";
 			summary?: string;
+			/** Structured file edits (edit/write tools) — rendered as a real diff. */
+			diffs?: ChatDiff[];
 	  }
 	| {
 			kind: "permission";
@@ -84,6 +88,7 @@ export function ChatPane({
 	dockId,
 	chatId,
 	worktreeId,
+	projectId,
 	provider,
 	resume,
 	permissionMode,
@@ -95,6 +100,7 @@ export function ChatPane({
 	dockId: string;
 	chatId: string;
 	worktreeId: string;
+	projectId: string;
 	provider: AgentProvider;
 	resume: boolean;
 	permissionMode: AgentPermissionMode;
@@ -106,6 +112,12 @@ export function ChatPane({
 	active: boolean;
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
+	// Open an agent edit as a full Monaco side-by-side diff (working tree vs HEAD for
+	// that file — the applied change), reusing the app's diff-tab infra.
+	const openEditDiff = useCallback(
+		(path: string) => void openDiff({ worktreeId, projectId, path, base: null, preview: true }),
+		[worktreeId, projectId],
+	);
 	const [status, setStatus] = useState<Status>("starting");
 	const [providerValue, setProviderValue] = useState(() => coerceProvider(provider));
 	const [modelValue, setModelValue] = useState(() =>
@@ -180,14 +192,15 @@ export function ChatPane({
 				case "tool_use":
 					setItems((it) => [
 						...it,
-						{ kind: "tool", id: event.id, name: event.name, input: event.input, status: "running" },
+						{ kind: "tool", id: event.id, name: event.name, input: event.input, status: "running", diffs: event.diffs },
 					]);
 					break;
 				case "tool_result":
 					setItems((it) =>
 						it.map((x) =>
 							x.kind === "tool" && x.id === event.id
-								? { ...x, status: event.ok ? "ok" : "error", summary: event.summary }
+								? // keep the diff from tool_use if the completion didn't repeat it
+								  { ...x, status: event.ok ? "ok" : "error", summary: event.summary, diffs: event.diffs ?? x.diffs }
 								: x,
 						),
 					);
@@ -646,6 +659,7 @@ export function ChatPane({
 									active={working && node === lastNode}
 									onPermission={respondPermission}
 									onElicit={submitElicit}
+									onOpenDiff={openEditDiff}
 								/>
 							) : (
 								<ChatRow
@@ -654,6 +668,7 @@ export function ChatPane({
 									pinned={ni === sec.headerIdx}
 									onPermission={respondPermission}
 									onElicit={submitElicit}
+									onOpenDiff={openEditDiff}
 								/>
 							),
 						)}
@@ -968,6 +983,7 @@ function ProcessStrip({
 	active = false,
 	onPermission,
 	onElicit,
+	onOpenDiff,
 }: {
 	steps: ChatItem[];
 	/** True for the in-flight strip: pulse the dot and label it live. */
@@ -978,6 +994,7 @@ function ProcessStrip({
 		action: "accept" | "decline" | "cancel",
 		content?: Record<string, ElicitationValue>,
 	) => void;
+	onOpenDiff: (path: string) => void;
 }) {
 	const last = steps[steps.length - 1];
 	const hint = last ? stepHint(last) : "";
@@ -994,7 +1011,7 @@ function ProcessStrip({
 			</summary>
 			<div className={styles.processBody}>
 				{steps.map((s, i) => (
-					<ChatRow key={i} item={s} onPermission={onPermission} onElicit={onElicit} />
+					<ChatRow key={i} item={s} onPermission={onPermission} onElicit={onElicit} onOpenDiff={onOpenDiff} />
 				))}
 			</div>
 		</details>
@@ -1058,6 +1075,7 @@ const ChatRow = memo(function ChatRow({
 	pinned,
 	onPermission,
 	onElicit,
+	onOpenDiff,
 }: {
 	item: ChatItem;
 	/** Pin this user row as the turn's sticky header. */
@@ -1068,6 +1086,7 @@ const ChatRow = memo(function ChatRow({
 		action: "accept" | "decline" | "cancel",
 		content?: Record<string, ElicitationValue>,
 	) => void;
+	onOpenDiff: (path: string) => void;
 }) {
 	if (item.kind === "user") {
 		return (
@@ -1128,6 +1147,21 @@ const ChatRow = memo(function ChatRow({
 					</div>
 				)}
 			</div>
+		);
+	}
+	// A file edit: show a real inline diff (open by default) with a "View diff"
+	// action, instead of the flattened text.
+	if (item.diffs && item.diffs.length > 0) {
+		return (
+			<details className={styles.tool} data-status={item.status} open>
+				<summary className={styles.toolHeader}>
+					<span className={styles.toolDot} />
+					<span className={styles.toolName}>{item.name}</span>
+				</summary>
+				<div className={styles.toolBody}>
+					<AgentDiff diffs={item.diffs} onOpen={onOpenDiff} />
+				</div>
+			</details>
 		);
 	}
 	// With output, the tool is an expandable disclosure: a one-line header with the

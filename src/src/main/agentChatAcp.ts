@@ -25,6 +25,7 @@ import type {
 	AgentPermissionMode,
 	AgentProvider,
 	ChatAttachment,
+	ChatDiff,
 	ElicitationField,
 	ElicitationValue,
 } from "../shared/types";
@@ -137,6 +138,26 @@ function toolContentText(content: unknown): string {
 		.join("\n")
 		.trim();
 	return text.length > 4000 ? `${text.slice(0, 4000)}\n…(truncated)` : text;
+}
+
+/** Pull structured file edits out of ACP tool content (`type: "diff"` blocks), so
+ *  the UI can render a real diff instead of the flattened text. */
+function toolContentDiffs(content: unknown): ChatDiff[] {
+	if (!Array.isArray(content)) return [];
+	const out: ChatDiff[] = [];
+	for (const c of content) {
+		if (c && typeof c === "object") {
+			const b = c as { type?: unknown; path?: unknown; oldText?: unknown; newText?: unknown };
+			if (b.type === "diff" && typeof b.path === "string" && typeof b.newText === "string") {
+				out.push({
+					path: b.path,
+					oldText: typeof b.oldText === "string" ? b.oldText : null,
+					newText: b.newText,
+				});
+			}
+		}
+	}
+	return out;
 }
 
 /** Turn ACP `enum` / `oneOf` into {value,label} options. */
@@ -319,21 +340,26 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 						emit({ type: "thinking", text: u.content.text });
 					}
 					break;
-				case "tool_call":
+				case "tool_call": {
+					const diffs = toolContentDiffs(u.content);
 					emit({
 						type: "tool_use",
 						id: String(u.toolCallId),
 						name: u.title || u.kind || "tool",
 						input: u.rawInput,
+						diffs: diffs.length ? diffs : undefined,
 					});
 					break;
+				}
 				case "tool_call_update":
 					if (u.status === "completed" || u.status === "failed") {
+						const diffs = toolContentDiffs(u.content);
 						emit({
 							type: "tool_result",
 							id: String(u.toolCallId),
 							ok: u.status === "completed",
 							summary: toolContentText(u.content),
+							diffs: diffs.length ? diffs : undefined,
 						});
 					}
 					break;

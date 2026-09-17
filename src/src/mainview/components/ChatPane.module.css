@@ -316,6 +316,17 @@ details.tool[open] > .toolHeader {
 	max-height: 340px;
 	overflow: auto;
 }
+/* The tool card already draws the frame + sidebar ground; a fenced code block
+   inside it would repeat an identical border/background box within the box. Flatten
+   it so the step's output reads as one surface (keep the padding for copy-button
+   room). Target the <pre> element directly (Markdown's own class is module-hashed,
+   so `.md` can't be named here); `.tool .toolBody` outspecifies `.md pre`. */
+.tool .toolBody pre {
+	margin: 0;
+	border: none;
+	background: transparent;
+	border-radius: 0;
+}
 .toolDot {
 	width: 7px;
 	height: 7px;

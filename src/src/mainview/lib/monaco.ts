@@ -66,3 +66,25 @@ export function monacoLang(path: string): string {
 	const ext = dot >= 0 ? name.slice(dot) : "";
 	return (ext && (byExt!.get(ext) || ALIASES[ext])) || "plaintext";
 }
+
+// Cache of Monaco view state (cursor + scroll) per file/diff tab, so switching
+// away from a tab and back lands you where you left off — the tab's editor is
+// unmounted while hidden (one live editor per group), so it can't hold this
+// itself. View-state objects are tiny; cap the map (LRU) so opening thousands of
+// files never grows it unbounded. ponytail: 200-entry LRU, raise if it bites.
+const viewStates = new Map<string, unknown>();
+const VIEW_STATE_CAP = 200;
+
+export function saveViewState(key: string, s: unknown): void {
+	if (!s) return;
+	viewStates.delete(key); // re-insert at the end so it's freshest in LRU order
+	viewStates.set(key, s);
+	if (viewStates.size > VIEW_STATE_CAP) {
+		const oldest = viewStates.keys().next().value;
+		if (oldest !== undefined) viewStates.delete(oldest);
+	}
+}
+
+export function getViewState(key: string): unknown {
+	return viewStates.get(key);
+}

@@ -278,13 +278,23 @@ function GroupView({ node }: { node: PaneGroup }) {
 				{node.tabs.map((key) => {
 					const s = c.byKey.get(key);
 					if (!s) return null;
+					const isActive = key === node.active;
+					// Chats and terminals stay mounted while hidden — they hold scroll
+					// position, an unsent draft, and live output, and their processes live
+					// in main regardless. File/diff tabs each spin up a heavy Monaco editor,
+					// so mount only the visible one (like VS Code's one-editor-per-group);
+					// remounting re-reads from disk/git. View state (cursor/scroll) resets on
+					// switch — acceptable; persist it later if it bites.
+					// ponytail: unmount-on-hide, not model-swap; add view-state save if it bites.
+					if ((s.kind === "file" || s.kind === "diff") && !isActive) return null;
 					return (
-						<div key={key} className={styles.pane} style={{ display: key === node.active ? "block" : "none" }}>
+						<div key={key} className={styles.pane} style={{ display: isActive ? "block" : "none" }}>
 							{s.kind === "chat" ? (
 								<ChatPane
 									dockId={s.id}
 									chatId={s.sessionId ?? s.id}
 									worktreeId={s.worktreeId}
+									projectId={s.projectId}
 									provider={s.provider ?? "claude"}
 									resume={s.resume ?? false}
 									permissionMode={s.permissionMode ?? "default"}

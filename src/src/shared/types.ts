@@ -187,6 +187,10 @@ export type AgentChatEvent = AgentChatEventKind & {
 	ts?: number;
 };
 
+/** A structured file edit from an ACP edit/write tool: the before/after content
+ *  of one file, so the UI can render a real diff (and open it in Monaco). */
+export type ChatDiff = { path: string; oldText: string | null; newText: string };
+
 type AgentChatEventKind =
 	/**
 	 * Start-of-replay marker: the events that follow are the full buffered
@@ -202,10 +206,11 @@ type AgentChatEventKind =
 	| { type: "assistant_text"; text: string }
 	/** A chunk of the agent's thinking. */
 	| { type: "thinking"; text: string }
-	/** The agent invoked a tool. */
-	| { type: "tool_use"; id: string; name: string; input: unknown }
+	/** The agent invoked a tool. `diffs` carries structured file edits (edit/write
+	 *  tools) so the UI can show a real diff instead of raw text. */
+	| { type: "tool_use"; id: string; name: string; input: unknown; diffs?: ChatDiff[] }
 	/** A tool returned. `summary` is a short, display-ready result string. */
-	| { type: "tool_result"; id: string; ok: boolean; summary: string }
+	| { type: "tool_result"; id: string; ok: boolean; summary: string; diffs?: ChatDiff[] }
 	/** The turn finished (agent is idle, awaiting the next user message). */
 	| { type: "result"; ok: boolean; durationMs: number | null }
 	/** The agent needs permission to run a tool; the user picks one of the options. */
