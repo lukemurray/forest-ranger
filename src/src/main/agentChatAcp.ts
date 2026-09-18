@@ -12,7 +12,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
 	ClientSideConnection,
@@ -286,7 +288,30 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		emit({ type: "configOptions", options: mapped });
 	};
 
+	// Confine client-mediated file I/O to the session's worktree — the agent has
+	// shell access anyway, but our fs proxy shouldn't reach outside the cwd.
+	const inCwd = (p: string): string => {
+		const abs = resolve(p);
+		const root = resolve(opts.cwd);
+		if (abs !== root && !abs.startsWith(root + sep)) throw new Error(`path outside worktree: ${p}`);
+		return abs;
+	};
+
 	const clientImpl: Client = {
+		// Client-mediated reads/writes (fs capability). The agent uses these to edit
+		// files, which surface as structured tool calls with diff content.
+		async readTextFile(params) {
+			const text = readFileSync(inCwd(params.path), "utf8");
+			if (params.line == null && params.limit == null) return { content: text };
+			const lines = text.split("\n");
+			const start = params.line ? Math.max(0, params.line - 1) : 0;
+			const end = params.limit != null ? start + params.limit : lines.length;
+			return { content: lines.slice(start, end).join("\n") };
+		},
+		async writeTextFile(params) {
+			writeFileSync(inCwd(params.path), params.content);
+			return {};
+		},
 		async requestPermission(params) {
 			const options = params.options ?? [];
 			const allow =
@@ -476,7 +501,10 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		const initRes = await conn.initialize({
 			protocolVersion: PROTOCOL_VERSION,
 			clientCapabilities: {
-				fs: { readTextFile: false, writeTextFile: false },
+				// Advertise client-mediated file I/O so the agent edits through the ACP
+				// fs path (structured, with diff content we can render) instead of falling
+				// back to shell writes. Handlers below proxy to the worktree on disk.
+				fs: { readTextFile: true, writeTextFile: true },
 				// Advertise structured elicitation so the agent can ask the user for
 				// form input or send them to a URL.
 				elicitation: { form: {}, url: {} },

@@ -80,7 +80,7 @@ function schedulePersist(sessionId: string): void {
 			if (!buf) return;
 			try {
 				mkdirSync(CHAT_DIR, { recursive: true });
-				writeFileSync(chatFile(sessionId), JSON.stringify(buf));
+				writeFileSync(chatFile(sessionId), JSON.stringify(buf.filter((e) => !isTransient(e))));
 			} catch {
 				// best effort — losing persistence shouldn't break the chat
 			}
@@ -107,13 +107,21 @@ export function listChatLogs(): ChatLogMeta[] {
 	}
 	return out.sort((a, b) => b.updatedAt - a.updatedAt);
 }
-/** Load a persisted log, dropping process-lifecycle events that shouldn't replay. */
+// Transient runtime/lifecycle events, not conversation content: never persisted,
+// and dropped on load so an old log written before this rule is cleaned too. This
+// is what stops a one-off launch failure ("Failed to launch…", "ACP connection
+// closed") from being saved and replayed on every reopen.
+function isTransient(e: AgentChatEvent): boolean {
+	return e.type === "exited" || e.type === "error";
+}
+
+/** Load a persisted log, dropping transient events that shouldn't replay. */
 function loadPersisted(sessionId: string): AgentChatEvent[] | null {
 	try {
 		const raw = readFileSync(chatFile(sessionId), "utf8");
 		const parsed = JSON.parse(raw);
 		if (!Array.isArray(parsed)) return null;
-		return (parsed as AgentChatEvent[]).filter((e) => e.type !== "exited");
+		return (parsed as AgentChatEvent[]).filter((e) => !isTransient(e));
 	} catch {
 		return null;
 	}
