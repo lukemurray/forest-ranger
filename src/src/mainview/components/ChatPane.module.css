@@ -834,3 +834,23 @@ details.tool[open] > .toolHeader {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* URLs in a sent message (see linkify) — same treatment as links in replies. */
+.bubbleLink {
+	color: var(--accent);
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	word-break: break-all;
+}
+.bubbleLink:hover {
+	filter: brightness(1.1);
+}
+
+/* Marker above the rendered turns of a long chat; scrolling near it loads more. */
+.earlier {
+	align-self: center;
+	margin: 4px 0 8px;
+	font-size: 12px;
+	color: var(--text-faint);
+}

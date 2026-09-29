@@ -9,7 +9,7 @@ import { WorktreeCard } from "../components/WorktreeCard";
 import { ProjectBranches } from "../components/ProjectBranches";
 import { CommandDialog } from "../components/CommandDialog";
 import { NewWorktreeDialog } from "../components/NewWorktreeDialog";
-import { ReviewDialog } from "../components/ReviewDialog";
+import { ReviewDialog, ReviewPromptField } from "../components/ReviewDialog";
 import {
 	FolderIcon,
 	PencilIcon,
@@ -228,6 +228,15 @@ export function ProjectView() {
 									))}
 								</ul>
 							)}
+						</section>
+					)}
+
+					{tab === "settings" && (
+						<section className={styles.section}>
+							<div className={styles.sectionHead}>
+								<h2 className={styles.sectionTitle}>Review prompt</h2>
+							</div>
+							<ReviewPromptField projectId={projectId} />
 						</section>
 					)}
 				</div>

@@ -1,31 +1,22 @@
 import { useEffect, useState } from "react";
 import { api } from "../rpc";
+import { DEFAULT_REVIEW_PROMPT, getChatConfig, setReviewPrompt, useChatConfig } from "../lib/chatConfig";
 import { BranchCombobox } from "./BranchCombobox";
 import { Modal, ModalClose, ModalTitle } from "./ui/Modal";
 import { Button } from "./ui/Button";
 import styles from "./NewWorktreeDialog.module.css";
 
-/** The default review instruction, keyed to the chosen branch + base. */
-export function reviewPrompt(branch: string, base: string | null): string {
-	const b = base ?? "the main branch";
-	return `Review the branch \`${branch}\` against \`${b}\`. This worktree is a detached checkout at \`${branch}\` for review.
-
-Start by seeing what changed:
-- \`git log ${b}..HEAD --oneline\` for the commits
-- \`git diff ${b}...HEAD\` for the full diff
-
-Then give me a review:
-- Summarize what the branch does and why.
-- Flag bugs, edge cases, security issues, and consistency/style problems — cite specific files and lines.
-- Call out anything risky, unclear, or worth discussing.
-
-Don't change any code — this is a read-only review.`;
+/** The review instruction for the chosen branch + base, from the project's
+ *  template (project Settings tab) or the built-in default. */
+export function reviewPrompt(projectId: string, branch: string, base: string | null): string {
+	const template = getChatConfig().reviewPromptByProject?.[projectId]?.trim() || DEFAULT_REVIEW_PROMPT;
+	return template.replaceAll("{branch}", branch).replaceAll("{base}", base ?? "the main branch");
 }
 
 /**
- * Pick a branch to review, with an editable prompt (defaults to the auto one).
- * Creates a throwaway detached worktree at that branch and opens a chat with the
- * given prompt (handled by `onSubmit`).
+ * Pick a branch to review, with an editable prompt (defaults to the Settings
+ * template). Checks the branch out in a worktree (reusing one that already has it)
+ * and opens a chat with the given prompt (handled by `onSubmit`).
  */
 export function ReviewDialog({
 	open,
@@ -62,13 +53,13 @@ export function ReviewDialog({
 
 	// Keep the (hidden) prompt in sync with the picked branch until the user edits it.
 	useEffect(() => {
-		if (!edited) setPrompt(branch ? reviewPrompt(branch, base) : "");
+		if (!edited) setPrompt(branch ? reviewPrompt(projectId, branch, base) : "");
 	}, [branch, base, edited]);
 
 	async function start() {
 		if (!branch || busy) return;
 		setBusy(true);
-		const finalPrompt = custom && prompt.trim() ? prompt.trim() : reviewPrompt(branch, base);
+		const finalPrompt = custom && prompt.trim() ? prompt.trim() : reviewPrompt(projectId, branch, base);
 		await onSubmit(branch, base, finalPrompt);
 		setBusy(false);
 		onOpenChange(false);
@@ -128,5 +119,33 @@ export function ReviewDialog({
 				</Button>
 			</div>
 		</Modal>
+	);
+}
+
+/** Project Settings field: this project's review prompt, as an editable template. */
+export function ReviewPromptField({ projectId }: { projectId: string }) {
+	const saved = useChatConfig().reviewPromptByProject?.[projectId];
+	const custom = saved !== undefined && saved !== DEFAULT_REVIEW_PROMPT;
+	return (
+		<div className={styles.field}>
+			<textarea
+				className={styles.promptArea}
+				value={saved ?? DEFAULT_REVIEW_PROMPT}
+				onChange={(e) => setReviewPrompt(projectId, e.target.value)}
+				rows={14}
+				spellCheck={false}
+				aria-label="Review prompt"
+			/>
+			<div className={styles.promptFooter}>
+				<p className={styles.hint}>
+					<code>{"{branch}"}</code> and <code>{"{base}"}</code> are filled in when a review starts.
+				</p>
+				{custom && (
+					<Button variant="subtle" onClick={() => setReviewPrompt(projectId, undefined)}>
+						Reset to default
+					</Button>
+				)}
+			</div>
+		</div>
 	);
 }

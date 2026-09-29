@@ -10,7 +10,7 @@
  * Sessions live in the main process so they survive renderer reloads/HMR.
  */
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -30,9 +30,23 @@ const CHAT_DIR = join(
 	process.env.FOREST_RANGER_DATA_DIR || join(homedir(), ".forest-ranger"),
 	"chats",
 );
+/** The chat's event log: JSON Lines, one event per line, appended as events finalize
+ *  (no whole-file rewrites). A crash can only cut the last line, which load skips. */
 function chatFile(sessionId: string): string {
+	return join(CHAT_DIR, `${sessionId}.jsonl`);
+}
+/** Pre-JSONL log (one JSON array, rewritten whole). Read to migrate; never written
+ *  or deleted by the app — the user can remove them once happy. */
+function legacyChatFile(sessionId: string): string {
 	return join(CHAT_DIR, `${sessionId}.json`);
 }
+const mtime = (p: string): number => {
+	try {
+		return statSync(p).mtimeMs;
+	} catch {
+		return -1;
+	}
+};
 function chatMetaFile(sessionId: string): string {
 	return join(CHAT_DIR, `${sessionId}.meta.json`);
 }
@@ -68,6 +82,36 @@ function writeChatMeta(sessionId: string): void {
 	}
 }
 
+// How many entries at the front of each buffer are already on disk. Those are
+// frozen: appendEvent never merges a new chunk into them, so the file only ever
+// needs appending.
+const written = new Map<string, number>();
+
+/** Append a session's not-yet-written entries to its log. A trailing text/thinking
+ *  entry may still be growing (a streaming reply), so it waits for the next flush
+ *  unless `all` (closing / quitting). */
+function flush(sessionId: string, all: boolean): void {
+	const buf = buffers.get(sessionId);
+	if (!buf) return;
+	const from = written.get(sessionId) ?? 0;
+	const tail = buf[buf.length - 1];
+	const growing = !all && tail && (tail.type === "assistant_text" || tail.type === "thinking");
+	const to = growing ? buf.length - 1 : buf.length;
+	if (to <= from) return;
+	const lines = buf
+		.slice(from, to)
+		.filter((e) => !isTransient(e))
+		.map((e) => `${JSON.stringify(e)}\n`)
+		.join("");
+	try {
+		mkdirSync(CHAT_DIR, { recursive: true });
+		if (lines) appendFileSync(chatFile(sessionId), lines);
+		written.set(sessionId, to);
+	} catch {
+		// best effort — losing persistence shouldn't break the chat
+	}
+}
+
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 function schedulePersist(sessionId: string): void {
 	const existing = persistTimers.get(sessionId);
@@ -76,14 +120,7 @@ function schedulePersist(sessionId: string): void {
 		sessionId,
 		setTimeout(() => {
 			persistTimers.delete(sessionId);
-			const buf = buffers.get(sessionId);
-			if (!buf) return;
-			try {
-				mkdirSync(CHAT_DIR, { recursive: true });
-				writeFileSync(chatFile(sessionId), JSON.stringify(buf.filter((e) => !isTransient(e))));
-			} catch {
-				// best effort — losing persistence shouldn't break the chat
-			}
+			flush(sessionId, false);
 			writeChatMeta(sessionId);
 		}, 400),
 	);
@@ -115,13 +152,39 @@ function isTransient(e: AgentChatEvent): boolean {
 	return e.type === "exited" || e.type === "error";
 }
 
-/** Load a persisted log, dropping transient events that shouldn't replay. */
+/** Drop transient events and merge streamed chunks. */
+function coalesce(events: AgentChatEvent[]): AgentChatEvent[] {
+	const out: AgentChatEvent[] = [];
+	for (const e of events) if (!isTransient(e)) appendEvent(out, e);
+	return out;
+}
+
+/**
+ * Load a persisted log. Reads the .jsonl, unless a legacy .json is newer (not yet
+ * migrated, or written by an older build after migrating) — then that is converted
+ * to .jsonl (the .json is left in place) and used.
+ */
 function loadPersisted(sessionId: string): AgentChatEvent[] | null {
 	try {
-		const raw = readFileSync(chatFile(sessionId), "utf8");
-		const parsed = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return null;
-		return (parsed as AgentChatEvent[]).filter((e) => !isTransient(e));
+		const jsonl = chatFile(sessionId);
+		const legacy = legacyChatFile(sessionId);
+		if (mtime(legacy) > mtime(jsonl)) {
+			const parsed = JSON.parse(readFileSync(legacy, "utf8"));
+			if (!Array.isArray(parsed)) return null;
+			const events = coalesce(parsed as AgentChatEvent[]);
+			writeFileSync(jsonl, events.map((e) => `${JSON.stringify(e)}\n`).join(""));
+			return events;
+		}
+		const events: AgentChatEvent[] = [];
+		for (const line of readFileSync(jsonl, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				events.push(JSON.parse(line) as AgentChatEvent);
+			} catch {
+				// a line cut short by a crash mid-append — skip it
+			}
+		}
+		return coalesce(events);
 	} catch {
 		return null;
 	}
@@ -170,8 +233,30 @@ const sessions = new Map<string, AgentDriver>();
  * remounts/reloads (worktree nav, HMR, full reload) can replay the conversation
  * from the still-running main process. Mirrors the terminal scrollback buffer.
  */
+// No event cap: capping dropped the *oldest* events, which silently cut the start
+// of long chats from the saved log (incl. the `system` event resume relies on).
+// Coalescing streamed chunks (appendEvent) keeps the buffer ~one entry per message
+// or tool call instead of one per token burst.
+// ponytail: unbounded per session (~1–2MB for the largest chats seen); add a byte cap
+// that never drops `system`/user turns if a chat ever gets pathological.
 const buffers = new Map<string, AgentChatEvent[]>();
-const MAX_BUFFER = 5000;
+
+/** Append to a buffer, merging a streamed text/thinking chunk into the previous
+ *  one (keeping its ts — when the reply began). Replays identically: the view
+ *  merges consecutive chunks the same way. */
+function appendEvent(buf: AgentChatEvent[], e: AgentChatEvent, frozen = 0): void {
+	const last = buf[buf.length - 1];
+	if (
+		last &&
+		buf.length - 1 >= frozen && // already written to disk → start a new entry
+		(e.type === "assistant_text" || e.type === "thinking") &&
+		last.type === e.type
+	) {
+		buf[buf.length - 1] = { ...last, text: last.text + e.text };
+	} else {
+		buf.push(e);
+	}
+}
 
 let emitGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = null;
 let statusGlobal: ((sessionId: string, event: AgentChatEvent) => void) | null = null;
@@ -184,8 +269,7 @@ function emitterFor(sessionId: string): Emit {
 		const stamped = { ...event, ts: event.ts ?? Date.now() };
 		const buf = buffers.get(sessionId);
 		if (buf) {
-			buf.push(stamped);
-			if (buf.length > MAX_BUFFER) buf.shift();
+			appendEvent(buf, stamped, written.get(sessionId) ?? 0);
 			schedulePersist(sessionId);
 		}
 		emitGlobal?.(sessionId, stamped);
@@ -258,6 +342,7 @@ export function startSession(opts: StartOpts): boolean {
 	// the driver can loadSession and continue where the conversation left off.
 	const persisted = opts.resume ? loadPersisted(opts.sessionId) : null;
 	buffers.set(opts.sessionId, persisted ?? []);
+	written.set(opts.sessionId, persisted?.length ?? 0);
 	// Reopening an existing chat: file it to this worktree right away (don't wait
 	// for the first new event), so a recovered orphan stops being an orphan now.
 	if (persisted && persisted.length > 0) {
@@ -344,23 +429,21 @@ export function cancel(sessionId: string): void {
 export function stop(sessionId: string): void {
 	sessions.get(sessionId)?.stop();
 	sessions.delete(sessionId);
+	clearTimeout(persistTimers.get(sessionId));
+	persistTimers.delete(sessionId);
+	flush(sessionId, true); // write the tail before freeing it
 	buffers.delete(sessionId); // free memory; the on-disk log survives for reopen
+	written.delete(sessionId);
 }
 
 /** Kill every live chat session — used when the app is quitting. */
 export function killAll(): void {
 	// Flush any debounced logs synchronously so a quit doesn't lose recent turns.
-	try {
-		mkdirSync(CHAT_DIR, { recursive: true });
-		for (const [sessionId, buf] of buffers) {
-			writeFileSync(chatFile(sessionId), JSON.stringify(buf));
-		}
-	} catch {
-		// best effort
-	}
+	for (const sessionId of buffers.keys()) flush(sessionId, true);
 	for (const t of persistTimers.values()) clearTimeout(t);
 	persistTimers.clear();
 	for (const d of sessions.values()) d.stop();
 	sessions.clear();
 	buffers.clear();
+	written.clear();
 }

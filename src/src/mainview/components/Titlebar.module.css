@@ -10,6 +10,33 @@
 	border-bottom: 1px solid var(--border);
 }
 
+/* Browser-style history nav at the far left. Borderless so it reads as window
+   chrome rather than a view action. */
+.nav {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+}
+.navBtn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+}
+.navBtn:hover:not(:disabled) {
+	background: var(--bg-hover);
+	color: var(--text);
+}
+.navBtn:disabled {
+	color: var(--text-faint);
+	opacity: 0.5;
+	cursor: default;
+}
+
 .left {
 	display: flex;
 	align-items: center;

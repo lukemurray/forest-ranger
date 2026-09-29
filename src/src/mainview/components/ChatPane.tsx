@@ -24,6 +24,7 @@ import {
 	modelArg,
 	providerLabel,
 	rememberProviderModes,
+	rememberProviderModels,
 } from "../lib/chatConfig";
 import { Select } from "./ui/Select";
 import { ChatSettingsMenu } from "./ChatSettingsMenu";
@@ -41,6 +42,12 @@ type LocalAttachment = {
 	dataUrl: string;
 	isImage: boolean;
 };
+
+// Chats whose preferred default mode has been applied this renderer session, so a
+// remount (worktree nav, tab switch) doesn't re-apply it over a mode the user
+// changed live. Cleared on reload — which is exactly when we want to re-apply the
+// default to resumed chats (the agent doesn't persist per-chat mode across restart).
+const defaultModeApplied = new Set<string>();
 type Outgoing = { text: string; attachments: ChatAttachment[] };
 
 type ChatItem =
@@ -306,16 +313,32 @@ export function ChatPane({
 	// Sticky question headers are pure CSS section-stickies (see `.turn`); long ones
 	// are clamped with a Show more toggle (see UserBubble), not a scroll-driven cap.
 	const stick = useRef(true);
+	// Most recent turns rendered (older ones load as you scroll up; see below).
+	const [turnLimit, setTurnLimit] = useState(TURN_WINDOW);
+	const restoringScroll = useRef(false);
 	const onScroll = () => {
 		const el = scrollRef.current;
-		if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+		if (!el) return;
+		stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+		// Our own offset restore after loading older turns isn't the user returning.
+		if (restoringScroll.current) {
+			restoringScroll.current = false;
+			return;
+		}
+		// Back at the bottom following along: drop the older turns you'd loaded (UI
+		// only — they reload on the next scroll up). Only when the content is well over
+		// a screen tall, so a short chat can't trim → reveal the sentinel → reload in a
+		// loop. Bails out when unchanged.
+		if (stick.current && el.scrollHeight > el.clientHeight * 3) {
+			setTurnLimit((n) => (n > TURN_WINDOW ? TURN_WINDOW : n));
+		}
 	};
 	// `active` is a dep because a tab mounted while hidden (display:none) measures
 	// zero height — re-run on activation so the newest message is in view.
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
 		if (el && active && stick.current) el.scrollTop = el.scrollHeight;
-	}, [items, status, active]);
+	}, [items, status, active, turnLimit]);
 
 	// Auto-grow the input from one line up to ~30% of the viewport, then scroll.
 	// `active` dep for the same reason: scrollHeight is 0 while the tab is hidden,
@@ -390,19 +413,30 @@ export function ChatPane({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [status]);
 
-	// Learn this provider's mode options (so Settings can offer them), and — on a
-	// fresh chat only — switch to the user's preferred default mode once. Resumed
-	// chats keep whatever mode they had.
-	const appliedDefaultMode = useRef(resume);
+	// Learn this provider's mode options (so Settings can offer them), and apply the
+	// user's preferred default mode once per chat. This runs for resumed chats too:
+	// the agent doesn't persist per-chat mode across a restart (it comes back
+	// "manual"), so we re-assert the default — but only when it actually differs
+	// (no-op if the agent already restored it) and only once per session (a remount
+	// won't override a mode the user switched live).
 	useEffect(() => {
+		// Remember the agent's own model list so pickers (before connect, new chats)
+		// offer its real, current models — no app change needed when models ship.
+		const modelOpt = configOptions.find((o) => o.id === "model" || o.category === "model");
+		if (modelOpt) {
+			rememberProviderModels(
+				providerValue,
+				modelOpt.options.map((o) => ({ value: o.value, label: o.label })),
+			);
+		}
 		const modeOpt = configOptions.find((o) => o.id === "mode" || o.category === "mode");
 		if (!modeOpt) return;
 		rememberProviderModes(
 			providerValue,
 			modeOpt.options.map((o) => ({ value: o.value, label: o.label })),
 		);
-		if (!appliedDefaultMode.current) {
-			appliedDefaultMode.current = true;
+		if (!defaultModeApplied.has(chatId)) {
+			defaultModeApplied.add(chatId);
 			const want = getChatConfig().defaultModeByProvider?.[providerValue];
 			if (want && want !== modeOpt.currentValue && modeOpt.options.some((o) => o.value === want)) {
 				bus.agentChatSetConfigOption({ sessionId: chatId, configId: modeOpt.id, value: want });
@@ -578,6 +612,37 @@ export function ChatPane({
 	// turn's box, so the next turn scrolls up and *pushes* the previous header out.
 	const sections = useMemo(() => buildSections(renderNodes), [renderNodes]);
 	const dividers = useMemo(() => buildDividers(sections), [sections]);
+	// Render only the most recent turns (bounds the DOM of long chats, which stay
+	// mounted while their tab is hidden). A sentinel above them loads another window
+	// as you scroll near the top; the scroll offset is then restored so the view
+	// doesn't jump as older turns appear above it.
+	const hiddenTurns = Math.max(0, sections.length - turnLimit);
+	const topSentinel = useRef<HTMLDivElement>(null);
+	const loadAnchor = useRef<{ height: number; top: number } | null>(null);
+	useEffect(() => {
+		const el = topSentinel.current;
+		const root = scrollRef.current;
+		if (!el || !root) return;
+		// Re-created per load, so a sentinel still in view after a short load fires again.
+		const io = new IntersectionObserver(
+			([entry]) => {
+				if (!entry.isIntersecting) return;
+				loadAnchor.current = { height: root.scrollHeight, top: root.scrollTop };
+				setTurnLimit((n) => n + TURN_WINDOW);
+			},
+			{ root, rootMargin: "400px 0px 0px 0px" },
+		);
+		io.observe(el);
+		return () => io.disconnect();
+	}, [hiddenTurns > 0, turnLimit]);
+	useLayoutEffect(() => {
+		const root = scrollRef.current;
+		const a = loadAnchor.current;
+		if (!root || !a) return;
+		loadAnchor.current = null;
+		restoringScroll.current = true;
+		root.scrollTop = a.top + (root.scrollHeight - a.height);
+	}, [turnLimit]);
 	const lastNode = renderNodes[renderNodes.length - 1];
 
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
@@ -644,11 +709,16 @@ export function ChatPane({
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
 				)}
-				{sections.map((sec, si) => (
-					<div key={si} className={styles.turn}>
-						{dividers[si] && (
+				{hiddenTurns > 0 && (
+					<div ref={topSentinel} className={styles.earlier}>
+						{hiddenTurns} earlier turn{hiddenTurns === 1 ? "" : "s"}
+					</div>
+				)}
+				{sections.slice(hiddenTurns).map((sec, i) => (
+					<div key={i + hiddenTurns} className={styles.turn}>
+						{dividers[i + hiddenTurns] && (
 							<div className={styles.timeDivider}>
-								<span>{dividers[si]}</span>
+								<span>{dividers[i + hiddenTurns]}</span>
 							</div>
 						)}
 						{sec.nodes.map((node, ni) =>
@@ -978,6 +1048,17 @@ function stepHint(item: ChatItem): string {
 }
 
 /** Collapsible "Working…" strip wrapping a turn's thinking + tool + narration steps. */
+/** Open state for a <details> whose body mounts only while open. Collapsed step
+ *  strips, tool output (parsed Markdown, up to 4k chars each) and thinking are most
+ *  of a long agentic chat's DOM, and are rarely expanded. */
+function useFold(initial = false) {
+	const [open, setOpen] = useState(initial);
+	return {
+		open,
+		onToggle: (e: React.SyntheticEvent<HTMLDetailsElement>) => setOpen(e.currentTarget.open),
+	};
+}
+
 function ProcessStrip({
 	steps,
 	active = false,
@@ -998,8 +1079,9 @@ function ProcessStrip({
 }) {
 	const last = steps[steps.length - 1];
 	const hint = last ? stepHint(last) : "";
+	const fold = useFold();
 	return (
-		<details className={styles.process} data-active={active || undefined}>
+		<details className={styles.process} data-active={active || undefined} open={fold.open} onToggle={fold.onToggle}>
 			<summary className={styles.processHead}>
 				{/* No "Working…" verb — the tree + forest word is the single live status;
 				    this strip just labels the tool steps it folds (dot pulses while active). */}
@@ -1009,13 +1091,48 @@ function ProcessStrip({
 				</span>
 				{hint && <span className={styles.processMeta}>· {hint}</span>}
 			</summary>
-			<div className={styles.processBody}>
-				{steps.map((s, i) => (
-					<ChatRow key={i} item={s} onPermission={onPermission} onElicit={onElicit} onOpenDiff={onOpenDiff} />
-				))}
-			</div>
+			{fold.open && (
+				<div className={styles.processBody}>
+					{steps.map((s, i) => (
+						<ChatRow key={i} item={s} onPermission={onPermission} onElicit={onElicit} onOpenDiff={onOpenDiff} />
+					))}
+				</div>
+			)}
 		</details>
 	);
+}
+
+// http(s) URLs in plain text. Trailing sentence punctuation / a closing bracket is
+// left out of the link ("see https://x.com/a." links just the URL).
+const URL_RE = /https?:\/\/[^\s<>"'`]+/g;
+const URL_TRAIL = /[.,;:!?)\]}'"]+$/;
+
+/** Plain text with its URLs turned into links that open in the browser. The rest
+ *  stays literal (a user's message isn't reinterpreted as Markdown). */
+function linkify(text: string): React.ReactNode[] {
+	const out: React.ReactNode[] = [];
+	let last = 0;
+	for (const m of text.matchAll(URL_RE)) {
+		const url = m[0].replace(URL_TRAIL, "");
+		const start = m.index;
+		if (start > last) out.push(text.slice(last, start));
+		out.push(
+			<a
+				key={start}
+				className={styles.bubbleLink}
+				href={url}
+				onClick={(e) => {
+					e.preventDefault();
+					api.openUrl({ url });
+				}}
+			>
+				{url}
+			</a>,
+		);
+		last = start + url.length;
+	}
+	if (last < text.length) out.push(text.slice(last));
+	return out;
 }
 
 /** A sent user message: long ones clamp with an inline Show more/less toggle so a
@@ -1055,7 +1172,7 @@ function UserBubble({
 				data-clamped={overflows && !expanded ? "" : undefined}
 				style={overflows && !expanded ? { maxHeight: CLAMP_PX } : undefined}
 			>
-				{text}
+				{linkify(text)}
 			</div>
 			{overflows && (
 				<button className={styles.showMore} onClick={() => setExpanded((e) => !e)}>
@@ -1066,6 +1183,8 @@ function UserBubble({
 	);
 }
 const CLAMP_PX = 80;
+/** Turns rendered at once in a chat; scrolling up loads this many more at a time. */
+const TURN_WINDOW = 30;
 
 // Memoized: with stable callbacks and ref-stable item objects (only changed
 // items get new refs from the reducer), a streamed token re-renders just the
@@ -1088,6 +1207,7 @@ const ChatRow = memo(function ChatRow({
 	) => void;
 	onOpenDiff: (path: string) => void;
 }) {
+	const fold = useFold();
 	if (item.kind === "user") {
 		return (
 			<div className={styles.user} data-pinned={pinned || undefined}>
@@ -1112,9 +1232,9 @@ const ChatRow = memo(function ChatRow({
 	if (item.kind === "thinking") {
 		if (isBlankText(item.text)) return null;
 		return (
-			<details className={styles.thinking}>
+			<details className={styles.thinking} open={fold.open} onToggle={fold.onToggle}>
 				<summary>Thinking</summary>
-				<div className={styles.thinkingBody}>{item.text}</div>
+				{fold.open && <div className={styles.thinkingBody}>{item.text}</div>}
 			</details>
 		);
 	}
@@ -1178,15 +1298,17 @@ const ChatRow = memo(function ChatRow({
 		);
 	}
 	return (
-		<details className={styles.tool} data-status={item.status}>
+		<details className={styles.tool} data-status={item.status} open={fold.open} onToggle={fold.onToggle}>
 			<summary className={styles.toolHeader}>
 				<span className={styles.toolDot} />
 				<span className={styles.toolName}>{item.name}</span>
 				<span className={styles.toolSummary}>{toolPreview(item.summary)}</span>
 			</summary>
-			<div className={styles.toolBody}>
-				<Markdown text={item.summary} />
-			</div>
+			{fold.open && (
+				<div className={styles.toolBody}>
+					<Markdown text={item.summary} />
+				</div>
+			)}
 		</details>
 	);
 });

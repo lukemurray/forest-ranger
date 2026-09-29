@@ -91,3 +91,10 @@
 	font-size: 13px;
 	color: var(--text-muted);
 }
+
+.promptFooter {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}

@@ -24,6 +24,24 @@ export const ChevronIcon = ({ size = 14 }: Props) => svg(size, <path d="m9 18 6-
 
 export const ChevronDownIcon = ({ size = 14 }: Props) => svg(size, <path d="m6 9 6 6 6-6" />);
 
+export const ArrowLeftIcon = ({ size = 16 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="m12 19-7-7 7-7" />
+			<path d="M19 12H5" />
+		</>,
+	);
+
+export const ArrowRightIcon = ({ size = 16 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M5 12h14" />
+			<path d="m12 5 7 7-7 7" />
+		</>,
+	);
+
 export const EllipsisIcon = ({ size = 16 }: Props) => (
 	<svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 		<circle cx="5" cy="12" r="1.6" />

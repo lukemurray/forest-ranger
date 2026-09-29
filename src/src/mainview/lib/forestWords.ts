@@ -102,7 +102,8 @@ export const FOREST_WORDS = [
 	"Tracking squirrels",
 	"Observing the clouds",
 	"Sketching the landscape",
-	"Observing the stars"
+	"Observing the stars",
+	"Walking the forest"
 ];
 
 /** A random forest word that isn't one of the recently-shown ones (pass the last
