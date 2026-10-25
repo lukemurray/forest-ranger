@@ -59,3 +59,26 @@
 	font-size: 13px;
 	margin: auto;
 }
+
+/* Indeterminate progress line under the titlebar while a worktree opens. */
+.pendingBar {
+	height: 2px;
+	background: linear-gradient(90deg, transparent, var(--accent), transparent);
+	background-size: 40% 100%;
+	background-repeat: no-repeat;
+	animation: pendingSlide 1s ease-in-out infinite;
+}
+@keyframes pendingSlide {
+	from {
+		background-position: -40% 0;
+	}
+	to {
+		background-position: 140% 0;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.pendingBar {
+		animation: none;
+		background-position: 50% 0;
+	}
+}

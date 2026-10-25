@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "@tanstack/react-router";
+import { worktreeRoute } from "../router";
 import { Collapsible } from "@base-ui-components/react/collapsible";
 import type {
 	ChangedFile,
@@ -84,16 +85,25 @@ export function ReviewPanel({
 	// regains focus, and poll gently while it's focused. (invalidate re-runs the
 	// worktree loader — git status/log — which is where the changes come from.)
 	useEffect(() => {
+		// Reload only this worktree's own route data — not every match. An unscoped
+		// invalidate also reloaded the projects list, and when it fired mid-switch,
+		// re-ran the worktree being opened.
+		const refresh = () =>
+			router.invalidate({
+				filter: (m) =>
+					m.routeId === worktreeRoute.id &&
+					(m.params as { worktreeId?: string }).worktreeId === worktree.id,
+			});
 		let timer: ReturnType<typeof setInterval> | null = null;
 		const stop = () => {
 			if (timer) clearInterval(timer);
 			timer = null;
 		};
 		const start = () => {
-			if (!timer) timer = setInterval(() => router.invalidate(), 4000);
+			if (!timer) timer = setInterval(refresh, 4000);
 		};
 		const onFocus = () => {
-			router.invalidate();
+			refresh();
 			start();
 		};
 		if (document.hasFocus()) start();
@@ -104,7 +114,7 @@ export function ReviewPanel({
 			window.removeEventListener("focus", onFocus);
 			window.removeEventListener("blur", stop);
 		};
-	}, [router]);
+	}, [router, worktree.id]);
 
 	const isStaged = (path: string) => {
 		if (optimistic.has(path)) return !!optimistic.get(path);
@@ -210,6 +220,18 @@ export function ReviewPanel({
 		router.invalidate();
 	}
 
+	const [reattaching, setReattaching] = useState(false);
+	async function reattach() {
+		if (reattaching) return;
+		setReattaching(true);
+		const res = await api.reattachWorktree({ id: worktree.id });
+		setReattaching(false);
+		if (res.ok) notify(`Back on ${worktree.detachedFrom}`);
+		else notify(res.error ?? "Reattach failed", "error");
+		emitDataChanged("worktrees"); // sidebar label: "feature/x (detached)" → "feature/x"
+		router.invalidate();
+	}
+
 	// Something to push: no upstream yet, or local commits ahead of it.
 	const canPush = !!branch && !worktree.isDetached && (!upstream || upstreamAhead > 0);
 
@@ -301,6 +323,16 @@ export function ReviewPanel({
 						{canPush && (
 							<button className={styles.updateBtn} onClick={push} disabled={pushing}>
 								{pushing ? "Pushing…" : upstream ? `Push ↑${upstreamAhead}` : "Push"}
+							</button>
+						)}
+						{worktree.isDetached && worktree.detachedFrom && (
+							<button
+								className={styles.updateBtn}
+								onClick={reattach}
+								disabled={reattaching}
+								data-tip={`Switch back onto ${worktree.detachedFrom} (fast-forward only — no commits lost)`}
+							>
+								{reattaching ? "Reattaching…" : `Reattach to ${worktree.detachedFrom}`}
 							</button>
 						)}
 						<div className={styles.badges}>

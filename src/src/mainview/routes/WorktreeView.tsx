@@ -24,6 +24,7 @@ import {
 import { api, emitDataChanged } from "../rpc";
 import { providerLabel, useChatConfig } from "../lib/chatConfig";
 import { relativeTime } from "../lib/format";
+import { worktreeLabel } from "../lib/worktreeLabel";
 import { openInEditor, runProjectCommand } from "../lib/openTargets";
 import { openSession, useTerminals } from "../lib/terminalStore";
 import { togglePanel, usePanel } from "../lib/panelStore";
@@ -99,7 +100,8 @@ export function WorktreeView() {
 	}
 
 	const { worktree, projectName, branch, upstream, commands } = detail;
-	const label = branch ?? "detached";
+	// Detached: name it by the branch it came from (the title shows branches, not labels).
+	const label = branch ?? worktreeLabel({ ...worktree, name: null }).label;
 	const openIds = new Set(wtSessions.map((s) => s.sessionId).filter(Boolean));
 	const reopenable = pastChats.filter((c) => !openIds.has(c.sessionId));
 
@@ -308,7 +310,8 @@ export function WorktreeView() {
 				</button>
 				<span className={tb.muted}>/</span>
 				<GitBranchIcon size={15} />
-				{branch ?? "detached"}
+				{label}
+				{!branch && <span className={styles.upstream}>(detached)</span>}
 				{upstream && <span className={styles.upstream}>→ {upstream}</span>}
 			</Titlebar>
 
@@ -345,6 +348,21 @@ export function WorktreeView() {
 					navigate({ to: "/project/$projectId", params: { projectId } });
 				}}
 			/>
+		</div>
+	);
+}
+
+/**
+ * Shown while a worktree's details load (only if that takes over ~150ms — see the
+ * route), so a click on a worktree gives feedback at once instead of nothing.
+ */
+export function WorktreePending() {
+	return (
+		<div className={styles.view}>
+			<Titlebar>
+				<span className={tb.muted}>Opening worktree…</span>
+			</Titlebar>
+			<div className={styles.pendingBar} />
 		</div>
 	);
 }

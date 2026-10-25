@@ -70,3 +70,8 @@
 	color: var(--amber);
 	background: rgba(226, 179, 65, 0.16);
 }
+
+/* The real branch beside a labelled worktree. */
+.rowBranch {
+	color: var(--text-faint);
+}

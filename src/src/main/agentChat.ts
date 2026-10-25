@@ -68,6 +68,30 @@ function deriveChatName(buf: AgentChatEvent[]): string {
 	return line.length > 48 ? `${line.slice(0, 48).trimEnd()}…` : line;
 }
 
+// Events that mean something happened in the chat (vs. bookkeeping like modes or
+// options, which an agent re-sends whenever it starts).
+const WORK_EVENTS = new Set(["user_text", "assistant_text", "tool_use", "tool_result", "result"]);
+
+/**
+ * When the chat last had real activity — its newest message/tool event. Not "now":
+ * this feeds worktree recency, and merely reopening a chat (restoring tabs after a
+ * restart) must not make its worktree look just-used. Logs from before events were
+ * timestamped keep their previously saved time.
+ */
+function lastWorkAt(sessionId: string, buf: AgentChatEvent[]): number {
+	for (let i = buf.length - 1; i >= 0; i--) {
+		const e = buf[i];
+		if (e.ts && WORK_EVENTS.has(e.type)) return e.ts;
+	}
+	try {
+		const prev = JSON.parse(readFileSync(chatMetaFile(sessionId), "utf8")) as ChatLogMeta;
+		if (prev.updatedAt) return prev.updatedAt;
+	} catch {
+		// no saved meta yet — a brand-new chat
+	}
+	return Date.now();
+}
+
 /** Write the `.meta.json` sidecar for a session (files it to its worktree). */
 function writeChatMeta(sessionId: string): void {
 	const ctx = sessionMeta.get(sessionId);
@@ -75,7 +99,7 @@ function writeChatMeta(sessionId: string): void {
 	if (!ctx || !buf) return;
 	try {
 		mkdirSync(CHAT_DIR, { recursive: true });
-		const meta: ChatLogMeta = { sessionId, ...ctx, name: deriveChatName(buf), updatedAt: Date.now() };
+		const meta: ChatLogMeta = { sessionId, ...ctx, name: deriveChatName(buf), updatedAt: lastWorkAt(sessionId, buf) };
 		writeFileSync(chatMetaFile(sessionId), JSON.stringify(meta));
 	} catch {
 		// best effort
@@ -226,7 +250,20 @@ export type AgentDriver = {
 
 export type Emit = (event: AgentChatEvent) => void;
 
+/** Live agent drivers. A chat can be open (history shown) with no driver: restored
+ *  chats start their agent on first use, and idle agents are stopped (see reaper). */
 const sessions = new Map<string, AgentDriver>();
+/** How to (re)launch each open chat's agent — kept current as settings change. */
+const launchOpts = new Map<string, StartOpts>();
+/** Last live event or user action per chat, for the idle reaper. */
+const lastActivity = new Map<string, number>();
+/** Chats with a turn in flight, and open permission/elicitation asks per chat —
+ *  neither is ever stopped for being idle. */
+const busy = new Set<string>();
+const openAsks = new Map<string, number>();
+/** Chats that had a driver earlier this run: a relaunch restores their own last
+ *  settings (mode/model/…) rather than defaults. */
+const hadDriver = new Set<string>();
 
 /**
  * Per-session event log, retained while the session is alive so a webview that
@@ -272,11 +309,41 @@ function emitterFor(sessionId: string): Emit {
 			appendEvent(buf, stamped, written.get(sessionId) ?? 0);
 			schedulePersist(sessionId);
 		}
+		track(sessionId, stamped);
 		emitGlobal?.(sessionId, stamped);
 		// Status (working/unread/attention) tracks *live* events only — replay must
 		// not re-fire it, or reopening a chat would re-mark old turns.
 		statusGlobal?.(sessionId, stamped);
 	};
+}
+
+/** Bookkeeping for on-demand start and the idle reaper (live events only). */
+function track(sessionId: string, e: AgentChatEvent): void {
+	lastActivity.set(sessionId, Date.now());
+	switch (e.type) {
+		case "user_text":
+			busy.add(sessionId);
+			break;
+		case "result":
+		case "error":
+			busy.delete(sessionId);
+			break;
+		case "permission":
+		case "elicitation":
+			openAsks.set(sessionId, (openAsks.get(sessionId) ?? 0) + 1);
+			break;
+		case "permission_resolved":
+		case "elicitation_resolved":
+			openAsks.set(sessionId, Math.max(0, (openAsks.get(sessionId) ?? 0) - 1));
+			break;
+		case "exited":
+			// The adapter quit on its own (intentional stops don't emit this). Drop the
+			// dead driver so the next message starts a fresh one instead of failing.
+			busy.delete(sessionId);
+			openAsks.delete(sessionId);
+			sessions.delete(sessionId);
+			break;
+	}
 }
 
 /** Wire the live-only status callback (attention/working/unread), never on replay. */
@@ -290,11 +357,9 @@ export function setAgentStatusCallback(
 function replay(sessionId: string): void {
 	const buf = buffers.get(sessionId);
 	if (!buf) return;
-	// Bracket the replay with a reset so the view starts from a clean transcript.
-	// If two reattaches race and both replay, each reset wipes the prior copy, so
-	// the view ends with exactly one — not a duplicated conversation.
-	emitGlobal?.(sessionId, { type: "history_reset" });
-	for (const event of buf) emitGlobal?.(sessionId, event);
+	// One message for the whole history (not one IPC + render per event, which froze
+	// the window when a worktree's big chats replayed on switching to it).
+	emitGlobal?.(sessionId, { type: "history", events: buf.slice() });
 }
 
 /** Wire the main->renderer push callback (set once at startup). */
@@ -312,6 +377,8 @@ export type StartOpts = {
 	resume: boolean;
 	permissionMode: AgentPermissionMode;
 	model: string | null;
+	/** Preferred agent mode id, applied when the chat's agent first starts this run. */
+	defaultMode?: string | null;
 	/** ACP session id to resume the agent's own context from (loadSession). */
 	acpResumeId?: string | null;
 	/** Where this chat lives — persisted into the log so it can be listed/reopened. */
@@ -320,9 +387,10 @@ export type StartOpts = {
 };
 
 /**
- * Start a chat session, or reattach to a live one. If the session is already
- * running in this process (e.g. the webview reloaded), we replay its buffered
- * history instead of spawning a second process. Always returns true.
+ * Open a chat in the view: replay its history, and start its agent only if it's a
+ * brand-new chat. A restored chat's agent starts on first use (ensureDriver), so
+ * reopening worktrees full of saved chats doesn't spawn an agent per chat.
+ * Reattaching to an already-open chat just replays. Always returns true.
  */
 export function startSession(opts: StartOpts): boolean {
 	// Remember context so the persisted log knows which worktree it belongs to.
@@ -332,7 +400,9 @@ export function startSession(opts: StartOpts): boolean {
 		provider: opts.provider,
 		model: opts.model,
 	});
-	if (sessions.has(opts.sessionId)) {
+	launchOpts.set(opts.sessionId, { ...launchOpts.get(opts.sessionId), ...opts });
+	if (buffers.has(opts.sessionId)) {
+		// Already open this run (agent live, idle-stopped, or not started yet).
 		writeChatMeta(opts.sessionId); // re-file to this worktree
 		replay(opts.sessionId);
 		return true;
@@ -349,11 +419,58 @@ export function startSession(opts: StartOpts): boolean {
 		writeChatMeta(opts.sessionId);
 		replay(opts.sessionId);
 	}
-	const acpResumeId = opts.resume ? lastAcpSessionId(persisted) : null;
-	const emit = emitterFor(opts.sessionId);
-	const driver = startAcpDriver({ ...opts, acpResumeId }, emit);
-	sessions.set(opts.sessionId, driver);
+	// A new chat is about to be used (typed into, or an initial prompt) — start now.
+	if (!opts.resume) ensureDriver(opts.sessionId);
 	return true;
+}
+
+/** The chat's live driver, launching (and resuming) its agent if it has none. */
+function ensureDriver(sessionId: string): AgentDriver | null {
+	const live = sessions.get(sessionId);
+	if (live) return live;
+	const opts = launchOpts.get(sessionId);
+	const buf = buffers.get(sessionId);
+	if (!opts || !buf) return null;
+	const acpResumeId = lastAcpSessionId(buf);
+	// Relaunching after an idle stop: put back this chat's own last settings once the
+	// new agent reports its options (it starts on its defaults).
+	let restore: AgentChatEvent | undefined;
+	if (hadDriver.has(sessionId)) {
+		for (let i = buf.length - 1; i >= 0 && !restore; i--) {
+			if (buf[i].type === "configOptions") restore = buf[i];
+		}
+	}
+	const emit = emitterFor(sessionId);
+	let configured = false;
+	const driver = startAcpDriver({ ...opts, resume: acpResumeId != null, acpResumeId }, (e) => {
+		emit(e);
+		if (e.type !== "configOptions" || configured) return;
+		configured = true;
+		if (restore?.type === "configOptions") {
+			// Relaunch: this chat's own last settings.
+			for (const want of restore.options) {
+				const now = e.options.find((o) => o.id === want.id);
+				if (now && now.currentValue !== want.currentValue) {
+					driver.setConfigOption(want.id, want.currentValue);
+				}
+			}
+		} else if (opts.defaultMode) {
+			// First start this run (new chat, or a saved one after an app restart —
+			// agents don't keep per-chat mode across restarts): the user's default.
+			const mode = e.options.find((o) => o.id === "mode" || o.category === "mode");
+			if (
+				mode &&
+				mode.currentValue !== opts.defaultMode &&
+				mode.options.some((o) => o.value === opts.defaultMode)
+			) {
+				driver.setConfigOption(mode.id, opts.defaultMode);
+			}
+		}
+	});
+	sessions.set(sessionId, driver);
+	hadDriver.add(sessionId);
+	lastActivity.set(sessionId, Date.now());
+	return driver;
 }
 
 /**
@@ -361,6 +478,8 @@ export function startSession(opts: StartOpts): boolean {
  * driver and relaunch, resuming the agent's ACP session so context carries over.
  */
 export function restart(opts: StartOpts): void {
+	launchOpts.set(opts.sessionId, { ...launchOpts.get(opts.sessionId), ...opts });
+	hadDriver.add(opts.sessionId);
 	sessions.get(opts.sessionId)?.stop();
 	const buf = buffers.get(opts.sessionId) ?? [];
 	if (!buffers.has(opts.sessionId)) buffers.set(opts.sessionId, buf);
@@ -371,7 +490,7 @@ export function restart(opts: StartOpts): void {
 }
 
 export function send(sessionId: string, text: string, attachments?: ChatAttachment[]): void {
-	const driver = sessions.get(sessionId);
+	const driver = ensureDriver(sessionId); // first message starts a restored chat's agent
 	if (!driver) return;
 	// Echo the user turn through the buffer (attachment names only — no data — so
 	// the persisted log stays small) so reattach/replay shows it too.
@@ -392,17 +511,19 @@ export function respondPermission(sessionId: string, requestId: string, optionId
 
 /** Change a live session's permission mode without relaunching the agent. */
 export function setPermissionMode(sessionId: string, mode: AgentPermissionMode): void {
+	const opts = launchOpts.get(sessionId);
+	if (opts) opts.permissionMode = mode; // survives a relaunch
 	sessions.get(sessionId)?.setPermissionMode(mode);
 }
 
 /** Switch the agent's advertised session mode. */
 export function setSessionMode(sessionId: string, modeId: string): void {
-	sessions.get(sessionId)?.setSessionMode(modeId);
+	ensureDriver(sessionId)?.setSessionMode(modeId);
 }
 
 /** Set a live agent config option (model/mode/effort/…). */
 export function setConfigOption(sessionId: string, configId: string, value: string): void {
-	sessions.get(sessionId)?.setConfigOption(configId, value);
+	ensureDriver(sessionId)?.setConfigOption(configId, value);
 }
 
 /** Answer a pending structured elicitation for a session. */
@@ -434,7 +555,30 @@ export function stop(sessionId: string): void {
 	flush(sessionId, true); // write the tail before freeing it
 	buffers.delete(sessionId); // free memory; the on-disk log survives for reopen
 	written.delete(sessionId);
+	forget(sessionId);
 }
+
+function forget(sessionId: string): void {
+	launchOpts.delete(sessionId);
+	lastActivity.delete(sessionId);
+	busy.delete(sessionId);
+	openAsks.delete(sessionId);
+	hadDriver.delete(sessionId);
+}
+
+// Stop agents idle this long. Their history stays in memory and on disk, and the
+// next message relaunches and resumes them (the agent's own transcript keeps its
+// context). Never while a turn is running or a question is waiting on the user.
+const IDLE_STOP_MS = 30 * 60_000;
+setInterval(() => {
+	const cutoff = Date.now() - IDLE_STOP_MS;
+	for (const [sessionId, driver] of sessions) {
+		if (busy.has(sessionId) || (openAsks.get(sessionId) ?? 0) > 0) continue;
+		if ((lastActivity.get(sessionId) ?? 0) > cutoff) continue;
+		driver.stop(); // intentional: emits no "exited", so the view stays as-is
+		sessions.delete(sessionId);
+	}
+}, 60_000).unref();
 
 /** Kill every live chat session — used when the app is quitting. */
 export function killAll(): void {
@@ -446,4 +590,5 @@ export function killAll(): void {
 	sessions.clear();
 	buffers.clear();
 	written.clear();
+	for (const id of [...launchOpts.keys()]) forget(id);
 }

@@ -136,23 +136,74 @@ export async function resolveRepoToplevel(path: string): Promise<string | null> 
 }
 
 /**
- * Short-lived cache for worktree activity. A single UI action can trigger several
- * loader refetches in quick succession; without this each one would re-run
- * `git log` + `git status` for every worktree. Caches the in-flight promise so
- * concurrent callers share one computation.
+ * Stale-while-revalidate cache for worktree activity. The full scan (git log +
+ * git status per worktree) costs seconds for a project with dozens of worktrees,
+ * so callers get the last known value at once and expired entries refresh in the
+ * background. Only a worktree never seen before is computed inline. The in-flight
+ * promise is cached so concurrent first callers share one computation.
  */
-const ACTIVITY_TTL_MS = 30_000;
-const activityCache = new Map<string, { value: Promise<number>; expires: number }>();
+const ACTIVITY_TTL_MS = 120_000;
+/** When a worktree last had work, and how many uncommitted/untracked paths it has
+ *  (both from the same git status, so the count comes free). */
+export type WorktreeActivity = { at: number; dirty: number };
+const activityCache = new Map<
+	string,
+	{ value: Promise<WorktreeActivity>; expires: number; refreshing?: boolean }
+>();
+
+// Background refreshes run a few at a time so a burst (⌘T over 50+ worktrees)
+// doesn't starve the git calls a foreground action is waiting on.
+const REFRESH_CONCURRENCY = 4;
+let refreshing = 0;
+const refreshQueue: (() => void)[] = [];
+function limited<T>(task: () => Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const run = () => {
+			refreshing++;
+			task()
+				.then(resolve, reject)
+				.finally(() => {
+					refreshing--;
+					refreshQueue.shift()?.();
+				});
+		};
+		if (refreshing < REFRESH_CONCURRENCY) run();
+		else refreshQueue.push(run);
+	});
+}
 
 /**
  * Last time real work happened in a worktree, as a ms timestamp: the most recent
- * of HEAD's commit time and the mtime of any uncommitted/untracked change.
- * Cached for {@link ACTIVITY_TTL_MS}. Returns 0 when it can't be determined.
+ * of HEAD's commit time and the mtime of any uncommitted/untracked change. May be
+ * up to one refresh stale (see the cache above). Returns 0 when it can't be
+ * determined.
  */
 export function worktreeActivity(worktreePath: string): Promise<number> {
+	return worktreeActivityInfo(worktreePath).then((a) => a.at);
+}
+
+/** {@link worktreeActivity} plus the uncommitted-change count; same cache. */
+export function worktreeActivityInfo(worktreePath: string): Promise<WorktreeActivity> {
 	const cached = activityCache.get(worktreePath);
 	const nowMs = Date.now();
-	if (cached && cached.expires > nowMs) return cached.value;
+	if (cached) {
+		if (cached.expires <= nowMs && !cached.refreshing) {
+			cached.refreshing = true;
+			limited(() => computeWorktreeActivity(worktreePath)).then(
+				(v) =>
+					activityCache.set(worktreePath, {
+						value: Promise.resolve(v),
+						expires: Date.now() + ACTIVITY_TTL_MS,
+					}),
+				() => {
+					// keep the old value; try again after another TTL
+					cached.refreshing = false;
+					cached.expires = Date.now() + ACTIVITY_TTL_MS;
+				},
+			);
+		}
+		return cached.value;
+	}
 
 	const value = computeWorktreeActivity(worktreePath);
 	activityCache.set(worktreePath, { value, expires: nowMs + ACTIVITY_TTL_MS });
@@ -161,7 +212,7 @@ export function worktreeActivity(worktreePath: string): Promise<number> {
 	return value;
 }
 
-async function computeWorktreeActivity(worktreePath: string): Promise<number> {
+async function computeWorktreeActivity(worktreePath: string): Promise<WorktreeActivity> {
 	// HEAD commit time and working-tree status are independent — fetch in parallel.
 	const [log, status] = await Promise.all([
 		git(worktreePath, ["log", "-1", "--format=%ct"]),
@@ -169,6 +220,7 @@ async function computeWorktreeActivity(worktreePath: string): Promise<number> {
 	]);
 
 	let latest = 0;
+	let dirty = 0;
 	if (log.ok) {
 		const sec = Number.parseInt(log.stdout.trim(), 10);
 		if (!Number.isNaN(sec)) latest = sec * 1000;
@@ -179,6 +231,7 @@ async function computeWorktreeActivity(worktreePath: string): Promise<number> {
 	if (status.ok) {
 		for (const line of status.stdout.split("\n")) {
 			if (line.trim() === "") continue;
+			dirty++;
 			let rel = line.slice(3).trim();
 			const arrow = rel.indexOf(" -> "); // renames: "old -> new"
 			if (arrow !== -1) rel = rel.slice(arrow + 4);
@@ -192,7 +245,7 @@ async function computeWorktreeActivity(worktreePath: string): Promise<number> {
 		}
 	}
 
-	return latest;
+	return { at: latest, dirty };
 }
 
 export type GitStatusFile = { path: string; x: string; y: string };
@@ -1001,6 +1054,39 @@ export type GitWorktree = {
  *   branch refs/heads/<name>   (or `detached`)
  *   locked / bare              (optional flags)
  */
+const SHA = /^[0-9a-f]{7,40}$/i;
+/** A branch name from a checkout reflog target, or null for a commit/pseudo-ref. */
+function branchOfRef(ref: string): string | null {
+	if (SHA.test(ref) || ref === "HEAD" || ref.endsWith("_HEAD")) return null;
+	return ref.replace(/^refs\/heads\//, "").replace(/^(refs\/)?(remotes\/)?origin\//, "");
+}
+
+const detachedCache = new Map<string, { head: string | null; value: Promise<string | null> }>();
+
+/**
+ * The branch a detached worktree was on / was moved to, from its HEAD reflog
+ * ("checkout: moving from feature/x to origin/feature/x" → "feature/x"). Lets the
+ * UI name a detached review by what it's reviewing instead of just "detached".
+ * Null when the reflog names no branch. Cached per HEAD (only a checkout changes it).
+ */
+export function detachedFrom(worktreePath: string, head: string | null): Promise<string | null> {
+	const hit = detachedCache.get(worktreePath);
+	if (hit && hit.head === head) return hit.value;
+	const value = (async () => {
+		const log = await git(worktreePath, ["reflog", "-n", "50", "--format=%gs"]);
+		if (!log.ok) return null;
+		for (const line of log.stdout.split("\n")) {
+			const m = /^checkout: moving from (.+) to (.+)$/.exec(line.trim());
+			if (!m) continue;
+			const name = branchOfRef(m[2]) ?? branchOfRef(m[1]); // newest first: prefer the target
+			if (name) return name;
+		}
+		return null;
+	})();
+	detachedCache.set(worktreePath, { head, value });
+	return value;
+}
+
 export async function listWorktrees(repoPath: string): Promise<GitWorktree[]> {
 	const res = await git(repoPath, ["worktree", "list", "--porcelain"]);
 	if (!res.ok) return [];
@@ -1048,4 +1134,46 @@ export async function listWorktrees(repoPath: string): Promise<GitWorktree[]> {
 	flush();
 
 	return entries;
+}
+
+/**
+ * Put a detached worktree back on `branch` without stranding commits. Only when
+ * HEAD and the branch are in a line: HEAD ahead → switch + fast-forward the branch
+ * to HEAD (the usual case: something checked out the newer origin/<branch>);
+ * HEAD behind → just switch. Diverged history is refused for a human to sort out.
+ * Uncommitted changes carry over; if they'd conflict, git refuses the switch.
+ */
+export async function reattach(
+	worktreePath: string,
+	branch: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const fail = (r: GitResult, what: string) => ({ ok: false, error: r.stderr.trim() || what });
+	const head = (await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+	const local = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+	const tip = local.ok ? local.stdout.trim() : "";
+
+	if (!tip) {
+		// No local branch yet: create it here, tracking origin/<branch> if that exists.
+		const sw = await git(worktreePath, ["switch", "-c", branch]);
+		if (!sw.ok) return fail(sw, "couldn't create the branch");
+		const remote = await git(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
+		if (remote.ok && remote.stdout.trim()) {
+			await git(worktreePath, ["branch", "--set-upstream-to", `origin/${branch}`]);
+		}
+		return { ok: true };
+	}
+
+	// `merge-base --is-ancestor` exits 0 when the first commit is in the second's history.
+	const headBehind = (await git(worktreePath, ["merge-base", "--is-ancestor", head, tip])).ok;
+	const headAhead = (await git(worktreePath, ["merge-base", "--is-ancestor", tip, head])).ok;
+	if (!headBehind && !headAhead) {
+		return { ok: false, error: `This checkout and ${branch} have diverged — reattach by hand so no commits are lost.` };
+	}
+	const sw = await git(worktreePath, ["switch", branch]);
+	if (!sw.ok) return fail(sw, "switch failed");
+	if (headAhead && head !== tip) {
+		const ff = await git(worktreePath, ["merge", "--ff-only", head]);
+		if (!ff.ok) return fail(ff, "fast-forward failed");
+	}
+	return { ok: true };
 }

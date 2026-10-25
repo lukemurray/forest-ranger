@@ -1,0 +1,121 @@
+.page {
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 24px 32px 48px;
+	display: flex;
+	flex-direction: column;
+	gap: 24px;
+}
+
+.caughtUp {
+	font-size: 13px;
+	color: var(--text-muted);
+}
+
+.sectionTitle {
+	margin: 0 0 8px;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.6px;
+	color: var(--text-faint);
+}
+
+/* One bordered list per section, a hairline between rows — scannable, not cards. */
+.list {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 12px;
+	text-align: left;
+	font-size: 13px;
+	color: var(--text);
+	min-width: 0;
+}
+.row:not(:last-child) {
+	border-bottom: 1px solid var(--border);
+}
+.row:hover {
+	background: var(--bg-hover);
+}
+
+.title {
+	flex-shrink: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 500;
+}
+.sub {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--text-faint);
+	font-size: 12px;
+}
+.meta {
+	flex-shrink: 0;
+	font-size: 11.5px;
+	color: var(--amber);
+	font-variant-numeric: tabular-nums;
+}
+.time {
+	flex-shrink: 0;
+	min-width: 56px;
+	text-align: right;
+	font-size: 11.5px;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Status marker column — same dot language as the sidebar and chat tabs. */
+.dotSlot,
+.icon {
+	display: grid;
+	place-items: center;
+	width: 14px;
+	flex-shrink: 0;
+	color: var(--text-faint);
+}
+.dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+}
+.dot[data-kind="attention"] {
+	background: var(--amber);
+	animation: pulse 1.2s ease-in-out infinite;
+}
+.dot[data-kind="working"] {
+	background: var(--accent);
+	animation: pulse 1.4s ease-in-out infinite;
+}
+.dot[data-kind="unread"] {
+	background: var(--accent);
+	box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+@keyframes pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.45;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.dot {
+		animation: none !important;
+	}
+}

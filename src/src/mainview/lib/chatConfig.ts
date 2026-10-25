@@ -46,6 +46,8 @@ Then give me a review:
 - Flag bugs, edge cases, security issues, and consistency/style problems — cite specific files and lines.
 - Call out anything risky, unclear, or worth discussing.
 
+If the branch has new commits on origin, update it with \`git pull --ff-only\` on the branch — don't check out \`origin/…\` or detach HEAD.
+
 Don't change any code — this is a read-only review.`;
 
 type ModelOption = { value: string; label: string };

@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
 	closeSession,
 	getRestorableSessions,
@@ -24,8 +24,10 @@ import { bus } from "../rpc";
 import { useChatStatus } from "../lib/attentionStore";
 import { TerminalPane } from "./TerminalPane";
 import { ChatPane } from "./ChatPane";
-import { DiffView } from "./DiffView";
-import { FileEditor } from "./FileEditor";
+// Monaco is ~most of the renderer bundle; load it with the first file/diff tab
+// instead of making every launch parse it before the first paint.
+const DiffView = lazy(() => import("./DiffView").then((m) => ({ default: m.DiffView })));
+const FileEditor = lazy(() => import("./FileEditor").then((m) => ({ default: m.FileEditor })));
 import { CloseIcon, FileIcon, SparkleIcon, TerminalIcon } from "./icons";
 import styles from "./SessionWorkspace.module.css";
 
@@ -312,19 +314,23 @@ function GroupView({ node }: { node: PaneGroup }) {
 									command={s.command}
 								/>
 							) : s.kind === "diff" && s.diff ? (
-								<DiffView
-									worktreeId={s.worktreeId}
-									path={s.diff.path}
-									base={s.diff.base}
-									commit={s.diff.commit}
-								/>
+								<Suspense fallback={null}>
+									<DiffView
+										worktreeId={s.worktreeId}
+										path={s.diff.path}
+										base={s.diff.base}
+										commit={s.diff.commit}
+									/>
+								</Suspense>
 							) : s.kind === "file" && s.file ? (
-								<FileEditor
-									sessionId={s.id}
-									worktreeId={s.worktreeId}
-									path={s.file.path}
-									line={s.file.line}
-								/>
+								<Suspense fallback={null}>
+									<FileEditor
+										sessionId={s.id}
+										worktreeId={s.worktreeId}
+										path={s.file.path}
+										line={s.file.line}
+									/>
+								</Suspense>
 							) : null}
 						</div>
 					);

@@ -30,6 +30,11 @@ export type Worktree = {
 	 * timestamp. This is what drives recency ordering.
 	 */
 	lastActivityAt: number;
+	/** Uncommitted/untracked paths, when known (worktree lists; not the detail view). */
+	dirty?: number;
+	/** Detached worktrees: the branch it was on / moved to, from its reflog (null if
+	 *  none recorded) — so it can be shown and searched by name, and reattached. */
+	detachedFrom?: string | null;
 };
 
 /** A worktree flattened with its owning project, for the "recent" view. */
@@ -193,11 +198,11 @@ export type ChatDiff = { path: string; oldText: string | null; newText: string }
 
 type AgentChatEventKind =
 	/**
-	 * Start-of-replay marker: the events that follow are the full buffered
-	 * history. The view clears its transcript so a re-delivered replay (e.g. two
-	 * overlapping reattaches) collapses to a single copy instead of duplicating.
+	 * A chat's full buffered history, sent as one message when a view (re)attaches.
+	 * The view starts from a clean transcript and applies these in one pass — one
+	 * render instead of one per event, and overlapping replays can't duplicate.
 	 */
-	| { type: "history_reset" }
+	| { type: "history"; events: AgentChatEvent[] }
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
 	/** The user's own turn, echoed so it's buffered/replayed on reattach. */
@@ -299,7 +304,15 @@ export type IntegrationStatus = {
 	type: IntegrationType;
 	enabled: boolean;
 	host: string;
+	/** A credential is stored — a pasted token or a sign-in. */
 	hasToken: boolean;
+	/** GitLab: signed in via OAuth, as this user (null = not signed in). */
+	signedInAs?: string | null;
+	/** GitLab: an OAuth application id is available for this host (built in, or
+	 *  the per-host override), so "Sign in with GitLab" can work. */
+	oauthReady?: boolean;
+	/** GitLab: the per-host Application ID override, if set (self-managed hosts). */
+	clientId?: string;
 };
 
 /** A pull/merge request for a branch (states normalized across providers). */
@@ -597,6 +610,23 @@ export type RpcRequests = {
 				params: { type: IntegrationType; host: string; token: string | null };
 				response: { ok: boolean; user?: string; error?: string };
 			};
+			/** Browser sign-in to GitLab (OAuth + PKCE). Resolves once you approve in
+			 *  the browser (or it's declined / times out). `clientId` overrides the
+			 *  built-in application id — needed for self-managed hosts. */
+			gitlabSignIn: {
+				params: { host: string; clientId?: string };
+				response: { ok: boolean; user?: string; error?: string };
+			};
+			/** Put a detached worktree back on the branch it came from (fast-forward only). */
+			reattachWorktree: {
+				params: { id: string };
+				response: { ok: boolean; error?: string };
+			};
+			/** Forget (and best-effort revoke) the GitLab sign-in. */
+			gitlabSignOut: {
+				params: Record<string, never>;
+				response: { ok: boolean };
+			};
 			/** MR/pipeline status for a branch from every enabled integration. */
 			branchIntegrations: {
 				params: { projectId: string; branch: string };
@@ -645,6 +675,8 @@ export type RpcRequests = {
 					permissionMode: AgentPermissionMode;
 					/** Model alias/name, or null for the agent's default. */
 					model: string | null;
+					/** Preferred agent mode id (e.g. "auto") applied when the agent first starts. */
+					defaultMode?: string | null;
 				};
 				response: OpenResult;
 			};

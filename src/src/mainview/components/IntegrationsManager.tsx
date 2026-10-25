@@ -59,6 +59,24 @@ function IntegrationCard({
 	const [testing, setTesting] = useState(false);
 	const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 	const [saving, setSaving] = useState(false);
+	const [signingIn, setSigningIn] = useState(false);
+	const [clientId, setClientId] = useState(status.clientId ?? "");
+	const isGitLab = status.type === "gitlab";
+	const signedIn = isGitLab && status.signedInAs != null;
+
+	async function signIn() {
+		setSigningIn(true);
+		setResult(null);
+		const res = await api.gitlabSignIn({ host, clientId: clientId.trim() || undefined });
+		setSigningIn(false);
+		setResult(res.ok ? { ok: true, text: `Signed in as ${res.user}` } : { ok: false, text: res.error ?? "Sign-in failed" });
+		if (res.ok) onSaved();
+	}
+	async function signOut() {
+		await api.gitlabSignOut({});
+		setResult(null);
+		onSaved();
+	}
 
 	// Re-sync local fields when the saved status changes (e.g. after onSaved).
 	useEffect(() => {
@@ -117,6 +135,50 @@ function IntegrationCard({
 				</label>
 			</div>
 
+			{isGitLab && (
+				<div className={styles.signIn}>
+					{signedIn ? (
+						<>
+							<span className={styles.ok}>
+								Signed in{status.signedInAs ? ` as @${status.signedInAs}` : ""}
+							</span>
+							<Button variant="ghost" onClick={signOut}>
+								Sign out
+							</Button>
+						</>
+					) : (
+						<>
+							<Button variant="primary" onClick={signIn} disabled={signingIn}>
+								{signingIn ? "Waiting for your browser…" : "Sign in with GitLab"}
+							</Button>
+							<span className={styles.hint}>
+								{signingIn
+									? "Approve Forest Ranger on the GitLab page that opened."
+									: "Opens GitLab in your browser — no token to create or paste."}
+							</span>
+						</>
+					)}
+				</div>
+			)}
+			{isGitLab && !signedIn && (!status.oauthReady || status.clientId) && (
+				<div className={styles.fields}>
+					<TextField
+						label="Application ID"
+						mono
+						value={clientId}
+						onChange={(e) => setClientId(e.target.value)}
+						placeholder="From GitLab → Applications"
+						spellCheck={false}
+					/>
+					<p className={styles.hint}>
+						Sign-in needs a GitLab OAuth application, registered once (Edit profile →
+						Applications, or a group's Settings → Applications): redirect URI{" "}
+						<code>http://127.0.0.1:33417/oauth/callback</code>, <b>Confidential</b>{" "}
+						unchecked, scope <code>api</code>. Paste its Application ID here.
+					</p>
+				</div>
+			)}
+
 			<div className={styles.fields}>
 				<TextField
 					label="Host"
@@ -126,6 +188,8 @@ function IntegrationCard({
 					placeholder={status.type === "github" ? "github.com" : "https://gitlab.com"}
 					spellCheck={false}
 				/>
+				{isGitLab && !signedIn && <p className={styles.hint}>Or use a personal access token:</p>}
+				{!signedIn && (
 				<TextField
 					label="Access token"
 					type="password"
@@ -136,7 +200,8 @@ function IntegrationCard({
 					}
 					spellCheck={false}
 				/>
-				<p className={styles.hint}>{meta.tokenHint}</p>
+				)}
+				{!signedIn && <p className={styles.hint}>{meta.tokenHint}</p>}
 			</div>
 
 			<div className={styles.actions}>

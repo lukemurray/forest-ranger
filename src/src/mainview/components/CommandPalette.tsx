@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { api } from "../rpc";
+import { worktreeLabel } from "../lib/worktreeLabel";
 import { Modal } from "./ui/Modal";
 import { FolderIcon, GitBranchIcon } from "./icons";
 import styles from "./CommandPalette.module.css";
 
 type Item =
-	| { kind: "worktree"; id: string; projectId: string; label: string; sub: string }
+	| { kind: "worktree"; id: string; projectId: string; label: string; branch: string | null; sub: string }
 	| { kind: "project"; id: string; label: string; sub: string };
 
 /** ⌘K fuzzy jump to any project or worktree. */
@@ -42,11 +43,14 @@ export function CommandPalette() {
 					...worktrees.map(
 						(w): Item => ({
 							kind: "worktree",
-							// Match the sidebar: a review worktree is detached (no branch) but
-							// named "review/…", so fall back to the name before "detached".
+							// Match the sidebar: the label if set, else the branch. Both are
+							// searchable, and a labelled row shows its branch alongside.
 							id: w.id,
 							projectId: w.projectId,
-							label: w.name ?? w.branch ?? "detached",
+							// Same naming as the sidebar; the note (real branch / "detached")
+							// shows beside it and is searchable too.
+							label: worktreeLabel(w).label,
+							branch: worktreeLabel(w).note,
 							sub: w.projectName,
 						}),
 					),
@@ -61,11 +65,13 @@ export function CommandPalette() {
 		if (!q) return items.slice(0, 50);
 		const scored = items
 			.map((it) => {
-				const hay = `${it.label} ${it.sub}`.toLowerCase();
+				const branch = it.kind === "worktree" ? (it.branch ?? "") : "";
+				const hay = `${it.label} ${branch} ${it.sub}`.toLowerCase();
 				const i = hay.indexOf(q);
 				if (i === -1) return null;
-				// Rank: label-prefix match beats mid-string beats sub-only match.
-				const rank = it.label.toLowerCase().startsWith(q) ? 0 : it.label.toLowerCase().includes(q) ? 1 : 2;
+				// Rank: label-prefix beats label/branch mid-string beats project-only match.
+				const label = it.label.toLowerCase();
+				const rank = label.startsWith(q) ? 0 : label.includes(q) || branch.toLowerCase().includes(q) ? 1 : 2;
 				return { it, rank, i };
 			})
 			.filter((x): x is { it: Item; rank: number; i: number } => x !== null)
@@ -130,7 +136,12 @@ export function CommandPalette() {
 							onClick={() => activate(it)}
 						>
 							{it.kind === "worktree" ? <GitBranchIcon size={14} /> : <FolderIcon size={14} />}
-							<span className={styles.rowLabel}>{it.label}</span>
+							<span className={styles.rowLabel}>
+								{it.label}
+								{it.kind === "worktree" && it.branch && (
+									<span className={styles.rowBranch}> ({it.branch})</span>
+								)}
+							</span>
 							<span className={styles.rowSub}>{it.sub}</span>
 						</button>
 					))

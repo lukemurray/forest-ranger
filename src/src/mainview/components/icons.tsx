@@ -24,6 +24,15 @@ export const ChevronIcon = ({ size = 14 }: Props) => svg(size, <path d="m9 18 6-
 
 export const ChevronDownIcon = ({ size = 14 }: Props) => svg(size, <path d="m6 9 6 6 6-6" />);
 
+export const HomeIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<path d="M15 21v-8a1 1 0 0 0-1-1h-2a1 1 0 0 0-1 1v8" />
+			<path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+		</>,
+	);
+
 export const ArrowLeftIcon = ({ size = 16 }: Props) =>
 	svg(
 		size,

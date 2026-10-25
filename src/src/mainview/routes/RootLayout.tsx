@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useNavigate } from "@tanstack/react-router";
 import { onNavigate } from "../rpc";
-import { saveAllFiles } from "../components/FileEditor";
+import { saveAllFiles } from "../lib/fileSavers";
 import { Sidebar } from "../components/Sidebar";
 import { CommandPalette } from "../components/CommandPalette";
 import { FilePalette } from "../components/FilePalette";

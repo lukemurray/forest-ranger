@@ -3,12 +3,7 @@ import * as monaco from "monaco-editor";
 import { api } from "../rpc";
 import { promoteTab, setSessionDirty } from "../lib/terminalStore";
 import { notify } from "../lib/toast";
-
-// Registry of mounted editors' save fns, so ⌥⌘S can save them all at once.
-const savers = new Map<string, () => Promise<void>>();
-export async function saveAllFiles() {
-	await Promise.all([...savers.values()].map((fn) => fn()));
-}
+import { savers } from "../lib/fileSavers";
 import { useThemeMode, type ThemeMode } from "../lib/theme";
 import { getViewState, monacoLang, monacoTheme, saveViewState } from "../lib/monaco";
 import styles from "./DiffView.module.css";

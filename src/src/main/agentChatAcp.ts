@@ -16,13 +16,54 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
+// The full v1 surface (`/unstable` = stable + unstable features), matching what the
+// pre-2.0 default import exposed: we use elicitation and session config options.
 import {
-	ClientSideConnection,
+	client as acpClient,
 	CreateElicitationRequest,
+	methods,
 	ndJsonStream,
 	PROTOCOL_VERSION,
-	type Client,
-} from "@agentclientprotocol/sdk";
+	type AgentNotificationParamsByMethod,
+	type AgentRequestMethod,
+	type AgentRequestParamsByMethod,
+	type AgentRequestResponsesByMethod,
+	type ClientContext,
+	type CreateElicitationResponse,
+	type RequestPermissionResponse,
+	type ClientNotificationHandlersByMethod,
+	type ClientNotificationMethod,
+	type ClientRequestHandlersByMethod,
+	type ClientRequestMethod,
+} from "@agentclientprotocol/sdk/unstable";
+
+/** Params of a client-side ACP request / notification, from the SDK's handler maps. */
+type ReqParams<M extends ClientRequestMethod> = Parameters<ClientRequestHandlersByMethod[M]>[0]["params"];
+type NoteParams<M extends ClientNotificationMethod> = Parameters<
+	ClientNotificationHandlersByMethod[M]
+>[0]["params"];
+
+/**
+ * The agent-side calls we make, as named methods over the SDK 2 peer context
+ * (`request` / `notify` by method constant) — the shape the old
+ * ClientSideConnection had, so the session code below reads the same.
+ */
+function agentCalls(agent: ClientContext) {
+	const call =
+		<M extends AgentRequestMethod>(method: M) =>
+		(params: AgentRequestParamsByMethod[M]): Promise<AgentRequestResponsesByMethod[M]> =>
+			agent.request(method, params);
+	return {
+		initialize: call(methods.agent.initialize),
+		newSession: call(methods.agent.session.new),
+		loadSession: call(methods.agent.session.load),
+		prompt: call(methods.agent.session.prompt),
+		setSessionMode: call(methods.agent.session.setMode),
+		setSessionConfigOption: call(methods.agent.session.setConfigOption),
+		cancel: (params: AgentNotificationParamsByMethod[typeof methods.agent.session.cancel]) =>
+			agent.notify(methods.agent.session.cancel, params),
+	};
+}
 import type {
 	AgentPermissionMode,
 	AgentProvider,
@@ -231,7 +272,7 @@ function elicitResponse(
 export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 	const spec = PROVIDERS[opts.provider];
 	let proc: ChildProcess | null = null;
-	let conn: ClientSideConnection | null = null;
+	let conn: ReturnType<typeof agentCalls> | null = null;
 	let sessionId: string | null = null;
 	let closed = false;
 	// Mutable so the UI can change it live (client-side enforcement) without a relaunch.
@@ -297,10 +338,10 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		return abs;
 	};
 
-	const clientImpl: Client = {
+	const clientImpl = {
 		// Client-mediated reads/writes (fs capability). The agent uses these to edit
 		// files, which surface as structured tool calls with diff content.
-		async readTextFile(params) {
+		async readTextFile(params: ReqParams<typeof methods.client.fs.readTextFile>) {
 			const text = readFileSync(inCwd(params.path), "utf8");
 			if (params.line == null && params.limit == null) return { content: text };
 			const lines = text.split("\n");
@@ -308,11 +349,13 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 			const end = params.limit != null ? start + params.limit : lines.length;
 			return { content: lines.slice(start, end).join("\n") };
 		},
-		async writeTextFile(params) {
+		async writeTextFile(params: ReqParams<typeof methods.client.fs.writeTextFile>) {
 			writeFileSync(inCwd(params.path), params.content);
 			return {};
 		},
-		async requestPermission(params) {
+		async requestPermission(
+			params: ReqParams<typeof methods.client.session.requestPermission>,
+		): Promise<RequestPermissionResponse> {
 			const options = params.options ?? [];
 			const allow =
 				options.find((o) => o.kind === "allow_once") ??
@@ -351,7 +394,7 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 			});
 		},
 
-		async sessionUpdate(params) {
+		async sessionUpdate(params: NoteParams<typeof methods.client.session.update>) {
 			if (suppressReplay) return;
 			const u = params.update;
 			switch (u.sessionUpdate) {
@@ -417,7 +460,9 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 
 		// The agent asks the user for structured input (a form) or to visit a URL.
 		// We surface it and resolve when the user answers (or the agent completes it).
-		async createElicitation(params) {
+		async createElicitation(
+			params: ReqParams<typeof methods.client.elicitation.create>,
+		): Promise<CreateElicitationResponse> {
 			const message = params.message;
 			// The request is a union with a catch-all `mode` string, so plain discriminant
 			// narrowing doesn't work — use the SDK's shipped type guards.
@@ -448,7 +493,7 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		},
 
 		// URL-based elicitation finished on the agent's side — resolve if still open.
-		async completeElicitation(params) {
+		async completeElicitation(params: NoteParams<typeof methods.client.elicitation.complete>) {
 			const id = (params as { elicitationId?: string }).elicitationId;
 			if (id) {
 				const r = pendingElicits.get(id);
@@ -496,7 +541,21 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 
 		const input = Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>;
 		const output = Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>;
-		conn = new ClientSideConnection(() => clientImpl, ndJsonStream(input, output));
+		// SDK 2 app API: register our handlers, connect over the adapter's stdio.
+		const app = acpClient()
+			.onRequest(methods.client.fs.readTextFile, ({ params }) => clientImpl.readTextFile(params))
+			.onRequest(methods.client.fs.writeTextFile, ({ params }) => clientImpl.writeTextFile(params))
+			.onRequest(methods.client.session.requestPermission, ({ params }) =>
+				clientImpl.requestPermission(params),
+			)
+			.onRequest(methods.client.elicitation.create, ({ params }) =>
+				clientImpl.createElicitation(params),
+			)
+			.onNotification(methods.client.session.update, ({ params }) => clientImpl.sessionUpdate(params))
+			.onNotification(methods.client.elicitation.complete, ({ params }) =>
+				clientImpl.completeElicitation(params),
+			);
+		conn = agentCalls(app.connect(ndJsonStream(input, output)).agent);
 
 		const initRes = await conn.initialize({
 			protocolVersion: PROTOCOL_VERSION,
@@ -612,18 +671,24 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		setPermissionMode(mode) {
 			permissionMode = mode;
 		},
+		// Like send, these wait for the session: an agent started on demand by this
+		// very change isn't connected yet.
 		setSessionMode(modeId) {
-			if (conn && sessionId) conn.setSessionMode({ sessionId, modeId }).catch(() => {});
+			ready.then(() => {
+				if (!closed && conn && sessionId) conn.setSessionMode({ sessionId, modeId }).catch(() => {});
+			});
 		},
 		setConfigOption(configId, value) {
-			if (!conn || !sessionId) return;
-			// The response returns the full, refreshed option set (options can depend
-			// on each other — e.g. fast-mode availability changes with the model), so
-			// re-emit it as the authoritative state.
-			conn
-				.setSessionConfigOption({ sessionId, configId, value })
-				.then((res) => emitConfig((res as { configOptions?: unknown[] })?.configOptions))
-				.catch(() => {});
+			ready.then(() => {
+				if (closed || !conn || !sessionId) return;
+				// The response returns the full, refreshed option set (options can depend
+				// on each other — e.g. fast-mode availability changes with the model), so
+				// re-emit it as the authoritative state.
+				conn
+					.setSessionConfigOption({ sessionId, configId, value })
+					.then((res) => emitConfig((res as { configOptions?: unknown[] })?.configOptions))
+					.catch(() => {});
+			});
 		},
 		cancel() {
 			// Cancel the current turn but keep the process/session alive so the user

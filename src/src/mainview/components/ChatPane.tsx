@@ -43,11 +43,6 @@ type LocalAttachment = {
 	isImage: boolean;
 };
 
-// Chats whose preferred default mode has been applied this renderer session, so a
-// remount (worktree nav, tab switch) doesn't re-apply it over a mode the user
-// changed live. Cleared on reload — which is exactly when we want to re-apply the
-// default to resumed chats (the agent doesn't persist per-chat mode across restart).
-const defaultModeApplied = new Set<string>();
 type Outgoing = { text: string; attachments: ChatAttachment[] };
 
 type ChatItem =
@@ -166,11 +161,13 @@ export function ChatPane({
 
 		function apply(event: AgentChatEvent) {
 			switch (event.type) {
-				case "history_reset":
-					// A (re)play of the full buffer follows — start from a clean transcript
-					// so overlapping reattach replays can't stack into duplicates.
+				case "history":
+					// The full buffer on (re)attach: start from a clean transcript (so
+					// overlapping replays can't stack into duplicates), then apply it all
+					// synchronously — React batches the lot into a single render.
 					setItems([]);
 					setPlan([]);
+					for (const e of event.events) apply(e);
 					break;
 				case "system":
 					setStatus((s) => (s === "starting" || s === "ended" ? "idle" : s));
@@ -278,7 +275,9 @@ export function ChatPane({
 					setStatus((s) => (s === "ended" ? s : "idle"));
 					break;
 				case "exited":
-					setStatus("ended");
+					// The agent quit on its own (e.g. its own idle exit). Not terminal: the
+					// next message starts a fresh one and resumes the conversation.
+					setStatus("idle");
 					markExited(dockId);
 					break;
 			}
@@ -293,6 +292,9 @@ export function ChatPane({
 				resume,
 				permissionMode,
 				model: modelArg(coerceModel(coerceProvider(provider), model)),
+				// Applied by main when the agent actually starts (restored chats start on
+				// first use, so the view can't tell when that is).
+				defaultMode: getChatConfig().defaultModeByProvider?.[coerceProvider(provider)] ?? null,
 			})
 			.then((res) => {
 				if (!res.ok) {
@@ -413,12 +415,9 @@ export function ChatPane({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [status]);
 
-	// Learn this provider's mode options (so Settings can offer them), and apply the
-	// user's preferred default mode once per chat. This runs for resumed chats too:
-	// the agent doesn't persist per-chat mode across a restart (it comes back
-	// "manual"), so we re-assert the default — but only when it actually differs
-	// (no-op if the agent already restored it) and only once per session (a remount
-	// won't override a mode the user switched live).
+	// Learn this provider's model and mode options, so pickers and Settings can offer
+	// them before an agent is connected. (The default mode itself is applied by main
+	// when an agent actually starts — see defaultMode in agentChatStart.)
 	useEffect(() => {
 		// Remember the agent's own model list so pickers (before connect, new chats)
 		// offer its real, current models — no app change needed when models ship.
@@ -435,13 +434,6 @@ export function ChatPane({
 			providerValue,
 			modeOpt.options.map((o) => ({ value: o.value, label: o.label })),
 		);
-		if (!defaultModeApplied.has(chatId)) {
-			defaultModeApplied.add(chatId);
-			const want = getChatConfig().defaultModeByProvider?.[providerValue];
-			if (want && want !== modeOpt.currentValue && modeOpt.options.some((o) => o.value === want)) {
-				bus.agentChatSetConfigOption({ sessionId: chatId, configId: modeOpt.id, value: want });
-			}
-		}
 	}, [configOptions, providerValue, chatId]);
 
 	function addFiles(files: FileList | File[]) {

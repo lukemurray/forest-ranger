@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import type { ProjectCommand, Worktree } from "../../shared/types";
 import { api, emitDataChanged } from "../rpc";
 import { relativeTime, shortHash, tildePath } from "../lib/format";
+import { worktreeLabel } from "../lib/worktreeLabel";
 import { openInEditor, openInTerminal, runProjectCommand } from "../lib/openTargets";
 import { FolderIcon, GitBranchIcon, PencilIcon, PlayIcon, RevealIcon, TerminalIcon, TrashIcon } from "./icons";
 import { MenuItem, OpenItems, RowMenu, Separator } from "./RowMenu";
@@ -157,7 +158,7 @@ function CardBody({
 			<div className={styles.top}>
 				<span className={styles.branch}>
 					<GitBranchIcon />
-					{worktree.name ?? worktree.branch ?? "detached"}
+					{worktreeLabel(worktree).label}
 				</span>
 				<div className={styles.badges}>
 					{worktree.isPrimary && <span className={styles.primary}>primary</span>}

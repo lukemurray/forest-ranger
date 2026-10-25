@@ -7,10 +7,9 @@ import {
 import { api } from "./rpc";
 import { ErrorView } from "./components/ErrorView";
 import { RootLayout } from "./routes/RootLayout";
-import { RecentView } from "./routes/RecentView";
-import { ActivityView } from "./routes/ActivityView";
+import { HomeView } from "./routes/HomeView";
 import { ProjectView } from "./routes/ProjectView";
-import { WorktreeView } from "./routes/WorktreeView";
+import { WorktreePending, WorktreeView } from "./routes/WorktreeView";
 
 export const rootRoute = createRootRoute({
 	component: RootLayout,
@@ -20,14 +19,10 @@ export const rootRoute = createRootRoute({
 export const indexRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/",
-	loader: () => api.recentWorktrees({ limit: 50 }),
-	component: RecentView,
-});
-
-export const activityRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/activity",
-	component: ActivityView,
+	// No loader: a cold worktree scan (git status per worktree) takes seconds right
+	// after launch, and a route loader blocks the whole first paint. Home renders its
+	// inbox at once and fetches the worktree list itself.
+	component: HomeView,
 });
 
 export const projectRoute = createRoute({
@@ -47,11 +42,16 @@ export const worktreeRoute = createRoute({
 	loader: ({ params, deps }) =>
 		api.worktreeDetail({ id: params.worktreeId, base: deps.base }),
 	component: WorktreeView,
+	// Feedback for a slow first open (a revisit shows its cached data at once while
+	// it refreshes). Not for fast loads: only after 150ms, and then held briefly so
+	// it doesn't flicker.
+	pendingComponent: WorktreePending,
+	pendingMs: 150,
+	pendingMinMs: 200,
 });
 
 const routeTree = rootRoute.addChildren([
 	indexRoute,
-	activityRoute,
 	projectRoute,
 	worktreeRoute,
 ]);

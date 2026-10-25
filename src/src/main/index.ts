@@ -60,7 +60,13 @@ import {
 	createRequest as githubCreateRequest,
 	testConnection as githubTest,
 } from "./github";
-import { createRequest as gitlabCreateRequest } from "./gitlab";
+import { createRequest as gitlabCreateRequest, type GitLabConfig } from "./gitlab";
+import {
+	builtInClientId,
+	refresh as gitlabRefresh,
+	revoke as gitlabRevoke,
+	signIn as gitlabOAuthSignIn,
+} from "./gitlabOAuth";
 import {
 	addWorktree as gitAddWorktree,
 	branchGraph,
@@ -91,6 +97,9 @@ import {
 	resolveBaseBranch,
 	resolveRepoToplevel,
 	worktreeActivity,
+	worktreeActivityInfo,
+	detachedFrom as gitDetachedFrom,
+	reattach as gitReattach,
 	worktreeChanges,
 	type BaseChange,
 } from "./git";
@@ -141,7 +150,19 @@ type StoredIntegration = {
 	tokenEnc?: string;
 	tokenPlain?: string;
 	token?: string;
+	/** GitLab: Application ID override for this host (self-managed GitLab). */
+	clientId?: string;
+	/** GitLab: "Sign in with GitLab" tokens, each encrypted like `tokenEnc`. */
+	oauth?: {
+		access: Sealed;
+		refresh: Sealed;
+		expiresAt: number;
+		/** The application the tokens were issued to — refresh must use the same. */
+		clientId: string;
+		user?: string;
+	};
 };
+type Sealed = Pick<StoredIntegration, "tokenEnc" | "tokenPlain">;
 
 /** Encrypt a token for storage via the OS keychain, falling back to plaintext only
  *  when encryption isn't available on this machine. Empty token stores nothing. */
@@ -164,16 +185,74 @@ function decryptToken(stored: StoredIntegration): string {
 	return stored.tokenPlain ?? stored.token ?? "";
 }
 
-function integrationConfig(type: IntegrationType): { host: string; token: string } {
+function readStored(type: IntegrationType): StoredIntegration {
 	const row = integrationsRepo.get(type);
-	const stored = row ? (JSON.parse(row.config) as StoredIntegration) : {};
+	return row ? (JSON.parse(row.config) as StoredIntegration) : {};
+}
+
+function integrationConfig(type: IntegrationType): { host: string; token: string } {
+	const stored = readStored(type);
 	return { host: stored.host || DEFAULT_HOST[type], token: decryptToken(stored) };
 }
 
 function integrationStatus(type: IntegrationType): IntegrationStatus {
 	const row = integrationsRepo.get(type);
+	const stored = readStored(type);
 	const cfg = integrationConfig(type);
-	return { type, enabled: !!row?.enabled, host: cfg.host, hasToken: !!cfg.token };
+	const base = { type, enabled: !!row?.enabled, host: cfg.host, hasToken: !!cfg.token || !!stored.oauth };
+	if (type !== "gitlab") return base;
+	return {
+		...base,
+		signedInAs: stored.oauth ? (stored.oauth.user ?? "") : null,
+		oauthReady: !!(stored.clientId || builtInClientId(cfg.host)),
+		clientId: stored.clientId,
+	};
+}
+
+// One refresh at a time: GitLab rotates the refresh token, so two concurrent
+// refreshes would have the second one fail with the already-used token.
+let gitlabRefreshing: Promise<GitLabConfig | null> | null = null;
+
+/**
+ * Credentials to call an integration with: GitLab's sign-in (refreshed when within
+ * a minute of expiry) if present, else the pasted token. Null = none usable.
+ */
+async function integrationAuth(type: IntegrationType): Promise<GitLabConfig | null> {
+	const stored = readStored(type);
+	const host = stored.host || DEFAULT_HOST[type];
+	const oauth = type === "gitlab" ? stored.oauth : undefined;
+	if (!oauth) {
+		const token = decryptToken(stored);
+		return token ? { host, token } : null;
+	}
+	if (oauth.expiresAt - 60_000 > Date.now()) {
+		const access = decryptToken(oauth.access);
+		if (access) return { host, token: access, bearer: true };
+	}
+	gitlabRefreshing ??= (async () => {
+		try {
+			const t = await gitlabRefresh(host, oauth.clientId, decryptToken(oauth.refresh));
+			const latest = readStored("gitlab");
+			integrationsRepo.upsert(
+				"gitlab",
+				!!integrationsRepo.get("gitlab")?.enabled,
+				JSON.stringify({
+					...latest,
+					oauth: { ...oauth, access: encryptToken(t.access), refresh: encryptToken(t.refresh), expiresAt: t.expiresAt },
+				}),
+			);
+			return { host, token: t.access, bearer: true };
+		} catch (err) {
+			// Revoked/expired refresh token: drop the sign-in so Settings offers it again.
+			console.warn("[gitlab] token refresh failed — signed out:", err);
+			const { oauth: _gone, ...rest } = readStored("gitlab");
+			integrationsRepo.upsert("gitlab", !!integrationsRepo.get("gitlab")?.enabled, JSON.stringify(rest));
+			return null;
+		} finally {
+			gitlabRefreshing = null;
+		}
+	})();
+	return gitlabRefreshing;
 }
 
 /** Scan git for a project's worktrees, sync the db, and return merged rows. */
@@ -201,9 +280,10 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 	);
 
 	// Compute activity for every worktree concurrently rather than one-by-one.
-	const activities = await Promise.all(
-		gitEntries.map((e) => worktreeActivity(e.path)),
-	);
+	const [activities, origins] = await Promise.all([
+		Promise.all(gitEntries.map((e) => worktreeActivityInfo(e.path))),
+		Promise.all(gitEntries.map((e) => (e.isDetached ? gitDetachedFrom(e.path, e.head) : null))),
+	]);
 	const chatActivity = latestChatByWorktree();
 
 	return gitEntries
@@ -222,7 +302,9 @@ async function syncWorktrees(project: ProjectRow): Promise<Worktree[]> {
 				isLocked: entry.isLocked,
 				lastOpenedAt: row?.last_opened_at ?? null,
 				// Recency = the most recent of commit, uncommitted edit, or chat here.
-				lastActivityAt: Math.max(activities[i]!, chatActivity.get(id) ?? 0),
+				lastActivityAt: Math.max(activities[i]!.at, chatActivity.get(id) ?? 0),
+				dirty: activities[i]!.dirty,
+				detachedFrom: origins[i] ?? null,
 			};
 		})
 		.sort(recencyDesc);
@@ -408,7 +490,7 @@ const handlers: RpcHandlers = {
 				const resolvedBase = await resolveBaseBranch(project.path, preferred);
 				const usableBase = resolvedBase === entry.branch ? null : resolvedBase;
 
-				const [activity, branches, changes, upstream, tracking] = await Promise.all([
+				const [activity, branches, changes, upstream, tracking, origin] = await Promise.all([
 					worktreeActivity(row.path),
 					listBranches(project.path),
 					worktreeChanges(row.path, usableBase),
@@ -418,6 +500,7 @@ const handlers: RpcHandlers = {
 					entry.branch
 						? branchTracking(row.path, entry.branch)
 						: Promise.resolve({ ahead: 0, behind: 0, hasRemote: false }),
+					entry.isDetached ? gitDetachedFrom(row.path, entry.head) : Promise.resolve(null),
 				]);
 
 				const committed = changes.committed.map(toChangedFile);
@@ -435,6 +518,7 @@ const handlers: RpcHandlers = {
 					isLocked: entry.isLocked,
 					lastOpenedAt: row.last_opened_at,
 					lastActivityAt: Math.max(activity, latestChatByWorktree().get(id) ?? 0),
+					detachedFrom: origin,
 				};
 
 				return {
@@ -792,8 +876,8 @@ const handlers: RpcHandlers = {
 				for (const type of KNOWN_INTEGRATIONS) {
 					const intRow = integrationsRepo.get(type);
 					if (!intRow?.enabled) continue;
-					const cfg = integrationConfig(type);
-					if (!cfg.token) continue;
+					const cfg = await integrationAuth(type);
+					if (!cfg) continue;
 					const res =
 						type === "github"
 							? await githubCreateRequest(cfg, project.path, branch, base, title)
@@ -810,10 +894,19 @@ const handlers: RpcHandlers = {
 				const finalHost = host.trim() || DEFAULT_HOST[type];
 				const finalToken = token !== null ? token : current.token; // "" clears, null keeps
 				// Encrypt on every save — this also migrates any legacy plaintext token.
+				// Keep a GitLab sign-in (and Application ID) across saves, unless the host
+				// changed — tokens are only valid for the host that issued them.
+				const prev = readStored(type);
+				const sameHost = (prev.host || DEFAULT_HOST[type]) === finalHost;
 				integrationsRepo.upsert(
 					type,
 					enabled,
-					JSON.stringify({ host: finalHost, ...encryptToken(finalToken) }),
+					JSON.stringify({
+						host: finalHost,
+						...encryptToken(finalToken),
+						...(prev.clientId ? { clientId: prev.clientId } : {}),
+						...(prev.oauth && sameHost ? { oauth: prev.oauth } : {}),
+					}),
 				);
 				return integrationStatus(type);
 			},
@@ -821,10 +914,76 @@ const handlers: RpcHandlers = {
 			testIntegration: async ({ type, host, token }) => {
 				const cfg = integrationConfig(type);
 				const useHost = host.trim() || cfg.host;
+				if (token === null && type === "gitlab") {
+					const auth = await integrationAuth("gitlab"); // sign-in or saved token
+					if (auth) return gitlabTest({ ...auth, host: useHost });
+				}
 				const useToken = token !== null ? token : cfg.token;
 				if (!useToken) return { ok: false, error: "No token provided" };
 				const conn = { host: useHost, token: useToken };
 				return type === "github" ? githubTest(conn) : gitlabTest(conn);
+			},
+
+			gitlabSignIn: async ({ host, clientId }) => {
+				const prev = readStored("gitlab");
+				const finalHost = host.trim() || prev.host || DEFAULT_HOST.gitlab;
+				const overrideId = clientId?.trim() || prev.clientId || "";
+				const appId = overrideId || builtInClientId(finalHost);
+				if (!appId) {
+					return { ok: false, error: "Add this GitLab's Application ID first (see the steps below)." };
+				}
+				try {
+					const t = await gitlabOAuthSignIn(finalHost, appId);
+					const who = await gitlabTest({ host: finalHost, token: t.access, bearer: true });
+					if (!who.ok) return { ok: false, error: who.error };
+					integrationsRepo.upsert(
+						"gitlab",
+						true, // signing in implies you want it on
+						JSON.stringify({
+							...readStored("gitlab"),
+							host: finalHost,
+							...(overrideId ? { clientId: overrideId } : {}),
+							oauth: {
+								access: encryptToken(t.access),
+								refresh: encryptToken(t.refresh),
+								expiresAt: t.expiresAt,
+								clientId: appId,
+								user: who.user,
+							},
+						}),
+					);
+					return { ok: true, user: who.user };
+				} catch (err) {
+					return { ok: false, error: err instanceof Error ? err.message : String(err) };
+				}
+			},
+
+			reattachWorktree: async ({ id }) => {
+				const row = worktreesRepo.get(id);
+				if (!row) return { ok: false, error: "Worktree not found" };
+				const project = projectsRepo.get(row.project_id);
+				if (!project) return { ok: false, error: "Project not found" };
+				const entries = await gitListWorktrees(project.path);
+				const entry = entries.find((e) => e.path === row.path);
+				if (!entry?.isDetached) return { ok: false, error: "This worktree isn't detached" };
+				const branch = await gitDetachedFrom(row.path, entry.head);
+				if (!branch) return { ok: false, error: "Couldn't tell which branch this checkout came from" };
+				const elsewhere = entries.find((e) => e.branch === branch);
+				if (elsewhere) {
+					return { ok: false, error: `${branch} is already checked out in ${elsewhere.path}` };
+				}
+				return gitReattach(row.path, branch);
+			},
+
+			gitlabSignOut: async () => {
+				const stored = readStored("gitlab");
+				if (stored.oauth) {
+					const access = decryptToken(stored.oauth.access);
+					if (access) await gitlabRevoke(stored.host || DEFAULT_HOST.gitlab, stored.oauth.clientId, access);
+				}
+				const { oauth: _gone, ...rest } = stored;
+				integrationsRepo.upsert("gitlab", !!integrationsRepo.get("gitlab")?.enabled, JSON.stringify(rest));
+				return { ok: true };
 			},
 
 			branchIntegrations: async ({ projectId, branch }) => {
@@ -834,8 +993,8 @@ const handlers: RpcHandlers = {
 				for (const type of KNOWN_INTEGRATIONS) {
 					const row = integrationsRepo.get(type);
 					if (!row?.enabled) continue;
-					const cfg = integrationConfig(type);
-					if (!cfg.token) continue;
+					const cfg = await integrationAuth(type);
+					if (!cfg) continue;
 					const status =
 						type === "github"
 							? await githubBranchStatus(cfg, project.path, branch)
@@ -861,7 +1020,7 @@ const handlers: RpcHandlers = {
 				return { ok: true };
 			},
 
-			agentChatStart: ({ sessionId, worktreeId, provider, resume, permissionMode, model }) => {
+			agentChatStart: ({ sessionId, worktreeId, provider, resume, permissionMode, model, defaultMode }) => {
 				const row = worktreesRepo.get(worktreeId);
 				if (!row) return { ok: false, error: "Worktree not found" };
 				const ok = agentChatStart({
@@ -871,6 +1030,7 @@ const handlers: RpcHandlers = {
 					resume,
 					permissionMode,
 					model,
+					defaultMode,
 					worktreeId,
 					projectId: row.project_id,
 				});
@@ -1159,10 +1319,15 @@ function createWindow(): void {
 		// our own dark titlebar strip and mark it as a drag region in the renderer.
 		titleBarStyle: "hiddenInset",
 		trafficLightPosition: { x: 12, y: 14 },
+		// Hidden until the renderer's first paint (ready-to-show), so launch never
+		// flashes an empty white window while the bundle loads.
+		show: false,
 		webPreferences: {
 			preload: join(__dirname, "../preload/index.js"),
 		},
 	});
+
+	win.once("ready-to-show", () => win.show());
 
 	// Remember size/position across restarts (debounced during drags/resizes).
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1235,6 +1400,15 @@ app.whenReady().then(() => {
 	);
 
 	createWindow();
+
+	// Warm the worktree-activity cache once the window is up, so the first ⌘T /
+	// Recent view after launch is instant rather than paying the full git scan.
+	// One project at a time keeps it out of the way of the first view's own loads.
+	setTimeout(async () => {
+		for (const project of projectsRepo.list()) {
+			await syncWorktrees(project).catch(() => {});
+		}
+	}, 3000);
 
 	app.on("activate", () => {
 		if (BrowserWindow.getAllWindows().length === 0) createWindow();

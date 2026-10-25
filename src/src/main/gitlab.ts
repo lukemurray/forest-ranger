@@ -3,7 +3,9 @@
 import type { BranchIntegrations } from "../shared/types";
 import { parseRemote, remoteUrl } from "./git";
 
-export type GitLabConfig = { host: string; token: string };
+/** `bearer`: an OAuth access token (Sign in with GitLab) rather than a pasted
+ *  personal access token — they go in different headers. */
+export type GitLabConfig = { host: string; token: string; bearer?: boolean };
 
 /** Normalize a host into a scheme-qualified site URL with no trailing slash. */
 function siteUrl(host: string): string {
@@ -16,7 +18,9 @@ async function gl<T>(config: GitLabConfig, path: string, body?: unknown): Promis
 	const res = await fetch(`${siteUrl(config.host)}/api/v4${path}`, {
 		method: body ? "POST" : "GET",
 		headers: {
-			"PRIVATE-TOKEN": config.token,
+			...(config.bearer
+				? { Authorization: `Bearer ${config.token}` }
+				: { "PRIVATE-TOKEN": config.token }),
 			...(body ? { "Content-Type": "application/json" } : {}),
 		},
 		body: body ? JSON.stringify(body) : undefined,

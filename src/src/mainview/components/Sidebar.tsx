@@ -5,9 +5,8 @@ import type { Project, Worktree } from "../../shared/types";
 import { api, emitDataChanged, onDataChanged } from "../rpc";
 import { relativeTime } from "../lib/format";
 import {
-	ActivityIcon,
 	ChevronIcon,
-	ClockIcon,
+	HomeIcon,
 	PencilIcon,
 	PlusIcon,
 	RefreshIcon,
@@ -26,6 +25,7 @@ import { SettingsMenu } from "./SettingsMenu";
 import { getRestorableSessions, useTerminals } from "../lib/terminalStore";
 import { useChatStatus } from "../lib/attentionStore";
 import { useProjectActions } from "../lib/useProjectActions";
+import { worktreeLabel } from "../lib/worktreeLabel";
 import styles from "./Sidebar.module.css";
 
 export function Sidebar({ projects }: { projects: Project[] }) {
@@ -35,7 +35,9 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 	const [notice, setNotice] = useState<string | null>(null);
 
 	const { sessions } = useTerminals();
-	const runningCount = sessions.filter((s) => s.running).length;
+	// Home's badge: chats waiting on you or finished since you last looked.
+	const chatStatus = useChatStatus();
+	const needsYou = new Set([...chatStatus.attention.sessions, ...chatStatus.unread.sessions]).size;
 	// "A chat exists here, at rest" — a single calm hollow dot covering both an open
 	// (but idle) chat and one that's only saved-and-resumable. The distinction (live
 	// in memory vs persisted) isn't something you act on, so it doesn't earn a
@@ -104,16 +106,8 @@ export function Sidebar({ projects }: { projects: Project[] }) {
 				activeOptions={{ exact: true }}
 				activeProps={{ className: styles.recentLinkActive }}
 			>
-				<ClockIcon /> Recent worktrees
-			</Link>
-
-			<Link
-				to="/activity"
-				className={styles.recentLink}
-				activeProps={{ className: styles.recentLinkActive }}
-			>
-				<ActivityIcon /> Activity
-				{runningCount > 0 && <span className={styles.navBadge}>{runningCount}</span>}
+				<HomeIcon /> Home
+				{needsYou > 0 && <span className={styles.navBadge}>{needsYou}</span>}
 			</Link>
 
 			{notice && <div className={styles.notice}>{notice}</div>}
@@ -162,6 +156,23 @@ function ProjectNode({
 	const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const [renaming, setRenaming] = useState<Worktree | null>(null);
+	// Inline label edit (double-click a worktree row).
+	const [editingId, setEditingId] = useState<string | null>(null);
+	const [draft, setDraft] = useState("");
+	// Escape removes the input, which can fire its blur (= save); this skips that save.
+	const labelCancelled = useRef(false);
+
+	/** Save the inline label. Blank, or the branch name itself, clears the label. */
+	async function commitLabel(wt: Worktree) {
+		setEditingId(null);
+		if (labelCancelled.current) return;
+		const trimmed = draft.trim();
+		const name = !trimmed || trimmed === wt.branch ? null : trimmed;
+		if (name === (wt.name ?? null)) return;
+		await api.renameWorktree({ id: wt.id, name });
+		loadWorktrees(true);
+		emitDataChanged("worktrees");
+	}
 	const [newOpen, setNewOpen] = useState(false);
 	const [reviewOpen, setReviewOpen] = useState(false);
 	const fetching = useRef(false);
@@ -306,6 +317,28 @@ function ProjectNode({
 						<RowMenu
 							key={wt.id}
 							trigger={
+								editingId === wt.id ? (
+									<div className={styles.worktree} data-active={params.worktreeId === wt.id || undefined}>
+										<input
+											className={styles.worktreeInput}
+											value={draft}
+											autoFocus
+											onFocus={(e) => e.currentTarget.select()}
+											onChange={(e) => setDraft(e.target.value)}
+											onBlur={() => commitLabel(wt)}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") e.currentTarget.blur();
+												else if (e.key === "Escape") {
+													labelCancelled.current = true;
+													setEditingId(null);
+												}
+											}}
+											placeholder={wt.branch ?? "label"}
+											aria-label="Worktree label"
+											spellCheck={false}
+										/>
+									</div>
+								) : (
 								<button
 									className={styles.worktree}
 									data-active={params.worktreeId === wt.id || undefined}
@@ -315,7 +348,12 @@ function ProjectNode({
 											params: { projectId: project.id, worktreeId: wt.id },
 										})
 									}
-									title={wt.path}
+									onDoubleClick={() => {
+										labelCancelled.current = false;
+										setDraft(wt.name ?? wt.branch ?? "");
+										setEditingId(wt.id);
+									}}
+									title={`${wt.path}\nDouble-click to set a label`}
 								>
 									<span className={styles.worktreeBranch}>
 										{wt.isPrimary && (
@@ -323,7 +361,14 @@ function ProjectNode({
 												<SproutIcon size={14} />
 											</span>
 										)}
-										{wt.name ?? wt.branch ?? "detached"}
+										<span className={styles.worktreeLabel}>
+											{worktreeLabel(wt).label}
+											{/* A label hides the branch, and "detached" says nothing about what
+											    it is — keep the real branch / state visible. */}
+											{worktreeLabel(wt).note && (
+												<span className={styles.worktreeRealBranch}>({worktreeLabel(wt).note})</span>
+											)}
+										</span>
 									</span>
 									<span className={styles.worktreeTime}>{relativeTime(wt.lastActivityAt)}</span>
 									{status.attention.worktrees.has(wt.id) ? (
@@ -336,6 +381,7 @@ function ProjectNode({
 										<span className={styles.resumeDot} title="a chat here" />
 									) : null}
 								</button>
+								)
 							}
 						>
 							<OpenItems path={wt.path} />
