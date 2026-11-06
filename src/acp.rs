@@ -70,38 +70,45 @@ pub struct Agent {
 }
 
 /// The user's installed Claude CLI, from the usual install locations or PATH.
-fn installed_claude() -> Option<String> {
+/// An installed agent CLI (`claude`, `codex`), from the usual install locations
+/// or PATH. We don't ship the agents themselves — the app drives the user's own.
+fn installed(bin: &str) -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let path = std::env::var("PATH").unwrap_or_default();
     [format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()]
         .into_iter()
         .chain(path.split(':').map(str::to_string))
-        .map(|d| format!("{d}/claude"))
+        .map(|d| format!("{d}/{bin}"))
         .find(|p| Path::new(p).is_file())
 }
 
-/// How to launch an adapter. Claude prefers the standalone release build in
-/// `vendor/claude-agent-acp/` (no Node needed), pointed at the user's installed
-/// `claude` CLI via CLAUDE_CODE_EXECUTABLE — we don't ship our own copy of the CLI.
-/// Otherwise (no standalone build, no CLI found, or Codex, which has no standalone
-/// build) Node runs the npm package installed in `agents/` (`npm install` there).
-/// `FR_CLAUDE_ACP` overrides the standalone adapter's path.
-fn adapter_command(provider: &str) -> Command {
-    let root = env!("CARGO_MANIFEST_DIR");
-    if provider != "codex" {
-        let standalone = std::env::var("FR_CLAUDE_ACP")
-            .unwrap_or_else(|_| format!("{root}/vendor/claude-agent-acp/claude-agent-acp"));
-        let cli = std::env::var("CLAUDE_CODE_EXECUTABLE").ok().or_else(installed_claude);
-        if let (true, Some(cli)) = (Path::new(&standalone).is_file(), cli) {
-            let mut cmd = Command::new(standalone);
-            cmd.env("CLAUDE_CODE_EXECUTABLE", cli);
-            return cmd;
-        }
-    }
-    let pkg = if provider == "codex" { "codex-acp" } else { "claude-agent-acp" };
+/// Where the adapters live: `Forest Ranger.app/Contents/Resources` when running
+/// from the app bundle (scripts/bundle-macos.sh), else the repo (`cargo run`).
+fn resources_root() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources")))
+        .filter(|r| r.join("agents").is_dir())
+        .map(|r| r.to_string_lossy().into_owned())
+        .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").to_string())
+}
+
+/// How to launch an adapter: Node runs the npm package from `agents/`, driving the
+/// user's installed CLI (`claude` via CLAUDE_CODE_EXECUTABLE, `codex` via
+/// CODEX_PATH — either env var overrides the lookup). We don't ship the agents.
+fn adapter_command(provider: &str) -> std::io::Result<Command> {
+    let (pkg, bin, env, install) = if provider == "codex" {
+        ("codex-acp", "codex", "CODEX_PATH", "`npm i -g @openai/codex` or `brew install codex`")
+    } else {
+        ("claude-agent-acp", "claude", "CLAUDE_CODE_EXECUTABLE", "see claude.com/claude-code")
+    };
+    let cli = std::env::var(env).ok().or_else(|| installed(bin)).ok_or_else(|| {
+        let name = if provider == "codex" { "Codex" } else { "Claude Code" };
+        std::io::Error::new(std::io::ErrorKind::NotFound, format!("{name} isn't installed ({install}) — install it, then start a new chat"))
+    })?;
     let mut cmd = Command::new("node");
-    cmd.arg(format!("{root}/agents/node_modules/@agentclientprotocol/{pkg}/dist/index.js"));
-    cmd
+    cmd.arg(format!("{}/agents/node_modules/@agentclientprotocol/{pkg}/dist/index.js", resources_root())).env(env, cli);
+    Ok(cmd)
 }
 
 fn write(stdin: &Mutex<ChildStdin>, msg: Value) {
@@ -147,7 +154,7 @@ impl Agent {
             "{}:{home}/.local/bin:{home}/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = adapter_command(&opts.provider);
+        let mut cmd = adapter_command(&opts.provider)?;
         cmd.current_dir(&opts.cwd)
             .env("PATH", &path)
             .stdin(Stdio::piped())

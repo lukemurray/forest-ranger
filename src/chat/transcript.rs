@@ -677,10 +677,10 @@ impl ChatView {
                 .py_1()
                 .text_size(px(13.))
                 .text_color(theme.muted_foreground)
-                .child(sidebar::icon("fr/tree.svg", 14., theme.primary).with_animation(
+                .child(sidebar::icon("fr/tree.svg", TREE_PX, theme.primary).with_animation(
                     "activity-tree",
-                    Animation::new(Duration::from_millis(1800)).repeat().with_easing(pulsating_between(0.45, 1.)),
-                    |s, a| s.opacity(a),
+                    Animation::new(Duration::from_millis(2800)).repeat(),
+                    |s, t| s.with_transformation(tree_sway(t)),
                 ))
                 .child(label)
                 .into_any_element(),
@@ -790,3 +790,23 @@ mod tests {
         })));
     }
 }
+
+/// The working-indicator pine, as in the Electron app (16px).
+const TREE_PX: f32 = 16.;
+
+/// The pine swaying in the wind — the Electron app's `treeSway` keyframes: an
+/// ease-in-out back-and-forth between -8° at 95% scale and +8° at full size,
+/// pivoting at the base of the trunk (transform-origin 50% 96%). `t` is the
+/// 0..1 position in the cycle.
+fn tree_sway(t: f32) -> Transformation {
+    let phase = (1. - (t * std::f32::consts::TAU).cos()) / 2.; // 0 → 1 → 0, eased
+    let angle = (-8. + 16. * phase).to_radians();
+    let scale = 0.95 + 0.05 * phase;
+    // GPUI rotates/scales about the centre; shift so the pivot is the trunk's base.
+    let dy = (0.96 - 0.5) * TREE_PX;
+    let (sin, cos) = angle.sin_cos();
+    Transformation::rotate(radians(angle))
+        .with_scaling(size(scale, scale))
+        .with_translation(point(px(sin * scale * dy), px(dy - cos * scale * dy)))
+}
+

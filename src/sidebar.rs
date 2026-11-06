@@ -59,20 +59,25 @@ impl ForestRanger {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap(px(7.))
                     .px(px(6.))
                     .pb(px(10.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(x.green)
-                            .child(icon("fr/tree.svg", 16., x.green))
-                            .child("Forest Ranger"),
-                    )
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(x.green)
+                    .child(icon("fr/tree.svg", 16., x.green))
+                    .child("Forest Ranger"),
+            )
+            // PROJECTS, with + (add a project) at its right.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pl_2()
+                    .pr(px(4.))
+                    .pt(px(8.))
+                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(x.faint).child("PROJECTS"))
                     .child(
                         div()
                             .id("add-project")
@@ -80,20 +85,10 @@ impl ForestRanger {
                             .rounded(px(6.))
                             .cursor_pointer()
                             .hover(|s| s.bg(x.hover))
-                            .child(icon("fr/plus.svg", 15., theme.muted_foreground))
+                            .child(icon("fr/plus.svg", 14., theme.muted_foreground))
                             .tooltip(tip("Add a git project"))
                             .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
                     ),
-            )
-            .child(
-                div()
-                    .px_2()
-                    .pt(px(12.))
-                    .pb_1()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(x.faint)
-                    .child("PROJECTS"),
             )
             .when_some(self.error.clone(), |d, e| {
                 d.child(div().px_2().text_sm().text_color(theme.danger).child(e))

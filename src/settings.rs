@@ -1,6 +1,5 @@
 //! App settings (theme, editor, external terminal, default agent) and the Settings
-//! dialog. The Electron app keeps these in browser localStorage, which we can't
-//! share, so they live in `~/.forest-ranger/gpui-settings.json`.
+//! dialog. Saved in `~/.forest-ranger/gpui-settings.json`.
 
 use std::{collections::HashMap, fs, path::Path, process::Command};
 
@@ -27,7 +26,6 @@ pub struct Settings {
     /// Starting mode per provider (the agent's mode id); absent = the agent's default.
     pub default_mode_by_provider: HashMap<String, String>,
     /// Review prompt template per project id; absent = DEFAULT_REVIEW_PROMPT.
-    /// Electron keeps its copy in localStorage, so the two apps' templates don't sync.
     pub review_prompt_by_project: HashMap<String, String>,
 }
 
@@ -331,7 +329,8 @@ pub fn open(window: &mut Window, cx: &mut App) {
         let _subs = hosts.iter().map(|(_, h)| cx.subscribe(h, |_, _, _: &InputEvent, cx| cx.notify())).collect();
         SettingsView { section: Section::General, integrations, hosts, connecting: None, results: vec![], _subs }
     });
-    window.open_dialog(cx, move |d, _, _| d.width(px(680.)).p_0().child(view.clone()));
+    // No corner ×: it overlapped the content. The footer's Done closes it (and Esc).
+    window.open_dialog(cx, move |d, _, _| d.width(px(680.)).p_0().close_button(false).child(view.clone()));
 }
 
 impl SettingsView {
@@ -399,10 +398,10 @@ impl SettingsView {
         let status = match &info.connection {
             Connection::Cli { user } => format!("Using {cli} sign-in{}", user.as_ref().map(|u| format!(" as @{u}")).unwrap_or_default()),
             Connection::OAuth { user } => format!(
-                "Signed in{} in the Electron app — that sign-in can't be used here; use {cli} instead.",
+                "Signed in{} with a browser sign-in from an older version — that can't be used anymore; use {cli} instead.",
                 user.as_ref().map(|u| format!(" as @{u}")).unwrap_or_default()
             ),
-            Connection::Token => format!("Access token set in the Electron app — it can't be read here; use {cli} instead."),
+            Connection::Token => format!("Access token from an older version — it can't be read anymore; use {cli} instead."),
             Connection::None => "Not connected".into(),
         };
         let typed = self.typed_host(p, cx);
@@ -487,7 +486,7 @@ impl SettingsView {
                 div()
                     .text_size(px(11.5))
                     .text_color(x.faint)
-                    .child(format!("Uses your existing `{cli}` login (no token stored). Shared with the Electron app. Sign in with `{cli} auth login` if needed.")),
+                    .child(format!("Uses your existing `{cli}` login (no token stored). Sign in with `{cli} auth login` if needed.")),
             )
             .into_any_element()
     }
@@ -651,7 +650,23 @@ impl Render for SettingsView {
                             }))
                     })),
             )
-            .child(div().id("settings-content").flex_1().min_w_0().flex().flex_col().gap_5().p_5().overflow_y_scroll().children(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().id("settings-content").flex_1().min_h_0().flex().flex_col().gap_5().p_5().overflow_y_scroll().children(content))
+                    .child(
+                        div().flex().justify_end().px_5().py_3().border_t_1().border_color(theme.border).child(
+                            Button::new("settings-done")
+                                .primary()
+                                .px(px(18.))
+                                .label("Done")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        ),
+                    ),
+            )
     }
 }
 

@@ -1,5 +1,4 @@
 .DS_Store
 /target
-# Standalone Claude adapter binary (downloaded, not committed — see README)
-/vendor
 /agents/node_modules
+/dist

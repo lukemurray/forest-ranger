@@ -1104,9 +1104,14 @@ impl ChatView {
             .anchor(Anchor::BottomLeft)
             .open(self.menu_open)
             .on_open_change(move |open, window, cx| {
-                open_view.update(cx, |c, _| {
+                open_view.update(cx, |c, cx| {
                     c.menu_open = *open;
                     c.menu_row = None;
+                    // A saved chat shows the options logged by its last agent (maybe an
+                    // older CLI); start the agent so the list is current.
+                    if *open {
+                        c.ensure_agent(cx);
+                    }
                 });
                 window.refresh();
             })
@@ -1412,8 +1417,6 @@ impl Render for ChatView {
                     .gap_2()
                     .px(px(12.))
                     .py(px(10.))
-                    .border_t_1()
-                    .border_color(theme.border)
                     .children(plan)
                     .children(self.queue.iter().enumerate().map(|(i, q)| {
                         div()

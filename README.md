@@ -13,24 +13,31 @@ cargo run            # first build takes a few minutes
 
 Needs a recent stable Rust (`rust-toolchain.toml` pins `stable`; GPUI needs ≥ 1.93).
 
-### Agents
-
-Chats talk to agents over [ACP](https://agentclientprotocol.com):
-
-- **Claude** — uses the standalone adapter at `vendor/claude-agent-acp/claude-agent-acp`
-  when present (no Node needed). Get `claude-agent-acp-darwin-arm64.zip` from
-  github.com/agentclientprotocol/claude-agent-acp/releases and keep only the
-  `claude-agent-acp` file (not the bundled `claude`). It drives your installed
-  `claude` CLI (found in ~/.local/bin, Homebrew or PATH; `CLAUDE_CODE_EXECUTABLE`
-  overrides). Without it, Claude falls back to the npm adapter below.
-- **Codex** — has no standalone build, so it runs the npm adapter with Node:
+### Release app
 
 ```sh
-cd agents && npm install
+scripts/bundle-macos.sh             # → dist/Forest Ranger.app (release build, ad-hoc signed)
+scripts/bundle-macos.sh --install   # …and copy it to /Applications
 ```
 
-Both reuse your existing `claude` / `codex` logins; no API keys. `FR_CLAUDE_ACP`
-points Claude at another adapter binary.
+The bundle carries only the agent adapters; it uses the `node`, `claude`, `codex`, `git`,
+`gh` and `glab` on your machine.
+
+### Agents
+
+Chats talk to agents over [ACP](https://agentclientprotocol.com) through the npm
+adapters in `agents/`, run with Node. They drive your installed CLIs and reuse their
+logins (no API keys):
+
+- **Claude** — your `claude` (Claude Code; found in ~/.local/bin, Homebrew or PATH;
+  `CLAUDE_CODE_EXECUTABLE` overrides). Keep it current with `claude update` — the model
+  list comes from it.
+- **Codex** — your `codex` (`npm i -g @openai/codex` or `brew install codex`;
+  `CODEX_PATH` overrides).
+
+```sh
+cd agents && npm install --omit=optional   # optional = the agents' own bundled engines
+```
 
 ## Data
 
@@ -71,8 +78,8 @@ run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
 - **Settings** (sidebar footer) — theme, editor, external terminal, default agent and
   mode, GitHub / GitLab via the `gh` / `glab` CLIs.
 
-Not here yet: an in-app terminal (run commands open your external terminal), a `.app`
-bundle. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
+Not here yet: an in-app terminal (run commands open your external terminal), a
+notarized/distributable build. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
 
 ## Checks
 

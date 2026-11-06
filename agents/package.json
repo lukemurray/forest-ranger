@@ -1,7 +1,7 @@
 {
   "name": "forest-ranger-agents",
   "private": true,
-  "description": "ACP agent adapters Forest Ranger launches with Node: Codex (no standalone build exists) and the Claude adapter as a fallback when the standalone binary isn't in vendor/.",
+  "description": "The ACP adapters Forest Ranger runs with Node. They drive the user's installed claude / codex CLIs; install with --omit=optional to skip the agents' own bundled engines.",
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.95.0",
     "@agentclientprotocol/codex-acp": "2.2.2"
