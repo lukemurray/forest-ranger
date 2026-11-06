@@ -1,9 +1,5 @@
 .DS_Store
-
-src/node_modules/
-src/build/
-src/dist/
-src/artifacts/
-src/*.tsbuildinfo
-src/out/
-src/release/
+/target
+# Standalone Claude adapter binary (downloaded, not committed — see README)
+/vendor
+/agents/node_modules

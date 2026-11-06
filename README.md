@@ -1,0 +1,83 @@
+# Forest Ranger
+
+A desktop app for working across many git worktrees with AI coding agents — like
+chat apps that organise work into projects, but centred on your **worktrees**.
+Rust, built on [GPUI Kit](https://gpui-kit.com). (It replaced an earlier Electron
+version; that code is in git history.)
+
+## Run
+
+```sh
+cargo run            # first build takes a few minutes
+```
+
+Needs a recent stable Rust (`rust-toolchain.toml` pins `stable`; GPUI needs ≥ 1.93).
+
+### Agents
+
+Chats talk to agents over [ACP](https://agentclientprotocol.com):
+
+- **Claude** — uses the standalone adapter at `vendor/claude-agent-acp/claude-agent-acp`
+  when present (no Node needed). Get `claude-agent-acp-darwin-arm64.zip` from
+  github.com/agentclientprotocol/claude-agent-acp/releases and keep only the
+  `claude-agent-acp` file (not the bundled `claude`). It drives your installed
+  `claude` CLI (found in ~/.local/bin, Homebrew or PATH; `CLAUDE_CODE_EXECUTABLE`
+  overrides). Without it, Claude falls back to the npm adapter below.
+- **Codex** — has no standalone build, so it runs the npm adapter with Node:
+
+```sh
+cd agents && npm install
+```
+
+Both reuse your existing `claude` / `codex` logins; no API keys. `FR_CLAUDE_ACP`
+points Claude at another adapter binary.
+
+## Data
+
+Everything lives in `~/.forest-ranger` (override with `FOREST_RANGER_DATA_DIR`):
+`forest-ranger.db` (projects, worktrees, commands, integrations — created on first
+run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
+`gpui-state.json` (open tabs and layout), `window-state.json`.
+
+## What's here
+
+- **Sidebar** — projects as a collapsible tree of worktrees (labels, primary sprout,
+  detached-origin names, last-activity times, working / unread / needs-answer dots).
+  Resizable. Right-click menus (open in editor/terminal, reveal, rename, rename
+  branch, remove worktree/project), hover ✦ review / + new worktree / rescan,
+  double-click to edit a label, tooltips. Worktrees sync from `git worktree list`.
+- **Chats** — Claude or Codex; sending in a saved chat resumes the agent's own
+  context. Streaming markdown, tool runs folded into "N steps" strips with expandable
+  output, inline diffs on agent edits, permission prompts, elicitation forms,
+  model/mode/effort pickers (restored per chat), queue while working, ⌘↵ to steer
+  into the running turn, Stop, attachments (paste/drag/+), slash commands, context/cost
+  meter with Start fresh, ⌘F find, ⋯ Branch from here, plan strip. Open chats keep
+  running across worktrees; idle agents stop after 30 min.
+- **Title bar** — back/forward (⌘[ ⌘], ⌃- ⌃=), project / branch, ✦ Chat (▾ for the
+  other agent and past chats), open in editor, ⋯, panel toggle (⌘B).
+- **Review panel** (⌘1 / ⌘2 / ⌘⇧F) — branch status vs base and tracking, stage /
+  commit (⌘↵) / push / update from base, changes as folder trees with keyboard nav
+  (`s` stages), commits vs a chosen base, Reattach, Push & open PR/MR, MR/PR + pipeline
+  status via `gh` / `glab`; Files (file tree) and Search (git grep). Files open in the
+  code editor (tree-sitter, ⌘S / ⌥⌘S); changes open as diff tabs (split/unified).
+- **Palettes** — ⌘T / ⌘K jump to any worktree or project; ⌘P open a file or diff.
+- **Tabs & window** — tabs and layout restored per worktree, preview tabs, drag tabs
+  to reorder/move/split, resizable splits, double-click to rename; window bounds
+  remembered; OS notification + Dock badge when a chat needs you.
+- **Project view** — worktree cards with Editor / Terminal / run-command buttons, base
+  sync bar (ahead/behind origin, Fetch/Update, recent commits), Branches tab
+  (ahead/behind, + Worktree, delete, clean up merged), Settings tab (run commands, code
+  host, review prompt), ✦ Review a branch.
+- **Settings** (sidebar footer) — theme, editor, external terminal, default agent and
+  mode, GitHub / GitLab via the `gh` / `glab` CLIs.
+
+Not here yet: an in-app terminal (run commands open your external terminal), a `.app`
+bundle. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
+
+## Checks
+
+```sh
+cargo test
+cargo run -- --check                                       # loads your data, read-only
+FOREST_RANGER_DATA_DIR=$(mktemp -d) cargo run -- --agent   # live chat: persist → reopen → resume
+```
