@@ -24,6 +24,8 @@ cp assets/icon.icns "$RES/icon.icns"
 mkdir -p "$RES/agents"
 cp agents/package.json agents/package-lock.json "$RES/agents/"
 (cd "$RES/agents" && npm ci --omit=dev --omit=optional --no-audit --no-fund --silent)
+# Not needed at runtime: source maps, type declarations, docs.
+find "$RES/agents/node_modules" -type f \( -name '*.map' -o -name '*.d.ts' -o -name '*.d.mts' -o -name '*.d.cts' -o -iname '*.md' \) -delete
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,13 +47,29 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ad-hoc signature (local use; not notarized).
-codesign --force --deep --sign - "$APP"
+# Sign with a stable identity when there is one, so macOS keeps the app's privacy
+# permissions (Downloads, Full Disk Access, …) across rebuilds — an ad-hoc signature
+# changes every build, and macOS then asks again. FR_SIGN_ID overrides; create the
+# default with scripts/make-signing-cert.sh. Not notarized either way (local use).
+SIGN_ID="${FR_SIGN_ID:-Forest Ranger Local}"
+if security find-identity -v -p codesigning | grep -qF "\"$SIGN_ID\""; then
+  codesign --force --deep --sign "$SIGN_ID" "$APP"
+else
+  echo "note: no '$SIGN_ID' signing identity — signing ad-hoc (permissions reset each build)"
+  codesign --force --deep --sign - "$APP"
+fi
+
+# The bundle is rebuilt at the same path, so Finder/Dock can keep a stale (blank)
+# icon: bump its date and re-register it with LaunchServices.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+touch "$APP"
+"$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true
 
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
 
 if [ "${1:-}" = "--install" ]; then
   rm -rf "/Applications/$NAME.app"
   cp -R "$APP" /Applications/
+  "$LSREGISTER" -f "/Applications/$NAME.app" >/dev/null 2>&1 || true
   echo "Installed /Applications/$NAME.app"
 fi

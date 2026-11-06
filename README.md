@@ -18,7 +18,11 @@ Needs a recent stable Rust (`rust-toolchain.toml` pins `stable`; GPUI needs ≥ 
 ```sh
 scripts/bundle-macos.sh             # → dist/Forest Ranger.app (release build, ad-hoc signed)
 scripts/bundle-macos.sh --install   # …and copy it to /Applications
+scripts/make-signing-cert.sh        # once per Mac: a local signing identity
 ```
+
+With the local signing identity, macOS keeps the app's privacy permissions (Downloads,
+Desktop, Full Disk Access…) across rebuilds; signed ad-hoc, it asks again after each build.
 
 The bundle carries only the agent adapters; it uses the `node`, `claude`, `codex`, `git`,
 `gh` and `glab` on your machine.

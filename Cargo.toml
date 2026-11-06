@@ -7,7 +7,27 @@ edition = "2024"
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 base64 = "0.23.1"
-gpui-kit = { version = "0.9.0", features = ["tree-sitter-languages"] }
+# Syntax highlighting only for the languages we work in (each grammar adds size;
+# "tree-sitter-languages" would pull in all 36).
+gpui-kit = { version = "0.9.0", features = [
+    "tree-sitter-bash",
+    "tree-sitter-csharp",
+    "tree-sitter-css",
+    "tree-sitter-diff",
+    "tree-sitter-graphql",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-jsdoc",
+    "tree-sitter-make",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-sql",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1.0.154"
 sha1_smol = "1.0.1"
@@ -17,7 +37,12 @@ uuid = { version = "1.29.0", features = ["v4"] }
 [profile.dev.package."*"]
 opt-level = 2
 
-# Already in the tree via GPUI — used to set the Dock icon.
+# Already in the tree via GPUI — the Dock icon under `cargo run`, notifications, badge.
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.25"
-objc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSString"] }
+
+[profile.release]
+strip = true      # no debug symbols in the shipped binary
+lto = "thin"

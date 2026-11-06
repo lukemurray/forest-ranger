@@ -535,6 +535,12 @@ impl ForestRanger {
         self.chats = data::chats_for(&wt_id);
         let panel = SessionState::get(cx).panel(&wt_id);
         self.show_diff = panel.open;
+        // Pin a first visit's (inherited) state to this worktree, so it stays as
+        // you left it here rather than following later changes elsewhere.
+        if SessionState::get(cx).worktrees.get(&wt_id).is_none_or(|w| w.panel.is_none()) {
+            let p = panel.clone();
+            SessionState::update(cx, |s| s.set_panel(&wt_id, p));
+        }
         if let Some(r) = self.reviews.get(&wt_id) {
             r.update(cx, |r, cx| {
                 r.view = view_of(&panel.view);
@@ -1837,9 +1843,12 @@ impl Render for ForestRanger {
                         }
                     })
                     .child(
+                        // flex_none: keep the saved width as the window resizes (the
+                        // centre column takes up the slack).
                         resizable_panel()
                             .size(px(sidebar_w))
                             .size_range(px(session_state::SIDEBAR_WIDTH.0)..px(session_state::SIDEBAR_WIDTH.2))
+                            .flex_none()
                             .child(sidebar),
                     )
                     .child(
@@ -1859,6 +1868,7 @@ impl Render for ForestRanger {
                                             resizable_panel()
                                                 .size(px(panel_w))
                                                 .size_range(px(session_state::PANEL_WIDTH.0)..px(session_state::PANEL_WIDTH.2))
+                                                .flex_none()
                                                 .visible(review.is_some())
                                                 .children(review.map(|r| r.into_any_element())),
                                         ),
@@ -1973,19 +1983,18 @@ fn check_agent() {
     println!("on disk: {} events", log::ChatLog::open(&id).events.len());
 }
 
-/// Use Forest Ranger's icon in the Dock (assets/icon.png) —
-/// an unbundled `cargo run` binary otherwise shows a generic one.
+/// Use Forest Ranger's icon in the Dock (assets/icon.png) — an unbundled
+/// `cargo run` binary otherwise shows a generic one.
 #[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs, deprecated)] // the old objc/cocoa macros
 fn set_dock_icon() {
-    use cocoa::{appkit::NSApp, base::id, foundation::NSData};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::{AllocAnyThread as _, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
     static ICON: &[u8] = include_bytes!("../assets/icon.png");
-    unsafe {
-        let data = NSData::dataWithBytes_length_(cocoa::base::nil, ICON.as_ptr() as *const _, ICON.len() as u64);
-        let image: id = msg_send![class!(NSImage), alloc];
-        let image: id = msg_send![image, initWithData: data];
-        let _: () = msg_send![NSApp(), setApplicationIconImage: image];
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(ICON);
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
     }
 }
 
@@ -2000,17 +2009,11 @@ fn main() {
     if let Err(e) = data::ensure_schema() {
         eprintln!("forest-ranger: couldn't set up the database: {e}");
     }
-    gpui_kit::application().with_assets(assets::Assets).run(|cx| {
+    // Closing the last window quits (macOS apps otherwise linger windowless).
+    gpui_kit::application().with_assets(assets::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(|cx| {
         gpui_kit::init(cx);
         #[cfg(target_os = "macos")]
         set_dock_icon();
-        // Closing the (only) window quits, rather than leaving a windowless app.
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
         cx.set_global(settings::Settings::load());
         cx.set_global(SessionState::load());
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -2098,6 +2101,26 @@ fn main() {
         )
         .expect("failed to open window");
         cx.activate(true);
+        // Smoke test for quit-on-close: FR_SMOKE_CLOSE=1 closes the window after 4s;
+        // the process should then exit by itself.
+        if std::env::var_os("FR_SMOKE_CLOSE").is_some() {
+            // FR_SMOKE_AGENT=1 also starts an agent (no prompt sent), as a live chat would.
+            let agent = std::env::var_os("FR_SMOKE_AGENT").map(|_| {
+                let (tx, rx) = async_channel::unbounded();
+                let opts = acp::StartOpts { provider: "claude".into(), cwd: std::env::temp_dir().to_string_lossy().into(), model: None, resume_id: None };
+                (acp::Agent::spawn(opts, tx).ok(), rx)
+            });
+            cx.spawn(async move |cx| {
+                let _agent = agent;
+                cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                let _ = cx.update(|cx| {
+                    for w in cx.windows() {
+                        let _ = w.update(cx, |_, window, _| window.remove_window());
+                    }
+                });
+            })
+            .detach();
+        }
     });
 }
 

@@ -35,38 +35,32 @@ pub fn post(_title: &str, _body: &str, _target: Target) {}
 pub fn set_badge(_count: usize) {}
 
 #[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs, deprecated)] // the old objc/cocoa macros; NSUserNotification
+#[allow(deprecated)] // NSUserNotification still works; UNUserNotificationCenter needs a signed, entitled bundle
 mod mac {
     use super::{Target, channel, decode, encode};
-    use cocoa::appkit::NSApp;
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::declare::ClassDecl;
-    use objc::runtime::{BOOL, Class, Object, Sel, YES};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, NSObject, Sel};
+    use objc2::{ClassType, class, msg_send, sel};
+    use objc2_foundation::NSString;
+    use std::ffi::{CStr, c_char};
     use std::sync::OnceLock;
 
     const KEY: &str = "forestRangerTarget";
 
-    fn ns(s: &str) -> id {
-        unsafe { NSString::alloc(nil).init_str(s) }
-    }
-
-    unsafe fn rust_str(s: id) -> Option<String> {
-        if s == nil {
+    unsafe fn rust_str(s: *mut AnyObject) -> Option<String> {
+        if s.is_null() {
             return None;
         }
-        let p: *const std::os::raw::c_char = unsafe { msg_send![s, UTF8String] };
-        (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        let p: *const c_char = unsafe { msg_send![s, UTF8String] };
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
     }
 
-    extern "C" fn did_activate(_: &Object, _: Sel, _center: id, note: id) {
+    extern "C-unwind" fn did_activate(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, note: *mut AnyObject) {
         unsafe {
-            let info: id = msg_send![note, userInfo];
-            if info == nil {
+            let info: *mut AnyObject = msg_send![note, userInfo];
+            if info.is_null() {
                 return;
             }
-            let v: id = msg_send![info, objectForKey: ns(KEY)];
+            let v: *mut AnyObject = msg_send![info, objectForKey: &*NSString::from_str(KEY)];
             if let Some(t) = rust_str(v).as_deref().and_then(decode) {
                 let _ = channel().0.try_send(t);
             }
@@ -74,49 +68,52 @@ mod mac {
     }
 
     /// Show it even if we happen to be frontmost by the time it lands.
-    extern "C" fn should_present(_: &Object, _: Sel, _center: id, _note: id) -> BOOL {
-        YES
+    extern "C-unwind" fn should_present(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, _note: *mut AnyObject) -> Bool {
+        Bool::YES
     }
 
-    /// The user-notification center with our delegate set, or nil (an unbundled
+    /// The user-notification center with our delegate set, or None (an unbundled
     /// binary may have none — then nothing is posted).
-    fn center() -> id {
+    fn center() -> Option<*mut AnyObject> {
         static DELEGATE: OnceLock<usize> = OnceLock::new();
         unsafe {
-            let center: id = msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
-            if center == nil {
-                return nil;
+            let center: *mut AnyObject = msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
+            if center.is_null() {
+                return None;
             }
             DELEGATE.get_or_init(|| {
-                let mut decl = ClassDecl::new("ForestRangerNotificationDelegate", class!(NSObject)).expect("delegate class");
-                decl.add_method(
+                let mut b = ClassBuilder::new(c"ForestRangerNotificationDelegate", NSObject::class()).expect("delegate class");
+                b.add_method(
                     sel!(userNotificationCenter:didActivateNotification:),
-                    did_activate as extern "C" fn(&Object, Sel, id, id),
+                    did_activate as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
                 );
-                decl.add_method(
+                b.add_method(
                     sel!(userNotificationCenter:shouldPresentNotification:),
-                    should_present as extern "C" fn(&Object, Sel, id, id) -> BOOL,
+                    should_present as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject) -> Bool,
                 );
-                let cls: &Class = decl.register();
+                let cls: &AnyClass = b.register();
                 // Never released: the center holds its delegate weakly.
-                let delegate: id = msg_send![cls, new];
+                let delegate: *mut AnyObject = msg_send![cls, alloc];
+                let delegate: *mut AnyObject = msg_send![delegate, init];
                 let _: () = msg_send![center, setDelegate: delegate];
                 delegate as usize
             });
-            center
+            Some(center)
         }
     }
 
     pub fn post(title: &str, body: &str, target: Target) {
-        let center = center();
-        if center == nil {
-            return;
-        }
+        let Some(center) = center() else { return };
         unsafe {
-            let n: id = msg_send![class!(NSUserNotification), new];
-            let _: () = msg_send![n, setTitle: ns(title)];
-            let _: () = msg_send![n, setInformativeText: ns(body)];
-            let info: id = msg_send![class!(NSDictionary), dictionaryWithObject: ns(&encode(&target)) forKey: ns(KEY)];
+            let n: *mut AnyObject = msg_send![class!(NSUserNotification), alloc];
+            let n: *mut AnyObject = msg_send![n, init];
+            let _: () = msg_send![n, setTitle: &*NSString::from_str(title)];
+            let _: () = msg_send![n, setInformativeText: &*NSString::from_str(body)];
+            let info: *mut AnyObject = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObject: &*NSString::from_str(&encode(&target)),
+                forKey: &*NSString::from_str(KEY)
+            ];
             let _: () = msg_send![n, setUserInfo: info];
             let _: () = msg_send![center, deliverNotification: n];
         }
@@ -125,8 +122,10 @@ mod mac {
     /// The Dock badge: the count, or none at 0.
     pub fn set_badge(count: usize) {
         unsafe {
-            let tile: id = msg_send![NSApp(), dockTile];
-            let label = if count == 0 { nil } else { ns(&count.to_string()) };
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let tile: *mut AnyObject = msg_send![app, dockTile];
+            let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
+            let label: *const NSString = label.as_deref().map_or(std::ptr::null(), |l| l as *const NSString);
             let _: () = msg_send![tile, setBadgeLabel: label];
         }
     }

@@ -58,6 +58,8 @@ struct Shared {
     /// Current permission mode (from the agent's mode option), for auto-allow.
     mode: String,
     can_steer: bool,
+    /// The adapter's latest stderr lines — the detail behind a bare "Internal error".
+    stderr_tail: std::collections::VecDeque<String>,
 }
 
 pub struct Agent {
@@ -159,7 +161,7 @@ impl Agent {
             .env("PATH", &path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         if opts.provider == "codex" {
             cmd.env("INITIAL_AGENT_MODE", codex_mode(initial_mode.unwrap_or("agent")));
             if let Some(m) = &opts.model {
@@ -171,8 +173,21 @@ impl Agent {
         let mut child = cmd.spawn()?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let child = Arc::new(Mutex::new(child));
         let shared = Arc::new(Mutex::new(Shared::default()));
+        // Echo the adapter's log to our stderr, keeping the tail for error messages.
+        let (tail, tag) = (shared.clone(), opts.provider.clone());
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("[{tag}] {line}");
+                let mut s = tail.lock().unwrap();
+                s.stderr_tail.push_back(line);
+                if s.stderr_tail.len() > 20 {
+                    s.stderr_tail.pop_front();
+                }
+            }
+        });
 
         request(
             &stdin,
@@ -382,10 +397,29 @@ impl Reader {
         }
     }
 
+    /// An error's message plus whatever explains it: the JSON-RPC `data`, else (for a
+    /// generic one like "Internal error") the adapter's last log lines.
+    fn error_text(&self, e: &Value) -> String {
+        let message = e["message"].as_str().unwrap_or("agent error").to_string();
+        let data = match &e["data"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            d => d["details"].as_str().or(d["message"].as_str()).map(str::to_string).or_else(|| Some(d.to_string())),
+        };
+        if let Some(d) = data.filter(|d| !d.is_empty() && *d != message) {
+            return format!("{message}: {d}");
+        }
+        if message.len() > 40 {
+            return message;
+        }
+        let tail = self.shared.lock().unwrap().stderr_tail.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" · ");
+        if tail.is_empty() { message } else { format!("{message} — {tail}") }
+    }
+
     fn on_response(&self, msg: &Value) {
         let Some(id) = msg["id"].as_u64() else { return };
         let Some(kind) = self.shared.lock().unwrap().pending.remove(&id) else { return };
-        let err = msg.get("error").map(|e| e["message"].as_str().unwrap_or("agent error").to_string());
+        let err = msg.get("error").map(|e| self.error_text(e));
         let result = &msg["result"];
         match kind {
             Pending::Init => {

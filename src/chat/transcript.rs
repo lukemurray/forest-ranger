@@ -701,7 +701,8 @@ impl ChatView {
                 .items_center()
                 .gap_2()
                 .px(px(32.))
-                .py_1()
+                .pt_1()
+                .pb_3()
                 .text_size(px(13.))
                 .text_color(theme.muted_foreground)
                 .child(sidebar::icon("fr/tree.svg", TREE_PX, theme.primary).with_animation(

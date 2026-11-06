@@ -1404,7 +1404,10 @@ impl Render for ChatView {
                             this.read(cx).render_item(ix, view, cx)
                         })
                         .flex_1()
-                        .with_content_style(StyleRefinement::default().px(px(20.)).py(px(8.))),
+                        .with_content_style(StyleRefinement::default().px(px(20.)).py(px(8.)))
+                        // The kit pads 32px under every row; our rows carry their own
+                        // 6px top/bottom (12px between items, as the Electron app had).
+                        .with_row_style(StyleRefinement::default().pb(px(0.))),
                     )
                     .children(pinned),
             )
