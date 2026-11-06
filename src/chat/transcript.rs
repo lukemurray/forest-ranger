@@ -259,6 +259,43 @@ fn overflows_clamp(text: &str) -> bool {
     text.lines().count() > 4 || text.chars().count() > 360
 }
 
+/// Your own message as Markdown that shows exactly what you typed — so it can use
+/// the selectable TextView. Markdown characters are escaped (links stay bare so they
+/// autolink), line breaks are kept, and leading spaces don't turn into code blocks.
+fn plain_markdown(text: &str) -> String {
+    let urls = find_urls(text);
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut at = 0;
+    let mut line_start = true;
+    while at < text.len() {
+        if let Some((r, url)) = urls.iter().find(|(r, _)| r.start == at) {
+            out.push('<');
+            out.push_str(url);
+            out.push('>');
+            at = r.end;
+            line_start = false;
+            continue;
+        }
+        let c = text[at..].chars().next().unwrap();
+        at += c.len_utf8();
+        match c {
+            '\n' => {
+                out.push_str("\\\n");
+                line_start = true;
+                continue;
+            }
+            ' ' | '\t' if line_start => out.push('\u{00A0}'),
+            c if c.is_ascii_punctuation() => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+        line_start = line_start && c.is_whitespace();
+    }
+    out
+}
+
 fn markdown(id: impl Into<ElementId>, text: &str) -> TextView {
     TextView::markdown(id, strip_rules(text)).code_block_actions(|cb, _, _| {
         Clipboard::new(("copy-code", cb.span.as_ref().map_or(0, |s| s.start))).tooltip("Copy").value(cb.code())
@@ -558,16 +595,8 @@ impl ChatView {
         let x = theme::extra(cx);
         let clamps = overflows_clamp(text);
         let expanded = !pinned && self.open.contains(&ix);
-        let found = self.find_query().map(|q| super::find::ranges(text, q)).unwrap_or_default();
-        // Links that overlap a find match lose their styling (runs can't overlap).
-        let urls: Vec<_> = find_urls(text).into_iter().filter(|(r, _)| !found.iter().any(|f| f.start < r.end && r.start < f.end)).collect();
-        let link = HighlightStyle { color: Some(theme.primary), underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
-        let mark = HighlightStyle { background_color: Some(x.amber.opacity(0.45)), ..Default::default() };
-        let mut runs: Vec<_> = urls.iter().map(|(r, _)| (r.clone(), link)).chain(found.into_iter().map(|r| (r, mark))).collect();
-        runs.sort_by_key(|(r, _)| r.start);
-        let styled = StyledText::new(text.to_string()).with_highlights(runs);
-        let ranges: Vec<_> = urls.iter().map(|(r, _)| r.clone()).collect();
-        let targets: Vec<String> = urls.into_iter().map(|(_, u)| u).collect();
+        // A ⌘F match in your message tints the bubble (as in agent replies).
+        let found = self.find_query().is_some_and(|q| !super::find::ranges(text, q).is_empty());
         let v = view.clone();
         div()
             .id((if pinned { "pinned-user" } else { "user" }, ix))
@@ -579,6 +608,7 @@ impl ChatView {
             .py_2()
             .rounded_lg()
             .bg(theme.list_active)
+            .when(found, |d| d.border_1().border_color(x.amber))
             .when_some(ts.filter(|_| !pinned), |d, ts| d.tooltip(move |w, cx| Tooltip::new(clock_time(ts)).build(w, cx)))
             .when(!attachments.is_empty(), |d| {
                 d.child(div().flex().flex_wrap().gap_1p5().children(attachments.iter().map(|(name, image)| {
@@ -597,11 +627,8 @@ impl ChatView {
                 div()
                     .whitespace_normal()
                     .when(clamps && !expanded, |d| d.max_h(px(80.)).overflow_hidden())
-                    .child(InteractiveText::new(("user-text", ix), styled).on_click(ranges, move |i, _, cx| {
-                        if let Some(u) = targets.get(i) {
-                            cx.open_url(u);
-                        }
-                    })),
+                    // Selectable (and its links clickable), like the agent's replies.
+                    .child(TextView::markdown((if pinned { "pinned-user-text" } else { "user-text" }, ix), plain_markdown(text))),
             )
             .when(clamps && !pinned, |d| {
                 d.child(
@@ -741,6 +768,15 @@ impl ChatView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plain_markdown_shows_text_as_typed() {
+        use super::plain_markdown;
+        assert_eq!(plain_markdown("fix *this* #1"), "fix \\*this\\* \\#1");
+        assert_eq!(plain_markdown("a\nb"), "a\\\nb");
+        assert_eq!(plain_markdown("  code"), "\u{00A0}\u{00A0}code");
+        assert_eq!(plain_markdown("see https://x.dev/a_b."), "see <https://x.dev/a_b>\\.");
+    }
+
     use super::{FOREST_WORDS, Node, Row, build_items, describe_input, find_urls, header_at, is_blank, next_forest_word, strip_rules, tool_preview};
     use gpui_kit::px;
 
