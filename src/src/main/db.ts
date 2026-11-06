@@ -70,6 +70,11 @@ db.exec(`
 	if (!projCols.includes("worktree_dir")) {
 		db.exec("ALTER TABLE projects ADD COLUMN worktree_dir TEXT");
 	}
+	// Which integration a project uses: NULL = auto (match origin's host),
+	// 'github' / 'gitlab' = forced, 'none' = off for this project.
+	if (!projCols.includes("integration")) {
+		db.exec("ALTER TABLE projects ADD COLUMN integration TEXT");
+	}
 
 	const wtCols = (
 		db.prepare("PRAGMA table_info(worktrees)").all() as { name: string }[]
@@ -88,6 +93,7 @@ export type ProjectRow = {
 	added_at: number;
 	last_opened_at: number | null;
 	worktree_dir: string | null;
+	integration: string | null;
 };
 
 export type WorktreeRow = {
@@ -134,6 +140,9 @@ const stmts = {
 	),
 	setWorktreeDir: db.prepare(
 		"UPDATE projects SET worktree_dir = $dir WHERE id = $id",
+	),
+	setProjectIntegration: db.prepare(
+		"UPDATE projects SET integration = $integration WHERE id = $id",
 	),
 
 	getWorktree: db.prepare("SELECT * FROM worktrees WHERE id = ?"),
@@ -198,6 +207,8 @@ export const projectsRepo = {
 	touch: (id: string, now: number) => stmts.touchProject.run({ id, now }),
 	setWorktreeDir: (id: string, dir: string) =>
 		stmts.setWorktreeDir.run({ id, dir }),
+	setIntegration: (id: string, integration: string | null) =>
+		stmts.setProjectIntegration.run({ id, integration }),
 };
 
 export const worktreesRepo = {

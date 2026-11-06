@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import type { ChatLogMeta, CommandRunTarget, ProjectCommand } from "../../shared/types";
 import { worktreeRoute } from "../router";
@@ -27,7 +27,7 @@ import { relativeTime } from "../lib/format";
 import { worktreeLabel } from "../lib/worktreeLabel";
 import { openInEditor, runProjectCommand } from "../lib/openTargets";
 import { openSession, useTerminals } from "../lib/terminalStore";
-import { togglePanel, usePanel } from "../lib/panelStore";
+import { setPanelWorktree, togglePanel, usePanel } from "../lib/panelStore";
 import { useDefaultRunTarget } from "../lib/runTarget";
 import tb from "../components/Titlebar.module.css";
 import styles from "./WorktreeView.module.css";
@@ -56,6 +56,8 @@ export function WorktreeView() {
 	const defaultTarget = useDefaultRunTarget();
 
 	const wtId = detail?.worktree.id ?? null;
+	// Before paint, so the panel doesn't flash the previous worktree's state.
+	useLayoutEffect(() => setPanelWorktree(wtId), [wtId]);
 	const wtSessions = sessions.filter((s) => s.worktreeId === wtId);
 	// Past chats for this worktree not currently open — offered under Chat's ▾.
 	useEffect(() => {

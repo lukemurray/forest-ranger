@@ -1,9 +1,18 @@
 /** Minimal GitHub REST client for per-branch pull-request + checks status. */
 
 import type { BranchIntegrations } from "../shared/types";
-import { parseRemote, remoteUrl } from "./git";
+import { execFile } from "node:child_process";
+import { AUGMENTED_PATH, parseRemote, remoteUrl } from "./git";
 
-export type GitHubConfig = { host: string; token: string };
+export type GitHubConfig = {
+	host: string;
+	token: string;
+	/** Make calls through the `gh` CLI with its own login (no token here). */
+	viaCli?: boolean;
+	/** Per-project override: use this integration even if origin's host differs
+	 *  (SSH alias, custom domain) — take the repo path from origin as-is. */
+	forceHost?: boolean;
+};
 
 /** Bare host (no scheme) for matching remotes, e.g. "github.com". */
 function bareHost(host: string): string {
@@ -16,7 +25,41 @@ function apiBase(host: string): string {
 	return h === "github.com" ? "https://api.github.com" : `https://${h}/api/v3`;
 }
 
+/**
+ * Call the API through `gh api`, using the user's existing gh login — gh picks and
+ * refreshes the token, so nothing is set up on GitHub and no token is stored here.
+ */
+function ghCli<T>(config: GitHubConfig, path: string, body?: unknown): Promise<T> {
+	const args = ["api", path.replace(/^\//, ""), "--hostname", bareHost(config.host)];
+	if (body) args.push("--method", "POST", "--input", "-");
+	return new Promise<T>((resolve, reject) => {
+		const proc = execFile(
+			"gh",
+			args,
+			// Dock-launched apps don't get the shell's PATH (gh lives in /opt/homebrew/bin).
+			{ env: { ...process.env, PATH: AUGMENTED_PATH, GH_PROMPT_DISABLED: "1" }, maxBuffer: 32 * 1024 * 1024, timeout: 30_000 },
+			(err, stdout, stderr) => {
+				if (err) {
+					const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+					const why = missing
+						? "gh isn't installed (brew install gh)"
+						: (stderr || err.message).trim().split("\n").pop();
+					reject(new Error(`GitHub via gh: ${why}`));
+					return;
+				}
+				try {
+					resolve(JSON.parse(stdout) as T);
+				} catch {
+					reject(new Error("GitHub via gh: unexpected response"));
+				}
+			},
+		);
+		proc.stdin?.end(body ? JSON.stringify(body) : undefined);
+	});
+}
+
 async function gh<T>(config: GitHubConfig, path: string, body?: unknown): Promise<T> {
+	if (config.viaCli) return ghCli<T>(config, path, body);
 	const res = await fetch(`${apiBase(config.host)}${path}`, {
 		method: body ? "POST" : "GET",
 		headers: {
@@ -54,13 +97,14 @@ export async function testConnection(
 	}
 }
 
-/** owner/repo for a repo whose origin is on the configured GitHub host, else null. */
-async function repoSlug(repoPath: string, host: string): Promise<string | null> {
+/** owner/repo for a repo whose origin is on the configured GitHub host (or any host
+ *  when forced by a project override), else null. */
+async function repoSlug(repoPath: string, host: string, force = false): Promise<string | null> {
 	const url = await remoteUrl(repoPath);
 	if (!url) return null;
 	const parsed = parseRemote(url);
 	if (!parsed) return null;
-	if (parsed.host.toLowerCase() !== bareHost(host)) return null;
+	if (!force && parsed.host.toLowerCase() !== bareHost(host)) return null;
 	return parsed.path; // "owner/repo"
 }
 
@@ -78,7 +122,7 @@ export async function createRequest(
 	base: string,
 	title: string,
 ): Promise<{ ok: boolean; url?: string; number?: number; error?: string } | null> {
-	const slug = await repoSlug(repoPath, config.host);
+	const slug = await repoSlug(repoPath, config.host, config.forceHost);
 	if (!slug) return null;
 	try {
 		const pr = await gh<ApiPull>(config, `/repos/${slug}/pulls`, {
@@ -98,7 +142,7 @@ export async function branchStatus(
 	repoPath: string,
 	branch: string,
 ): Promise<BranchIntegrations | null> {
-	const slug = await repoSlug(repoPath, config.host);
+	const slug = await repoSlug(repoPath, config.host, config.forceHost);
 	if (!slug) return null;
 	const [owner] = slug.split("/");
 	const siteHost = bareHost(config.host);

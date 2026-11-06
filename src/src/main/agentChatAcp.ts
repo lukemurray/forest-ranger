@@ -60,6 +60,11 @@ function agentCalls(agent: ClientContext) {
 		prompt: call(methods.agent.session.prompt),
 		setSessionMode: call(methods.agent.session.setMode),
 		setSessionConfigOption: call(methods.agent.session.setConfigOption),
+		fork: call(methods.agent.session.fork),
+		// `_session/steering` (extension, both adapters): add a message to the running
+		// turn — the agent picks it up at its next step — instead of queueing a prompt.
+		steer: (params: { sessionId: string; prompt: unknown[]; _meta?: unknown }) =>
+			agent.request<{ outcome?: string }>("_session/steering", params),
 		cancel: (params: AgentNotificationParamsByMethod[typeof methods.agent.session.cancel]) =>
 			agent.notify(methods.agent.session.cancel, params),
 	};
@@ -275,6 +280,7 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 	let conn: ReturnType<typeof agentCalls> | null = null;
 	let sessionId: string | null = null;
 	let closed = false;
+	let canSteer = false;
 	// Mutable so the UI can change it live (client-side enforcement) without a relaunch.
 	let permissionMode = opts.permissionMode;
 	// Agent-advertised session modes, retained so current_mode_update (which carries
@@ -400,7 +406,12 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 			switch (u.sessionUpdate) {
 				case "agent_message_chunk":
 					if (u.content.type === "text") {
-						emit({ type: "assistant_text", text: u.content.text });
+						// Keep the message id: it's the point a chat can be branched from.
+						emit({
+							type: "assistant_text",
+							text: u.content.text,
+							...(u.messageId ? { messageId: u.messageId } : {}),
+						});
 					}
 					break;
 				case "agent_thought_chunk":
@@ -430,6 +441,14 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 							diffs: diffs.length ? diffs : undefined,
 						});
 					}
+					break;
+				case "usage_update":
+					emit({
+						type: "usage",
+						used: u.used,
+						size: u.size,
+						...(u.cost ? { cost: { amount: u.cost.amount, currency: u.cost.currency } } : {}),
+					});
 					break;
 				case "plan":
 					emit({
@@ -570,6 +589,9 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 			},
 		});
 
+		// Agents advertise mid-turn steering in initialize's `_meta`.
+		canSteer = !!(initRes as { _meta?: { steering?: { supported?: boolean } } })._meta?.steering?.supported;
+
 		// Resume the agent's own context when we can (loadSession replays history
 		// silently so it doesn't duplicate the buffer we already restored).
 		type ModeState = {
@@ -671,6 +693,50 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 		setPermissionMode(mode) {
 			permissionMode = mode;
 		},
+		/**
+		 * Add a message to the running turn (the agent takes it at its next step,
+		 * keeping its work). "notRunning": no turn was in flight — send it normally.
+		 * "unsupported": this agent can't steer — the caller falls back to interrupt.
+		 */
+		steer(text: string, attachments: ChatAttachment[] = []) {
+			return ready.then(async (): Promise<"injected" | "notRunning" | "unsupported" | "failed"> => {
+				if (closed || !conn || !sessionId) return "failed";
+				if (!canSteer) return "unsupported";
+				try {
+					const res = await conn.steer({
+						sessionId,
+						prompt: promptBlocks(text, attachments),
+						// If the turn already ended, hand it back so we send it as a normal
+						// prompt (and see that turn's end). Claude honours this; Codex starts
+						// the turn itself — the caller only steers while a turn is running.
+						_meta: { steering: { idleBehavior: "promptRequired" } },
+					});
+					if (res.outcome === "injected" || res.outcome === "startedNewTurn") return "injected";
+					if (res.outcome === "promptRequired") return "notRunning";
+					return "failed";
+				} catch {
+					return "failed";
+				}
+			});
+		},
+		/**
+		 * Fork this agent session into a new one — at an agent message when given
+		 * (that message and everything before it), else at its latest state. The fork
+		 * point is JetBrains AIR's `_meta` extension, which both the Claude and Codex
+		 * adapters read; plain ACP `session/fork` only copies the whole session.
+		 */
+		fork(messageId?: string): Promise<string> {
+			return ready.then(async () => {
+				if (closed || !conn || !sessionId) throw new Error("Chat isn't connected");
+				const res = await conn.fork({
+					sessionId,
+					cwd: opts.cwd,
+					mcpServers: [],
+					...(messageId ? { _meta: { jetbrains: { air: { fork: { version: 1, messageId } } } } } : {}),
+				});
+				return res.sessionId;
+			});
+		},
 		// Like send, these wait for the session: an agent started on demand by this
 		// very change isn't connected yet.
 		setSessionMode(modeId) {
@@ -695,6 +761,19 @@ export function startAcpDriver(opts: StartOpts, emit: Emit): AgentDriver {
 			// can keep chatting. The agent responds to the pending prompt with a
 			// "cancelled" stop reason, which resolves the turn normally.
 			if (conn && sessionId) conn.cancel({ sessionId }).catch(() => {});
+			// ACP requires the client to answer every open permission request with
+			// "cancelled" (and close open forms) on cancel — otherwise an agent that was
+			// waiting on one never finishes the cancelled turn, and a steer never sends.
+			for (const [id, p] of pendingPerms) {
+				p.resolve("");
+				emit({ type: "permission_resolved", id, label: "Cancelled" });
+			}
+			pendingPerms.clear();
+			for (const [id, r] of pendingElicits) {
+				r("cancel");
+				emit({ type: "elicitation_resolved", id });
+			}
+			pendingElicits.clear();
 		},
 		stop() {
 			closed = true;

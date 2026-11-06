@@ -7,7 +7,7 @@ import { Modal } from "./ui/Modal";
 import { FileIcon } from "./icons";
 import styles from "./CommandPalette.module.css";
 
-type Item = { kind: "file"; path: string } | { kind: "diff"; path: string; base: string | null };
+type Item = { kind: "file"; path: string; ignored?: boolean } | { kind: "diff"; path: string; base: string | null };
 
 function basename(p: string): string {
 	return p.split("/").pop() ?? p;
@@ -52,7 +52,8 @@ export function FilePalette() {
 		Promise.all([
 			api.listFiles({ id: worktreeId }),
 			api.worktreeDetail({ id: worktreeId, base: null }),
-		]).then(([files, detail]) => {
+		]).then(([listed, detail]) => {
+			const files = listed.files;
 			// A file's diff opens against the working tree if it has uncommitted edits,
 			// else against the base (the branch's committed diff). uncommitted wins.
 			const diffBase = new Map<string, string | null>();
@@ -64,6 +65,10 @@ export function FilePalette() {
 				list.push({ kind: "file", path: p });
 				if (diffBase.has(p)) list.push({ kind: "diff", path: p, base: diffBase.get(p) ?? null });
 			}
+			// Gitignored files git lists one by one — outside ignored folders: .env,
+			// local config. Ignored folders (node_modules, bin) aren't expanded here;
+			// browse those in the Files tab.
+			for (const p of listed.ignored) if (!p.endsWith("/")) list.push({ kind: "file", path: p, ignored: true });
 			// Changed files not in listFiles (e.g. deleted) still deserve a diff entry.
 			for (const [p, base] of diffBase) if (!files.includes(p)) list.push({ kind: "diff", path: p, base });
 			setItems(list);
@@ -148,6 +153,7 @@ export function FilePalette() {
 							<span className={styles.rowLabel}>{basename(it.path)}</span>
 							<span className={styles.rowSub}>{it.path}</span>
 							{it.kind === "diff" && <span className={styles.rowTag}>diff</span>}
+							{it.kind === "file" && it.ignored && <span className={styles.rowTag}>ignored</span>}
 						</button>
 					))
 				)}

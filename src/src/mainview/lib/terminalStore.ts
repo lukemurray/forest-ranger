@@ -510,6 +510,11 @@ export function setDockOpen(open: boolean) {
 	set({ open });
 }
 
+/** A session's current state, read once (no subscription). */
+export function getSession(id: string): TermSession | undefined {
+	return state.sessions.find((s) => s.id === id);
+}
+
 export function useTerminals(): State {
 	return useSyncExternalStore(
 		(fn) => {

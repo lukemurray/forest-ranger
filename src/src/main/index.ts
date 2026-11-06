@@ -41,6 +41,8 @@ import {
 	setAgentStatusCallback,
 	startSession as agentChatStart,
 	stop as agentChatStop,
+	forkChat as agentChatFork,
+	steer as agentChatSteerTurn,
 } from "./agentChat";
 import {
 	DATA_DIR,
@@ -100,6 +102,9 @@ import {
 	worktreeActivityInfo,
 	detachedFrom as gitDetachedFrom,
 	reattach as gitReattach,
+	listDirEntries as gitListDirEntries,
+	remoteUrl as gitRemoteUrl,
+	parseRemote as gitParseRemote,
 	worktreeChanges,
 	type BaseChange,
 } from "./git";
@@ -152,6 +157,14 @@ type StoredIntegration = {
 	token?: string;
 	/** GitLab: Application ID override for this host (self-managed GitLab). */
 	clientId?: string;
+	/** Call the API through the provider's CLI (`gh` / `glab`) and its own login —
+	 *  no token stored here. */
+	useCli?: boolean;
+	/** Who the CLI was signed in as when connected (for display). */
+	cliUser?: string;
+	/** Pre-generalisation names for the same (GitLab-only) setting; read on load. */
+	useGlab?: boolean;
+	glabUser?: string;
 	/** GitLab: "Sign in with GitLab" tokens, each encrypted like `tokenEnc`. */
 	oauth?: {
 		access: Sealed;
@@ -187,7 +200,13 @@ function decryptToken(stored: StoredIntegration): string {
 
 function readStored(type: IntegrationType): StoredIntegration {
 	const row = integrationsRepo.get(type);
-	return row ? (JSON.parse(row.config) as StoredIntegration) : {};
+	const stored: StoredIntegration = row ? JSON.parse(row.config) : {};
+	if (stored.useGlab && stored.useCli === undefined) {
+		// Carry over a glab connection made before CLI support covered GitHub too.
+		const { useGlab: _u, glabUser, ...rest } = stored;
+		return { ...rest, useCli: true, cliUser: glabUser };
+	}
+	return stored;
 }
 
 function integrationConfig(type: IntegrationType): { host: string; token: string } {
@@ -199,7 +218,13 @@ function integrationStatus(type: IntegrationType): IntegrationStatus {
 	const row = integrationsRepo.get(type);
 	const stored = readStored(type);
 	const cfg = integrationConfig(type);
-	const base = { type, enabled: !!row?.enabled, host: cfg.host, hasToken: !!cfg.token || !!stored.oauth };
+	const base = {
+		type,
+		enabled: !!row?.enabled,
+		host: cfg.host,
+		hasToken: !!cfg.token || !!stored.oauth || !!stored.useCli,
+		cliUser: stored.useCli ? (stored.cliUser ?? "") : null,
+	};
 	if (type !== "gitlab") return base;
 	return {
 		...base,
@@ -208,6 +233,20 @@ function integrationStatus(type: IntegrationType): IntegrationStatus {
 		clientId: stored.clientId,
 	};
 }
+
+/**
+ * Integrations to try for a project, in order, honouring its override: 'none' →
+ * none; 'github' / 'gitlab' → just that one, used even if origin's host doesn't
+ * match (SSH alias, custom domain); unset (auto) → each one, matched by host.
+ */
+function integrationsForProject(project: ProjectRow): { type: IntegrationType; force: boolean }[] {
+	const o = project.integration;
+	if (o === "none") return [];
+	if (o === "github" || o === "gitlab") return [{ type: o, force: true }];
+	return KNOWN_INTEGRATIONS.map((type) => ({ type, force: false }));
+}
+
+const bareHostOf = (h: string) => h.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
 
 // One refresh at a time: GitLab rotates the refresh token, so two concurrent
 // refreshes would have the second one fail with the already-used token.
@@ -220,6 +259,8 @@ let gitlabRefreshing: Promise<GitLabConfig | null> | null = null;
 async function integrationAuth(type: IntegrationType): Promise<GitLabConfig | null> {
 	const stored = readStored(type);
 	const host = stored.host || DEFAULT_HOST[type];
+	// The CLI's login (gh / glab) wins when chosen: it handles its own tokens.
+	if (stored.useCli) return { host, token: "", viaCli: true };
 	const oauth = type === "gitlab" ? stored.oauth : undefined;
 	if (!oauth) {
 		const token = decryptToken(stored);
@@ -554,7 +595,12 @@ const handlers: RpcHandlers = {
 
 			listFiles: async ({ id }) => {
 				const row = worktreesRepo.get(id);
-				return row ? gitListFiles(row.path) : [];
+				return row ? gitListFiles(row.path) : { files: [], ignored: [] };
+			},
+
+			listDir: ({ id, path }) => {
+				const row = worktreesRepo.get(id);
+				return row ? gitListDirEntries(row.path, path) : [];
 			},
 
 			searchText: async ({ id, query }) => {
@@ -873,11 +919,12 @@ const handlers: RpcHandlers = {
 				// The remote branch must exist first; push before opening the request.
 				const pushed = await gitPushBranch(row.path);
 				if (!pushed.ok) return { ok: false, error: `Push failed: ${pushed.error}` };
-				for (const type of KNOWN_INTEGRATIONS) {
+				for (const { type, force } of integrationsForProject(project)) {
 					const intRow = integrationsRepo.get(type);
 					if (!intRow?.enabled) continue;
-					const cfg = await integrationAuth(type);
-					if (!cfg) continue;
+					const auth = await integrationAuth(type);
+					if (!auth) continue;
+					const cfg = { ...auth, forceHost: force };
 					const res =
 						type === "github"
 							? await githubCreateRequest(cfg, project.path, branch, base, title)
@@ -906,6 +953,7 @@ const handlers: RpcHandlers = {
 						...encryptToken(finalToken),
 						...(prev.clientId ? { clientId: prev.clientId } : {}),
 						...(prev.oauth && sameHost ? { oauth: prev.oauth } : {}),
+						...(prev.useCli ? { useCli: true, cliUser: prev.cliUser } : {}),
 					}),
 				);
 				return integrationStatus(type);
@@ -975,6 +1023,31 @@ const handlers: RpcHandlers = {
 				return gitReattach(row.path, branch);
 			},
 
+			integrationUseCli: async ({ type, host, enable }) => {
+				const prev = readStored(type);
+				const finalHost = host.trim() || prev.host || DEFAULT_HOST[type];
+				const enabled = !!integrationsRepo.get(type)?.enabled;
+				if (!enable) {
+					const { useCli: _u, cliUser: _c, ...rest } = prev;
+					integrationsRepo.upsert(type, enabled, JSON.stringify(rest));
+					return { ok: true };
+				}
+				// Check the CLI is installed and signed in to this host before switching over.
+				const conn = { host: finalHost, token: "", viaCli: true };
+				const who = type === "github" ? await githubTest(conn) : await gitlabTest(conn);
+				if (!who.ok) {
+					const bare = finalHost.replace(/^https?:\/\//, "");
+					const cli = type === "github" ? "gh" : "glab";
+					return { ok: false, error: `${who.error} — sign ${cli} in with \`${cli} auth login --hostname ${bare}\`` };
+				}
+				integrationsRepo.upsert(
+					type,
+					true, // connecting implies you want it on
+					JSON.stringify({ ...prev, host: finalHost, useCli: true, cliUser: who.user }),
+				);
+				return { ok: true, user: who.user };
+			},
+
 			gitlabSignOut: async () => {
 				const stored = readStored("gitlab");
 				if (stored.oauth) {
@@ -986,15 +1059,52 @@ const handlers: RpcHandlers = {
 				return { ok: true };
 			},
 
+			projectIntegration: async ({ projectId }) => {
+				const project = projectsRepo.get(projectId);
+				if (!project) return null;
+				const url = await gitRemoteUrl(project.path);
+				const parsed = url ? gitParseRemote(url) : null;
+				const host = parsed?.host.toLowerCase() ?? null;
+				// Auto-detect: an integration whose configured host is origin's host.
+				const detected = host
+					? (KNOWN_INTEGRATIONS.find((t) => bareHostOf(integrationConfig(t).host) === host) ?? null)
+					: null;
+				const override = (project.integration as "github" | "gitlab" | "none" | null) ?? null;
+				const type = override === "none" ? null : (override ?? detected);
+				const st = type ? integrationStatus(type) : null;
+				return {
+					remote: parsed ? `${parsed.host}/${parsed.path}` : null,
+					detected,
+					override: override ?? "auto",
+					effective:
+						type && st
+							? {
+									type,
+									enabled: st.enabled,
+									connection:
+										st.cliUser != null ? "cli" : st.signedInAs != null ? "oauth" : st.hasToken ? "token" : null,
+									user: st.cliUser || st.signedInAs || null,
+								}
+							: null,
+				};
+			},
+
+			setProjectIntegration: ({ projectId, integration }) => {
+				projectsRepo.setIntegration(projectId, integration === "auto" ? null : integration);
+				return { ok: true };
+			},
+
 			branchIntegrations: async ({ projectId, branch }) => {
 				const project = projectsRepo.get(projectId);
 				if (!project || !branch) return null;
-				// Try each enabled integration; the repo's remote host picks the match.
-				for (const type of KNOWN_INTEGRATIONS) {
+				// The project's override if set, else each enabled integration matched
+				// against the repo's remote host.
+				for (const { type, force } of integrationsForProject(project)) {
 					const row = integrationsRepo.get(type);
 					if (!row?.enabled) continue;
-					const cfg = await integrationAuth(type);
-					if (!cfg) continue;
+					const auth = await integrationAuth(type);
+					if (!auth) continue;
+					const cfg = { ...auth, forceHost: force };
 					const status =
 						type === "github"
 							? await githubBranchStatus(cfg, project.path, branch)
@@ -1039,6 +1149,13 @@ const handlers: RpcHandlers = {
 
 			listChats: ({ worktreeId }) =>
 				listChatLogs().filter((m) => m.worktreeId === worktreeId),
+
+			agentChatSteer: async ({ sessionId, text, attachments }) => ({
+				result: await agentChatSteerTurn(sessionId, text, attachments),
+			}),
+
+			agentChatFork: ({ sessionId, newSessionId, messageId }) =>
+				agentChatFork(sessionId, newSessionId, messageId),
 
 			agentChatRestart: ({ sessionId, worktreeId, provider, permissionMode, model }) => {
 				const row = worktreesRepo.get(worktreeId);

@@ -97,6 +97,15 @@ export const SproutIcon = ({ size = 14 }: Props) =>
 		</>,
 	);
 
+export const CopyIcon = ({ size = 15 }: Props) =>
+	svg(
+		size,
+		<>
+			<rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+			<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+		</>,
+	);
+
 export const GitBranchIcon = ({ size = 15 }: Props) =>
 	svg(
 		size,

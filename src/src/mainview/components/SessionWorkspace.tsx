@@ -15,6 +15,7 @@ import {
 } from "../lib/terminalStore";
 import {
 	dropDirAt,
+	firstGroup,
 	reconcile,
 	type DropDir,
 	type PaneGroup,
@@ -64,7 +65,7 @@ const usePane = () => useContext(PaneCtx)!;
  * New sessions are launched from the worktree toolbar (WorktreeView).
  */
 export function SessionWorkspace({ worktreeId }: { worktreeId: string }) {
-	const { sessions, activeId, layouts } = useTerminals();
+	const { sessions, activeId, layouts, mru } = useTerminals();
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [draftName, setDraftName] = useState("");
 	const [dragging, setDragging] = useState<string | null>(null);
@@ -80,10 +81,17 @@ export function SessionWorkspace({ worktreeId }: { worktreeId: string }) {
 	const byKey = useMemo(() => new Map(visible.map((s) => [sessionKey(s), s] as const)), [visible]);
 
 	useEffect(() => {
+		// Entering a worktree: return to the tab you were last on here (MRU), else the
+		// saved layout's active tab (after a restart), else the first.
 		if (visible.length > 0 && !visible.some((s) => s.id === activeId)) {
-			setActiveSession(visible[0].id);
+			const saved = firstGroup(layout).active;
+			const back =
+				mru.find((id) => visible.some((s) => s.id === id)) ??
+				(saved ? byKey.get(saved)?.id : undefined) ??
+				visible[0].id;
+			setActiveSession(back);
 		}
-	}, [visible, activeId]);
+	}, [visible, activeId, mru, layout, byKey]);
 
 	// Tell main which chat we're viewing (focused) so its finished turns read
 	// immediately instead of piling up as unread; null while the window is unfocused.

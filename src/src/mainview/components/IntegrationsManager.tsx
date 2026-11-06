@@ -63,6 +63,21 @@ function IntegrationCard({
 	const [clientId, setClientId] = useState(status.clientId ?? "");
 	const isGitLab = status.type === "gitlab";
 	const signedIn = isGitLab && status.signedInAs != null;
+	// The provider's CLI: gh for GitHub, glab for GitLab.
+	const cli = status.type === "github" ? "gh" : "glab";
+	const viaCli = status.cliUser != null;
+	const [cliBusy, setCliBusy] = useState(false);
+
+	/** Connect through the CLI's existing login (or stop using it). */
+	async function connectCli(enable: boolean) {
+		setCliBusy(true);
+		setResult(null);
+		const res = await api.integrationUseCli({ type: status.type, host, enable });
+		setCliBusy(false);
+		if (!res.ok) setResult({ ok: false, text: res.error ?? `Couldn't use ${cli}` });
+		else if (enable) setResult({ ok: true, text: `Connected via ${cli} as ${res.user}` });
+		onSaved();
+	}
 
 	async function signIn() {
 		setSigningIn(true);
@@ -135,7 +150,29 @@ function IntegrationCard({
 				</label>
 			</div>
 
-			{isGitLab && (
+			<div className={styles.signIn}>
+				{viaCli ? (
+					<>
+						<span className={styles.ok}>
+							Connected via {cli}
+							{status.cliUser ? ` as @${status.cliUser}` : ""}
+						</span>
+						<Button variant="ghost" onClick={() => connectCli(false)} disabled={cliBusy}>
+							Disconnect
+						</Button>
+					</>
+				) : (
+					<>
+						<Button variant="primary" onClick={() => connectCli(true)} disabled={cliBusy}>
+							{cliBusy ? `Checking ${cli}…` : `Use ${cli} sign-in`}
+						</Button>
+						<span className={styles.hint}>
+							Uses your <code>{cli}</code> CLI login — nothing to set up on {meta.label}.
+						</span>
+					</>
+				)}
+			</div>
+			{isGitLab && !viaCli && (
 				<div className={styles.signIn}>
 					{signedIn ? (
 						<>
@@ -148,7 +185,7 @@ function IntegrationCard({
 						</>
 					) : (
 						<>
-							<Button variant="primary" onClick={signIn} disabled={signingIn}>
+							<Button variant="subtle" onClick={signIn} disabled={signingIn}>
 								{signingIn ? "Waiting for your browser…" : "Sign in with GitLab"}
 							</Button>
 							<span className={styles.hint}>
@@ -160,7 +197,7 @@ function IntegrationCard({
 					)}
 				</div>
 			)}
-			{isGitLab && !signedIn && (!status.oauthReady || status.clientId) && (
+			{isGitLab && !signedIn && !viaCli && (!status.oauthReady || status.clientId) && (
 				<div className={styles.fields}>
 					<TextField
 						label="Application ID"
@@ -188,8 +225,10 @@ function IntegrationCard({
 					placeholder={status.type === "github" ? "github.com" : "https://gitlab.com"}
 					spellCheck={false}
 				/>
-				{isGitLab && !signedIn && <p className={styles.hint}>Or use a personal access token:</p>}
-				{!signedIn && (
+				{isGitLab && !signedIn && !viaCli && (
+					<p className={styles.hint}>Or use a personal access token:</p>
+				)}
+				{!signedIn && !viaCli && (
 				<TextField
 					label="Access token"
 					type="password"
@@ -201,14 +240,14 @@ function IntegrationCard({
 					spellCheck={false}
 				/>
 				)}
-				{!signedIn && <p className={styles.hint}>{meta.tokenHint}</p>}
+				{!signedIn && !viaCli && <p className={styles.hint}>{meta.tokenHint}</p>}
 			</div>
 
 			<div className={styles.actions}>
 				<Button variant="subtle" onClick={test} disabled={testing}>
 					{testing ? "Testing…" : "Test connection"}
 				</Button>
-				{status.hasToken && (
+				{status.hasToken && !viaCli && !signedIn && (
 					<Button variant="ghost" onClick={() => save(enabled, true)} disabled={saving}>
 						Clear token
 					</Button>

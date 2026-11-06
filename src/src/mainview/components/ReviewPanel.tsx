@@ -9,7 +9,7 @@ import type {
 	WorktreeDetail,
 } from "../../shared/types";
 import { openDiff, openFile } from "../lib/terminalStore";
-import { setPanelView, usePanel } from "../lib/panelStore";
+import { setPanelChanges, setPanelView, usePanel } from "../lib/panelStore";
 import { BranchCombobox } from "./BranchCombobox";
 import { Dropdown, DropdownItem } from "./Dropdown";
 import { BranchIntegrationBar } from "./BranchIntegrationBar";
@@ -72,7 +72,8 @@ export function ReviewPanel({
 	const [committing, setCommitting] = useState(false);
 	const [updating, setUpdating] = useState(false);
 	const [pushing, setPushing] = useState(false);
-	const [changesView, setChangesView] = useState<"files" | "commits">("files");
+	const changesView = usePanel().changes ?? "files";
+	const setChangesView = setPanelChanges;
 	const { view: panelView } = usePanel();
 
 	// Drop optimistic overrides once fresh data (with real staged flags) arrives.
@@ -535,6 +536,8 @@ type TreeDir = {
 	count: number;
 	ins: number;
 	del: number;
+	/** Everything under it is gitignored (Files view) — shown dimmed. */
+	ignored?: boolean;
 };
 type TreeEntry = TreeFile | TreeDir;
 
@@ -633,6 +636,8 @@ type FlatNode = {
 	name: string;
 	depth: number;
 	isDir: boolean;
+	/** Gitignored file, or a folder whose contents all are. */
+	ignored?: boolean;
 	count?: number;
 	ins?: number;
 	del?: number;
@@ -656,10 +661,18 @@ function flattenTree(dir: TreeDir, isOpen: (path: string) => boolean, depth = 0)
 				ins: child.ins,
 				del: child.del,
 				expanded: open,
+				ignored: child.ignored,
 			});
 			if (open) out.push(...flattenTree(child, isOpen, depth + 1));
 		} else {
-			out.push({ path: child.file.path, name: basename(child.file.path), depth, isDir: false, file: child.file });
+			out.push({
+				path: child.file.path,
+				name: basename(child.file.path),
+				depth,
+				isDir: false,
+				file: child.file,
+				ignored: child.file.ignored,
+			});
 		}
 	}
 	return out;
@@ -811,6 +824,7 @@ function FileTree({
 						tabIndex={i === focusIdx ? 0 : -1}
 						className={styles.treeRow}
 						data-kind={n.file?.kind}
+						data-ignored={n.ignored || undefined}
 						style={{ paddingLeft: 10 + n.depth * 14 }}
 						onClick={() => {
 							setFocusIdx(i);
@@ -853,7 +867,11 @@ function FileTree({
 						)}
 						<span className={styles.treeName}>{n.name}</span>
 						<span className={styles.treeMeta}>
-							{n.isDir && <span className={styles.dirMeta}>{n.count}</span>}
+							{n.ignored ? (
+								<span className={styles.ignoredTag}>ignored</span>
+							) : (
+								n.isDir && <span className={styles.dirMeta}>{n.count}</span>
+							)}
 							{showStats && (n.ins ?? 0) > 0 && <span className={styles.add}>+{n.ins}</span>}
 							{showStats && (n.del ?? 0) > 0 && <span className={styles.del}>−{n.del}</span>}
 						</span>
@@ -949,34 +967,72 @@ function SearchView({ worktreeId, projectId }: { worktreeId: string; projectId: 
 	);
 }
 
-/** Whole-repo file browser (all tracked + untracked files). Clicking/activating a
- *  file opens it in a Monaco editor tab. */
+/** Last segment of an unlisted ignored folder's placeholder row (see FileBrowser). */
+const SHOW_CONTENTS = "Show contents…";
+const EMPTY_DIR = "(empty)";
+
+/**
+ * Whole-repo file browser: tracked + untracked files, plus gitignored ones dimmed
+ * and tagged. Ignored folders aren't listed up front (node_modules, bin/obj can be
+ * 100k+ files): each shows a "Show contents…" row that lists that folder from disk,
+ * one level at a time. Activating a file opens it in a Monaco editor tab.
+ */
 function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId: string }) {
 	const [paths, setPaths] = useState<string[] | null>(null);
+	// Gitignored file paths, and ignored folders not yet listed (each gets a
+	// placeholder row inside it).
+	const [ignoredFiles, setIgnoredFiles] = useState<Set<string>>(() => new Set());
+	const [unlisted, setUnlisted] = useState<Set<string>>(() => new Set());
 	const [query, setQuery] = useState("");
 
 	useEffect(() => {
 		let live = true;
-		api.listFiles({ id: worktreeId }).then((p) => live && setPaths(p));
+		api.listFiles({ id: worktreeId }).then((r) => {
+			if (!live) return;
+			setPaths(r.files);
+			setIgnoredFiles(new Set(r.ignored.filter((p) => !p.endsWith("/"))));
+			setUnlisted(new Set(r.ignored.filter((p) => p.endsWith("/")).map((p) => p.slice(0, -1))));
+		});
 		return () => {
 			live = false;
 		};
 	}, [worktreeId]);
 
+	/** List an ignored folder one level: files join the tree, subfolders become unlisted. */
+	async function listFolder(dir: string) {
+		const entries = await api.listDir({ id: worktreeId, path: dir });
+		setUnlisted((prev) => {
+			const next = new Set(prev);
+			next.delete(dir);
+			for (const e of entries) if (e.dir) next.add(`${dir}/${e.name}`);
+			return next;
+		});
+		setIgnoredFiles((prev) => {
+			const next = new Set(prev);
+			const files = entries.filter((e) => !e.dir);
+			for (const e of files) next.add(`${dir}/${e.name}`);
+			if (entries.length === 0) next.add(`${dir}/${EMPTY_DIR}`);
+			return next;
+		});
+	}
+
 	const q = query.trim().toLowerCase();
-	const files = useMemo(
-		() =>
-			(paths ?? [])
-				.filter((p) => !q || p.toLowerCase().includes(q))
-				.map((p) => ({
-					path: p,
-					kind: "modified" as ChangeKind,
-					insertions: null,
-					deletions: null,
-					staged: false,
-				})),
-		[paths, q],
-	);
+	const files = useMemo(() => {
+		const row = (path: string, ignored: boolean): ChangedFile => ({
+			path,
+			kind: "modified" as ChangeKind,
+			insertions: null,
+			deletions: null,
+			staged: false,
+			ignored,
+		});
+		const all = [
+			...(paths ?? []).map((p) => row(p, false)),
+			...[...ignoredFiles].map((p) => row(p, true)),
+			...[...unlisted].map((d) => row(`${d}/${SHOW_CONTENTS}`, true)),
+		];
+		return q ? all.filter((f) => f.path.toLowerCase().includes(q)) : all;
+	}, [paths, ignoredFiles, unlisted, q]);
 
 	return (
 		<div className={styles.browser}>
@@ -998,7 +1054,14 @@ function FileBrowser({ worktreeId, projectId }: { worktreeId: string; projectId:
 					<FileTree
 						files={files}
 						forceOpen={q !== ""}
-						onOpen={(f, o) => openFile({ worktreeId, projectId, path: f.path, preview: o?.preview })}
+						onOpen={(f, o) => {
+							if (f.path.endsWith(`/${SHOW_CONTENTS}`)) {
+								void listFolder(f.path.slice(0, -(SHOW_CONTENTS.length + 1)));
+								return;
+							}
+							if (f.path.endsWith(`/${EMPTY_DIR}`)) return;
+							openFile({ worktreeId, projectId, path: f.path, preview: o?.preview });
+						}}
 					/>
 				)}
 			</div>
@@ -1050,23 +1113,26 @@ function sortDir(dir: TreeDir): void {
 	for (const c of dir.children) if (c.type === "dir") sortDir(c);
 }
 
-function aggregate(entry: TreeEntry): { count: number; ins: number; del: number } {
+function aggregate(entry: TreeEntry): { count: number; ins: number; del: number; ignored: boolean } {
 	if (entry.type === "file") {
-		return { count: 1, ins: entry.file.insertions ?? 0, del: entry.file.deletions ?? 0 };
+		return { count: 1, ins: entry.file.insertions ?? 0, del: entry.file.deletions ?? 0, ignored: !!entry.file.ignored };
 	}
 	let count = 0;
 	let ins = 0;
 	let del = 0;
+	let ignored = entry.children.length > 0;
 	for (const c of entry.children) {
 		const a = aggregate(c);
 		count += a.count;
 		ins += a.ins;
 		del += a.del;
+		ignored &&= a.ignored;
 	}
 	entry.count = count;
 	entry.ins = ins;
 	entry.del = del;
-	return { count, ins, del };
+	entry.ignored = ignored;
+	return { count, ins, del, ignored };
 }
 
 function CommitBox({

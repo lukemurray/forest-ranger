@@ -1,13 +1,13 @@
 /** Thin wrapper around the `git` CLI for worktree discovery. */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 // A macOS GUI app inherits the minimal launchd PATH, which can omit the user's
 // git. Augment it with the usual locations so `git` resolves when launched as a
 // bundled app (not just from a dev terminal).
-const AUGMENTED_PATH = [
+export const AUGMENTED_PATH = [
 	process.env.PATH ?? "",
 	"/usr/bin",
 	"/bin",
@@ -694,16 +694,46 @@ export async function fileDiff(
 }
 
 /** Every file in the worktree (tracked + untracked, respecting .gitignore), sorted. */
-export async function listFiles(worktreePath: string): Promise<string[]> {
-	const [tracked, others] = await Promise.all([
+/**
+ * Tracked + untracked files, plus what .gitignore hides. The ignored set is
+ * collapsed to whole directories ("bin/") — a repo can have 200k+ ignored files
+ * (node_modules, bin/obj) but only a few hundred ignored entries this way; the UI
+ * lists an ignored directory's contents on demand (listDirEntries).
+ */
+export async function listFiles(worktreePath: string): Promise<{ files: string[]; ignored: string[] }> {
+	const [tracked, others, ignored] = await Promise.all([
 		git(worktreePath, ["ls-files", "-z"]),
 		git(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]),
+		git(worktreePath, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]),
 	]);
 	const set = new Set<string>();
 	for (const out of [tracked, others]) {
 		if (out.ok) for (const p of out.stdout.split("\0")) if (p) set.add(p);
 	}
-	return [...set].sort();
+	const ign = ignored.ok ? ignored.stdout.split("\0").filter(Boolean).sort() : [];
+	return { files: [...set].sort(), ignored: ign };
+}
+
+/** Most entries listed for one directory level (a giant ignored folder stays usable). */
+const MAX_DIR_ENTRIES = 2000;
+
+/**
+ * One level of a directory inside a worktree — for browsing ignored folders, which
+ * git doesn't list. Confined to the worktree; folders first, then files.
+ */
+export function listDirEntries(worktreePath: string, rel: string): { name: string; dir: boolean }[] {
+	const root = resolve(worktreePath);
+	const abs = resolve(root, rel);
+	if (abs !== root && !abs.startsWith(root + sep)) return [];
+	try {
+		return readdirSync(abs, { withFileTypes: true })
+			.filter((d) => d.name !== ".git")
+			.map((d) => ({ name: d.name, dir: d.isDirectory() }))
+			.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1))
+			.slice(0, MAX_DIR_ENTRIES);
+	} catch {
+		return [];
+	}
 }
 
 export type SearchHit = { path: string; line: number; column: number; text: string };

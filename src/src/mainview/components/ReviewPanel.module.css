@@ -658,3 +658,15 @@
 	opacity: 0.5;
 	cursor: default;
 }
+
+/* Gitignored files/folders in the Files view: present but visibly set apart. */
+.treeRow[data-ignored] {
+	opacity: 0.55;
+}
+.ignoredTag {
+	font-size: 10.5px;
+	color: var(--text-faint);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	padding: 0 6px;
+}

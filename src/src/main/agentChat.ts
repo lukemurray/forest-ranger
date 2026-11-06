@@ -246,6 +246,13 @@ export type AgentDriver = {
 	cancel(): void;
 	/** Kill the underlying process. */
 	stop(): void;
+	/** Fork the agent session (at an agent message, else latest); the fork's id. */
+	fork(messageId?: string): Promise<string>;
+	/** Add a message to the running turn (see agentChatAcp's steer). */
+	steer(
+		text: string,
+		attachments?: ChatAttachment[],
+	): Promise<"injected" | "notRunning" | "unsupported" | "failed">;
 };
 
 export type Emit = (event: AgentChatEvent) => void;
@@ -283,13 +290,20 @@ const buffers = new Map<string, AgentChatEvent[]>();
  *  merges consecutive chunks the same way. */
 function appendEvent(buf: AgentChatEvent[], e: AgentChatEvent, frozen = 0): void {
 	const last = buf[buf.length - 1];
+	// Usage reports arrive several per turn; only the latest matters.
+	if (e.type === "usage" && last?.type === "usage" && buf.length - 1 >= frozen) {
+		buf[buf.length - 1] = e;
+		return;
+	}
 	if (
 		last &&
 		buf.length - 1 >= frozen && // already written to disk → start a new entry
 		(e.type === "assistant_text" || e.type === "thinking") &&
 		last.type === e.type
 	) {
-		buf[buf.length - 1] = { ...last, text: last.text + e.text };
+		// The merged entry keeps the newest message id: branching from it includes all of it.
+		const messageId = e.type === "assistant_text" ? e.messageId : undefined;
+		buf[buf.length - 1] = { ...last, text: last.text + e.text, ...(messageId ? { messageId } : {}) };
 	} else {
 		buf.push(e);
 	}
@@ -504,6 +518,45 @@ export function send(sessionId: string, text: string, attachments?: ChatAttachme
 	driver.send(text, attachments);
 }
 
+/**
+ * Steer: put a message into the turn that's running — the agent takes it at its
+ * next step and carries on, nothing is cancelled. "sent": nothing was running, so
+ * it went as a normal message. "unsupported": the agent can't steer (the view
+ * falls back to interrupt-and-send).
+ */
+export async function steer(
+	sessionId: string,
+	text: string,
+	attachments?: ChatAttachment[],
+): Promise<"steered" | "sent" | "unsupported"> {
+	const driver = sessions.get(sessionId);
+	// Only steer while one of our turns is in flight. (If a turn ends in the gap,
+	// Claude hands the message back; Codex would start the turn itself, out of our
+	// sight — this check keeps that window tiny.)
+	// ponytail: race between this check and the agent finishing remains for Codex.
+	if (!driver || !busy.has(sessionId)) {
+		send(sessionId, text, attachments);
+		return "sent";
+	}
+	const outcome = await driver.steer(text, attachments);
+	if (outcome === "injected") {
+		emitterFor(sessionId)({
+			type: "user_text",
+			text,
+			steered: true,
+			attachments: attachments?.length
+				? attachments.map((a) => ({ name: a.name, isImage: a.mediaType.startsWith("image/") }))
+				: undefined,
+		});
+		return "steered";
+	}
+	if (outcome === "notRunning") {
+		send(sessionId, text, attachments);
+		return "sent";
+	}
+	return "unsupported";
+}
+
 /** Answer a pending tool-permission request for a session. */
 export function respondPermission(sessionId: string, requestId: string, optionId: string): void {
 	sessions.get(sessionId)?.respond(requestId, optionId);
@@ -579,6 +632,69 @@ setInterval(() => {
 		sessions.delete(sessionId);
 	}
 }, 60_000).unref();
+
+/**
+ * Branch a chat: fork its agent session at `messageId` (an agent message; omitted =
+ * latest) and create chat `newId` holding the conversation up to that point plus
+ * the fork's session id. Like any saved chat, it starts its own agent on first use
+ * and resumes the fork — so it has the same context, then diverges.
+ */
+export async function forkChat(
+	sourceId: string,
+	newId: string,
+	messageId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const buf = buffers.get(sourceId);
+	const ctx = sessionMeta.get(sourceId);
+	if (!buf || !ctx) return { ok: false, error: "That chat isn't open" };
+
+	// Copy the transcript up to (and including) the chosen message's last chunk.
+	let cut = buf.length;
+	if (messageId) {
+		cut = -1;
+		for (let i = buf.length - 1; i >= 0; i--) {
+			const e = buf[i];
+			if (e.type === "assistant_text" && e.messageId === messageId) {
+				cut = i + 1;
+				break;
+			}
+		}
+		if (cut === -1) return { ok: false, error: "That message isn't in this chat's history" };
+	}
+
+	const driver = ensureDriver(sourceId);
+	if (!driver) return { ok: false, error: "Couldn't start the agent" };
+	let forkedAcpId: string;
+	try {
+		forkedAcpId = await driver.fork(messageId);
+	} catch (err) {
+		return { ok: false, error: `Branch failed: ${err instanceof Error ? err.message : String(err)}` };
+	}
+
+	const copied = buf.slice(0, cut).filter((e) => !isTransient(e));
+	// A permission/question prompt not answered before the cut would show as live
+	// buttons in the branch — drop those.
+	const answered = new Set(
+		copied.flatMap((e) => (e.type === "permission_resolved" || e.type === "elicitation_resolved" ? [e.id] : [])),
+	);
+	const seeded = copied.filter(
+		(e) => (e.type !== "permission" && e.type !== "elicitation") || answered.has(e.id),
+	);
+	// Cut mid-turn: close the turn so the branch opens idle, not "working".
+	const lastUser = seeded.map((e) => e.type).lastIndexOf("user_text");
+	if (lastUser !== -1 && !seeded.slice(lastUser).some((e) => e.type === "result")) {
+		seeded.push({ type: "result", ok: true, durationMs: null, ts: Date.now() });
+	}
+	// Last `system` event = the agent session to resume (see lastAcpSessionId).
+	seeded.push({ type: "system", sessionId: forkedAcpId, model: null, ts: Date.now() });
+
+	sessionMeta.set(newId, { ...ctx });
+	buffers.set(newId, seeded);
+	written.set(newId, 0);
+	flush(newId, true);
+	writeChatMeta(newId);
+	return { ok: true };
+}
 
 /** Kill every live chat session — used when the app is quitting. */
 export function killAll(): void {

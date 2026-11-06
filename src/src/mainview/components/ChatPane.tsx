@@ -13,7 +13,9 @@ import type {
 	PlanEntryStatus,
 } from "../../shared/types";
 import { api, bus, subscribeAgentChat } from "../rpc";
-import { markExited, openDiff, updateSession } from "../lib/terminalStore";
+import { getSession, markExited, openDiff, openSession, updateSession } from "../lib/terminalStore";
+import { notify } from "../lib/toast";
+import { Dropdown, DropdownItem } from "./Dropdown";
 import { AgentDiff } from "./AgentDiff";
 import { FOREST_WORDS, nextForestWord } from "../lib/forestWords";
 import {
@@ -29,8 +31,8 @@ import {
 import { Select } from "./ui/Select";
 import { ChatSettingsMenu } from "./ChatSettingsMenu";
 import { Markdown } from "./Markdown";
-import { clockTime, timeDivider } from "../lib/format";
-import { CloseIcon, PlusIcon } from "./icons";
+import { clockTime, relativeTime, timeDivider } from "../lib/format";
+import { ChevronDownIcon, CloseIcon, CopyIcon, EllipsisIcon, GitBranchIcon, PlusIcon } from "./icons";
 import styles from "./ChatPane.module.css";
 
 /** A pending attachment held in the composer (with a preview URL). */
@@ -46,8 +48,15 @@ type LocalAttachment = {
 type Outgoing = { text: string; attachments: ChatAttachment[] };
 
 type ChatItem =
-	| { kind: "user"; text: string; attachments?: { name: string; isImage: boolean }[]; ts?: number }
-	| { kind: "assistant"; text: string; ts?: number }
+	| {
+			kind: "user";
+			text: string;
+			attachments?: { name: string; isImage: boolean }[];
+			ts?: number;
+			/** Added to a running turn (steered in), not sent as a new turn. */
+			steered?: boolean;
+	  }
+	| { kind: "assistant"; text: string; ts?: number; messageId?: string }
 	| { kind: "thinking"; text: string }
 	| {
 			kind: "tool";
@@ -114,6 +123,11 @@ export function ChatPane({
 	active: boolean;
 }) {
 	const [items, setItems] = useState<ChatItem[]>([]);
+	// Context use from the agent, and whether to suggest starting fresh on reopen.
+	const [usage, setUsage] = useState<Usage | null>(null);
+	const [freshBanner, setFreshBanner] = useState(false);
+	const lastUsageRef = useRef<Usage | null>(null);
+	const lastEventTs = useRef(0);
 	// Open an agent edit as a full Monaco side-by-side diff (working tree vs HEAD for
 	// that file — the applied change), reusing the app's diff-tab infra.
 	const openEditDiff = useCallback(
@@ -158,9 +172,20 @@ export function ChatPane({
 		setAgentModes([]);
 		setAgentModeId(null);
 		setConfigOptions([]);
+		setUsage(null);
+		setFreshBanner(false);
+		lastUsageRef.current = null;
+		lastEventTs.current = 0;
 
 		function apply(event: AgentChatEvent) {
+			if (event.ts) lastEventTs.current = Math.max(lastEventTs.current, event.ts);
 			switch (event.type) {
+				case "usage": {
+					const u = { used: event.used, size: event.size, cost: event.cost };
+					lastUsageRef.current = u;
+					setUsage(u);
+					break;
+				}
 				case "history":
 					// The full buffer on (re)attach: start from a clean transcript (so
 					// overlapping replays can't stack into duplicates), then apply it all
@@ -168,6 +193,15 @@ export function ChatPane({
 					setItems([]);
 					setPlan([]);
 					for (const e of event.events) apply(e);
+					// Back to a big chat after its prompt cache has gone cold: continuing
+					// re-reads the whole context, so offer to start fresh instead.
+					{
+						const u = lastUsageRef.current;
+						const idle = Date.now() - lastEventTs.current;
+						if (u && u.used >= BIG_CONTEXT && lastEventTs.current && idle > CACHE_COLD_MS) {
+							setFreshBanner(true);
+						}
+					}
 					break;
 				case "system":
 					setStatus((s) => (s === "starting" || s === "ended" ? "idle" : s));
@@ -175,7 +209,7 @@ export function ChatPane({
 				case "user_text":
 					setItems((it) => [
 						...it,
-						{ kind: "user", text: event.text, attachments: event.attachments, ts: event.ts },
+						{ kind: "user", text: event.text, attachments: event.attachments, ts: event.ts, steered: event.steered },
 					]);
 					setStatus("working");
 					if (!autoNamed.current) {
@@ -187,7 +221,7 @@ export function ChatPane({
 					break;
 				case "assistant_text":
 					setStatus("working");
-					setItems((it) => mergeText(it, "assistant", event.text, event.ts));
+					setItems((it) => mergeText(it, "assistant", event.text, event.ts, event.messageId));
 					break;
 				case "thinking":
 					setStatus("working");
@@ -555,16 +589,148 @@ export function ChatPane({
 	}
 
 	// "Steer": interrupt the current turn and send this queued message as a redirect.
-	// We cancel and move it to the front but let the drain-on-idle effect do the send
-	// once the cancelled turn actually ends — so we never prompt over a live turn.
-	function steer(index: number) {
-		setQueue((q) => {
-			const picked = q[index];
-			if (!picked) return q;
-			return [picked, ...q.slice(0, index), ...q.slice(index + 1)];
-		});
+	// We cancel and move it to the front, and the drain-on-idle effect sends it once
+	// the cancelled turn ends. Agents don't always report the end of a cancelled turn
+	// (steering a second time often left it stuck "working"), so if nothing arrives
+	// within STEER_GRACE_MS, treat the turn as over and send — what Stop + send does.
+	const steerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	/** Fallback for agents that can't steer: stop the turn, then send this. */
+	function interruptAndSend(item: Outgoing) {
+		setQueue((q) => [item, ...q]);
 		bus.agentChatCancel({ sessionId: chatId });
+		if (steerTimer.current) clearTimeout(steerTimer.current);
+		steerTimer.current = setTimeout(() => {
+			steerTimer.current = null;
+			setStatus((s) => (s === "working" ? "idle" : s));
+		}, STEER_GRACE_MS);
 	}
+	// The turn ended on its own (or we left) — the safety net isn't needed.
+	useEffect(() => {
+		if (status !== "working" && steerTimer.current) {
+			clearTimeout(steerTimer.current);
+			steerTimer.current = null;
+		}
+	}, [status]);
+	useEffect(() => () => {
+		if (steerTimer.current) clearTimeout(steerTimer.current);
+	}, []);
+
+	/**
+	 * Steer now: add the message to the running turn — the agent takes it at its
+	 * next step and keeps going (nothing cancelled). If nothing is running it's just
+	 * sent; if this agent can't steer, fall back to interrupt-and-send (and say so).
+	 */
+	async function steerNow(item: Outgoing) {
+		stick.current = true;
+		const { result } = await api.agentChatSteer({
+			sessionId: chatId,
+			text: item.text,
+			attachments: item.attachments,
+		});
+		if (result === "unsupported") {
+			notify("This agent can't take messages mid-turn — stopped it and sent yours instead.");
+			interruptAndSend(item);
+		}
+	}
+	/** Steer a message waiting in the queue. */
+	function steerQueued(index: number) {
+		const item = queue[index];
+		if (!item) return;
+		setQueue((q) => q.filter((_, i) => i !== index));
+		void steerNow(item);
+	}
+	/** Steer what's in the composer (⌘↩ / the Send menu) — while working; else send. */
+	function steerComposer() {
+		if (!working) return submit();
+		const text = input.trim();
+		const atts: ChatAttachment[] = attachments.map((a) => ({ name: a.name, mediaType: a.mediaType, data: a.data }));
+		if (!text && atts.length === 0) return;
+		setInput("");
+		setAttachments([]);
+		void steerNow({ text, attachments: atts });
+	}
+
+	/** Take a queued (or steered, not yet sent) message back: drop it from the queue
+	 *  and return its text and attachments to the composer so nothing is lost. */
+	function unqueue(index: number) {
+		const item = queue[index];
+		if (!item) return;
+		setQueue((q) => q.filter((_, i) => i !== index));
+		if (item.text) setInput((v) => (v.trim() ? `${item.text}\n\n${v}` : item.text));
+		if (item.attachments.length) {
+			setAttachments((a) => [
+				...item.attachments.map((x) => ({
+					id: crypto.randomUUID(),
+					name: x.name,
+					mediaType: x.mediaType,
+					data: x.data,
+					dataUrl: `data:${x.mediaType};base64,${x.data}`,
+					isImage: x.mediaType.startsWith("image/"),
+				})),
+				...a,
+			]);
+		}
+	}
+	/**
+	 * Start fresh: a new chat in this worktree, optionally carrying the last `lastN`
+	 * messages (prose only — no tool output — and capped) as its first message, so
+	 * the new agent has recent context without the whole history.
+	 */
+	function startFresh(lastN: number) {
+		const src = getSession(dockId);
+		const recent = items
+			.filter((i): i is Extract<ChatItem, { kind: "user" | "assistant" }> => i.kind === "user" || i.kind === "assistant")
+			.slice(-lastN);
+		setFreshBanner(false);
+		openSession({
+			worktreeId,
+			projectId,
+			kind: "chat",
+			commandId: null,
+			command: null,
+			resumeCommand: null,
+			sessionId: crypto.randomUUID(),
+			provider: providerValue,
+			permissionMode: mode,
+			model: modelValue,
+			agentLabel: src?.agentLabel,
+			name: "New chat",
+			title: src?.title ?? "Chat",
+			initialPrompt: lastN > 0 && recent.length > 0 ? carryOverPrompt(recent) : undefined,
+		});
+	}
+
+	// Branch the chat at an agent message: fork the agent session there and open the
+	// result as a new chat tab (same context up to that message, then diverges).
+	const branchFrom = useCallback(
+		async (messageId: string) => {
+			const newId = crypto.randomUUID();
+			const res = await api.agentChatFork({ sessionId: chatId, newSessionId: newId, messageId });
+			if (!res.ok) {
+				notify(res.error ?? "Couldn't branch this chat", "error");
+				return;
+			}
+			const src = getSession(dockId);
+			openSession({
+				worktreeId,
+				projectId,
+				kind: "chat",
+				commandId: null,
+				command: null,
+				resumeCommand: null,
+				sessionId: newId,
+				resume: true, // seeded with the history up to the branch point; resumes the fork
+				provider: providerValue,
+				permissionMode: mode,
+				model: modelValue,
+				agentLabel: src?.agentLabel,
+				name: `⑂ ${src?.name ?? "Branch"}`,
+				renamed: true,
+				title: src?.title ?? "Branch",
+			});
+		},
+		[chatId, dockId, worktreeId, projectId, providerValue, mode, modelValue],
+	);
 	// Stable across renders so memoized rows don't re-render every streamed token.
 	const respondPermission = useCallback(
 		(requestId: string, optionId: string, label: string) => {
@@ -590,10 +756,12 @@ export function ChatPane({
 		},
 		[chatId],
 	);
+	// ↩ sends (queues while working); ⌘↩ / Ctrl↩ steers into the running turn.
 	function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
-			submit();
+			if (e.metaKey || e.ctrlKey) steerComposer();
+			else submit();
 		}
 	}
 
@@ -636,6 +804,69 @@ export function ChatPane({
 		root.scrollTop = a.top + (root.scrollHeight - a.height);
 	}, [turnLimit]);
 	const lastNode = renderNodes[renderNodes.length - 1];
+
+	// ⌘F: find in this chat's whole history (prose only — tool output isn't searched).
+	// Matching runs over all turns, so a hit in an unloaded turn widens the window to
+	// it; the matched text is painted with the CSS Custom Highlight API.
+	const [findOpen, setFindOpen] = useState(false);
+	const [findQuery, setFindQuery] = useState("");
+	const [findPos, setFindPos] = useState(0); // index into findHits
+	const findRef = useRef<HTMLInputElement>(null);
+	const q = findQuery.trim().toLowerCase();
+	const findHits = useMemo(
+		() => (q ? sections.flatMap((sec, i) => (sectionText(sec).includes(q) ? [i] : [])) : []),
+		[sections, q],
+	);
+	// A new query starts at the newest match.
+	useEffect(() => setFindPos(findHits.length - 1), [q]); // eslint-disable-line react-hooks/exhaustive-deps
+	const pos = Math.min(findPos, findHits.length - 1);
+	const findTurn = findHits[pos];
+	// Scroll once per jump (not on every later window change, so you can scroll away).
+	const pendingJump = useRef(false);
+	useEffect(() => {
+		pendingJump.current = true;
+		if (findTurn !== undefined) setTurnLimit((n) => Math.max(n, sections.length - findTurn));
+	}, [findTurn, q]); // eslint-disable-line react-hooks/exhaustive-deps
+	useLayoutEffect(() => {
+		if (!findOpen || findTurn === undefined || !pendingJump.current) return;
+		const el = scrollRef.current?.querySelector(`[data-turn="${findTurn}"]`);
+		if (!el) return;
+		pendingJump.current = false;
+		stick.current = false;
+		const range = textRanges(el, q)[0];
+		(range?.startContainer.parentElement ?? el).scrollIntoView({ block: "center" });
+	}, [findOpen, findTurn, turnLimit, q]);
+	useEffect(() => {
+		const root = scrollRef.current;
+		if (!findOpen || !active || !q || !root || typeof Highlight === "undefined") return;
+		CSS.highlights.set("chat-find", new Highlight(...textRanges(root, q)));
+		const cur = root.querySelector(`[data-turn="${findTurn}"]`);
+		const first = cur ? textRanges(cur, q)[0] : undefined;
+		if (first) CSS.highlights.set("chat-find-current", new Highlight(first));
+		return () => {
+			CSS.highlights.delete("chat-find");
+			CSS.highlights.delete("chat-find-current");
+		};
+	}, [findOpen, active, q, findTurn, turnLimit, items]);
+	useEffect(() => {
+		if (!active) return;
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "f") {
+				e.preventDefault();
+				pendingJump.current = true;
+				setFindOpen(true);
+				requestAnimationFrame(() => findRef.current?.select());
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [active]);
+	const stepFind = (dir: 1 | -1) =>
+		findHits.length && setFindPos((pos + dir + findHits.length) % findHits.length);
+	const closeFind = () => {
+		setFindOpen(false);
+		inputRef.current?.focus();
+	};
 
 	const hasContent = input.trim().length > 0 || attachments.length > 0;
 	const working = status === "working";
@@ -697,6 +928,35 @@ export function ChatPane({
 					Drop files to attach
 				</div>
 			)}
+			{findOpen && (
+				<div className={styles.findBar}>
+					<input
+						ref={findRef}
+						autoFocus
+						className={styles.findInput}
+						placeholder="Find in chat"
+						value={findQuery}
+						onChange={(e) => setFindQuery(e.target.value)}
+						onKeyDown={(e) => {
+							// Enter walks back through history (older), ⇧Enter forward.
+							if (e.key === "Enter") stepFind(e.shiftKey ? 1 : -1);
+							else if (e.key === "Escape") closeFind();
+						}}
+					/>
+					<span className={styles.findCount}>
+						{q ? (findHits.length ? `${pos + 1} / ${findHits.length}` : "No matches") : ""}
+					</span>
+					<button className={styles.findBtn} onClick={() => stepFind(-1)} title="Older match (Enter)" aria-label="Older match">
+						↑
+					</button>
+					<button className={styles.findBtn} onClick={() => stepFind(1)} title="Newer match (⇧Enter)" aria-label="Newer match">
+						↓
+					</button>
+					<button className={styles.findBtn} onClick={closeFind} title="Close (Esc)" aria-label="Close find">
+						<CloseIcon size={12} />
+					</button>
+				</div>
+			)}
 			<div className={styles.scroll} ref={scrollRef} onScroll={onScroll}>
 				{items.length === 0 && status !== "starting" && (
 					<div className={styles.empty}>Send a message to start the conversation.</div>
@@ -707,7 +967,7 @@ export function ChatPane({
 					</div>
 				)}
 				{sections.slice(hiddenTurns).map((sec, i) => (
-					<div key={i + hiddenTurns} className={styles.turn}>
+					<div key={i + hiddenTurns} className={styles.turn} data-turn={i + hiddenTurns}>
 						{dividers[i + hiddenTurns] && (
 							<div className={styles.timeDivider}>
 								<span>{dividers[i + hiddenTurns]}</span>
@@ -731,6 +991,7 @@ export function ChatPane({
 									onPermission={respondPermission}
 									onElicit={submitElicit}
 									onOpenDiff={openEditDiff}
+									onBranch={branchFrom}
 								/>
 							),
 						)}
@@ -764,15 +1025,24 @@ export function ChatPane({
 							<div className={styles.bubble} data-queued title="Queued — sends when the current turn finishes">
 								{q.text || `📎 ${q.attachments.length} attachment${q.attachments.length === 1 ? "" : "s"}`}
 							</div>
-							{working && (
+							<div className={styles.queuedActions}>
+								{working && (
+									<button
+										className={styles.steer}
+										onClick={() => steerQueued(i)}
+										title="Add to the running turn now — the agent picks it up at its next step and keeps working"
+									>
+										Steer now
+									</button>
+								)}
 								<button
 									className={styles.steer}
-									onClick={() => steer(i)}
-									title="Interrupt the current turn and send this now"
+									onClick={() => unqueue(i)}
+									title="Don't send — put it back in the message box"
 								>
-									Steer
+									Cancel
 								</button>
-							)}
+							</div>
 						</div>
 					</div>
 				))}
@@ -796,6 +1066,20 @@ export function ChatPane({
 				</details>
 			)}
 
+			{freshBanner && usage && (
+				<div className={styles.freshBanner}>
+					<span>
+						This chat is {fmtTokens(usage.used)} tokens and was last used{" "}
+						{relativeTime(lastEventTs.current)} — continuing re-reads all of it.
+					</span>
+					<Dropdown trigger={<button className={styles.freshBtn}>Start fresh ▾</button>}>
+						<StartFreshItems onPick={startFresh} />
+					</Dropdown>
+					<button className={styles.freshDismiss} onClick={() => setFreshBanner(false)}>
+						Continue here
+					</button>
+				</div>
+			)}
 			<div className={styles.composer}>
 				{slashMatches.length > 0 && (
 					<div className={styles.slashMenu}>
@@ -890,6 +1174,22 @@ export function ChatPane({
 						onModel={changeModel}
 						working={working}
 					/>
+					{usage && (
+						<Dropdown
+							trigger={
+								<button
+									className={styles.meter}
+									data-big={usage.used >= BIG_CONTEXT || undefined}
+									title="Context this chat sends with every message — click to start fresh"
+								>
+									{fmtTokens(usage.used)} / {fmtTokens(usage.size)}
+									{usage.cost ? ` · ${fmtCost(usage.cost)}` : ""}
+								</button>
+							}
+						>
+							<StartFreshItems onPick={startFresh} />
+						</Dropdown>
+					)}
 					{/* Permission/edit mode stays inline as a quick toggle, pinned right. */}
 					<div className={styles.modeGroup}>
 						<span className={styles.modeLabel}>Mode</span>
@@ -917,6 +1217,36 @@ export function ChatPane({
 						<button className={styles.stopBtn} onClick={stop}>
 							Stop
 						</button>
+					) : working ? (
+						// While a turn runs: ↩ queues it for after the turn; ⌘↩ steers it in.
+						<div className={styles.sendSplit}>
+							<button
+								className={styles.send}
+								onClick={submit}
+								disabled={!canSend}
+								title="Send after this turn finishes (↩)"
+							>
+								Queue
+							</button>
+							<Dropdown
+								trigger={
+									<button className={styles.sendMore} disabled={!canSend} aria-label="More send options">
+										<ChevronDownIcon size={13} />
+									</button>
+								}
+							>
+								<DropdownItem
+									label="Queue — send after this turn"
+									hint="↩"
+									onClick={submit}
+								/>
+								<DropdownItem
+									label="Steer now — agent takes it at its next step"
+									hint="⌘↩"
+									onClick={steerComposer}
+								/>
+							</Dropdown>
+						</div>
 					) : (
 						<button className={styles.send} onClick={submit} disabled={!canSend}>
 							Send
@@ -945,13 +1275,15 @@ function mergeText(
 	kind: "assistant" | "thinking",
 	text: string,
 	ts?: number,
+	messageId?: string,
 ): ChatItem[] {
 	const last = items[items.length - 1];
 	if (last && last.kind === kind) {
-		return [...items.slice(0, -1), { ...last, text: last.text + text }];
+		// Keep the newest message id: branching from this bubble includes all of it.
+		return [...items.slice(0, -1), { ...last, text: last.text + text, ...(messageId ? { messageId } : {}) }];
 	}
 	// ts only on the first chunk — it's when the turn's answer began.
-	return [...items, kind === "assistant" ? { kind, text, ts } : { kind, text }];
+	return [...items, kind === "assistant" ? { kind, text, ts, messageId } : { kind, text }];
 }
 
 type RenderNode = ChatItem | { kind: "process"; steps: ChatItem[] };
@@ -1175,6 +1507,77 @@ function UserBubble({
 	);
 }
 const CLAMP_PX = 80;
+type Usage = { used: number; size: number; cost?: { amount: number; currency: string } };
+/** Context size (tokens) past which the meter highlights and reopening suggests a
+ *  fresh start: every message re-sends this much. */
+const BIG_CONTEXT = 150_000;
+/** After this long idle the prompt cache is gone, so continuing re-reads it all. */
+const CACHE_COLD_MS = 60 * 60_000;
+
+function fmtTokens(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M`;
+	if (n >= 1000) return `${Math.round(n / 1000)}k`;
+	return String(n);
+}
+function fmtCost(c: { amount: number; currency: string }): string {
+	return c.currency === "USD" ? `$${c.amount.toFixed(2)}` : `${c.amount.toFixed(2)} ${c.currency}`;
+}
+
+/** The Start fresh choices: empty, or carrying the last few messages. */
+function StartFreshItems({ onPick }: { onPick: (lastN: number) => void }) {
+	return (
+		<>
+			<DropdownItem label="Start fresh — empty chat" onClick={() => onPick(0)} />
+			{[3, 5, 10].map((n) => (
+				<DropdownItem key={n} label={`Start fresh with the last ${n} messages`} onClick={() => onPick(n)} />
+			))}
+		</>
+	);
+}
+
+/** First message of a fresh chat that carries recent messages over (prose only, capped). */
+/** A turn's searchable text (questions and answers, lowercased). */
+function sectionText(sec: Section): string {
+	const parts: string[] = [];
+	for (const node of sec.nodes) {
+		if (node.kind === "user" || node.kind === "assistant") parts.push(node.text);
+		else if (node.kind === "process")
+			for (const st of node.steps) if (st.kind === "assistant") parts.push(st.text);
+	}
+	return parts.join("\n").toLowerCase();
+}
+
+/** DOM ranges of every (case-insensitive) occurrence of `q` in `root`'s text. */
+function textRanges(root: Node, q: string): Range[] {
+	const ranges: Range[] = [];
+	const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+		const text = n.nodeValue?.toLowerCase() ?? "";
+		for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + q.length)) {
+			const r = document.createRange();
+			r.setStart(n, i);
+			r.setEnd(n, i + q.length);
+			ranges.push(r);
+		}
+	}
+	return ranges;
+}
+
+function carryOverPrompt(msgs: { kind: "user" | "assistant"; text: string }[]): string {
+	const MAX_EACH = 2000;
+	const MAX_TOTAL = 12_000;
+	const clip = (t: string) => (t.length > MAX_EACH ? `${t.slice(0, MAX_EACH)}…` : t);
+	let body = msgs.map((m) => `${m.kind === "user" ? "Me" : "You"}: ${clip(m.text.trim())}`).join("\n\n");
+	if (body.length > MAX_TOTAL) body = `…${body.slice(-MAX_TOTAL)}`;
+	return (
+		`Carrying over the last ${msgs.length} messages from an earlier chat in this worktree, for context:\n\n` +
+		`---\n${body}\n---\n\n` +
+		"Treat this as background. Reply with one short line saying you're ready, then wait for my next message."
+	);
+}
+
+/** How long a steer waits for the cancelled turn to end before sending anyway. */
+const STEER_GRACE_MS = 3000;
 /** Turns rendered at once in a chat; scrolling up loads this many more at a time. */
 const TURN_WINDOW = 30;
 
@@ -1187,6 +1590,7 @@ const ChatRow = memo(function ChatRow({
 	onPermission,
 	onElicit,
 	onOpenDiff,
+	onBranch,
 }: {
 	item: ChatItem;
 	/** Pin this user row as the turn's sticky header. */
@@ -1198,11 +1602,21 @@ const ChatRow = memo(function ChatRow({
 		content?: Record<string, ElicitationValue>,
 	) => void;
 	onOpenDiff: (path: string) => void;
+	/** Branch the chat at this agent message (main transcript only). */
+	onBranch?: (messageId: string) => void;
 }) {
 	const fold = useFold();
 	if (item.kind === "user") {
 		return (
-			<div className={styles.user} data-pinned={pinned || undefined}>
+			<div className={styles.user} data-pinned={pinned || undefined} data-steered={item.steered || undefined}>
+				{item.steered && (
+					<span
+						className={styles.steeredTag}
+						title="Added to the running turn — the agent picked it up at its next step"
+					>
+						steered in
+					</span>
+				)}
 				<UserBubble
 					text={item.text}
 					attachments={item.attachments}
@@ -1218,6 +1632,28 @@ const ChatRow = memo(function ChatRow({
 		return (
 			<div className={styles.assistant} title={item.ts ? clockTime(item.ts) : undefined}>
 				<Markdown text={item.text} />
+				{item.messageId && onBranch && (
+					<div className={styles.msgMenu}>
+						<Dropdown
+							trigger={
+								<button className={styles.msgMenuBtn} aria-label="Message actions" title="Message actions">
+									<EllipsisIcon size={14} />
+								</button>
+							}
+						>
+							<DropdownItem
+								icon={<GitBranchIcon size={15} />}
+								label="Branch from here"
+								onClick={() => onBranch(item.messageId!)}
+							/>
+							<DropdownItem
+								icon={<CopyIcon size={15} />}
+								label="Copy text"
+								onClick={() => void navigator.clipboard.writeText(item.text)}
+							/>
+						</Dropdown>
+					</div>
+				)}
 			</div>
 		);
 	}

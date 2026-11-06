@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
-import type { CommandRunTarget, ProjectCommand } from "../../shared/types";
+import type {
+	CommandRunTarget,
+	IntegrationType,
+	ProjectCommand,
+	ProjectIntegrationChoice,
+	ProjectIntegrationInfo,
+} from "../../shared/types";
+import { Select } from "../components/ui/Select";
 import { projectRoute, rootRoute } from "../router";
 import { Titlebar } from "../components/Titlebar";
 import { Button } from "../components/ui/Button";
@@ -234,6 +241,15 @@ export function ProjectView() {
 					{tab === "settings" && (
 						<section className={styles.section}>
 							<div className={styles.sectionHead}>
+								<h2 className={styles.sectionTitle}>Code host</h2>
+							</div>
+							<CodeHostField projectId={projectId} />
+						</section>
+					)}
+
+					{tab === "settings" && (
+						<section className={styles.section}>
+							<div className={styles.sectionHead}>
 								<h2 className={styles.sectionTitle}>Review prompt</h2>
 							</div>
 							<ReviewPromptField projectId={projectId} />
@@ -264,6 +280,68 @@ export function ProjectView() {
 				projectId={projectId}
 				onSubmit={startReview}
 			/>
+		</div>
+	);
+}
+
+const PROVIDER_LABEL: Record<IntegrationType, string> = { github: "GitHub", gitlab: "GitLab" };
+const CONNECTION_LABEL = { cli: "its CLI", oauth: "browser sign-in", token: "an access token" } as const;
+
+/**
+ * Which integration (GitHub / GitLab) this project uses for MR/PR and pipeline
+ * status: auto-detected from origin's host, or set here — e.g. for an SSH alias or
+ * custom domain the host match can't see through, or "None" to turn it off.
+ */
+function CodeHostField({ projectId }: { projectId: string }) {
+	const [info, setInfo] = useState<ProjectIntegrationInfo | null | undefined>(undefined);
+	const load = useCallback(() => {
+		api.projectIntegration({ projectId }).then(setInfo);
+	}, [projectId]);
+	useEffect(load, [load]);
+
+	if (info === undefined) return <p className={styles.hint}>Checking…</p>;
+	if (info === null) return null;
+
+	const autoLabel = info.detected ? `Auto (${PROVIDER_LABEL[info.detected]})` : "Auto (no match)";
+	const eff = info.effective;
+	let status: string;
+	if (!eff) {
+		status =
+			info.override === "none"
+				? "Turned off for this project."
+				: info.remote
+					? "No integration matches this host — pick one above if it should use one."
+					: "No origin remote, so there's nothing to look up.";
+	} else if (!eff.enabled || !eff.connection) {
+		status = `${PROVIDER_LABEL[eff.type]} isn't connected — set it up in Settings → Integrations.`;
+	} else {
+		const how = eff.connection === "cli" ? (eff.type === "github" ? "gh" : "glab") : CONNECTION_LABEL[eff.connection];
+		status = `Using ${PROVIDER_LABEL[eff.type]} via ${how}${eff.user ? ` as @${eff.user}` : ""}.`;
+	}
+
+	return (
+		<div className={styles.codeHost}>
+			<p className={styles.hint}>
+				Origin: <code>{info.remote ?? "none"}</code>
+			</p>
+			<div className={styles.codeHostPick}>
+				<Select
+					value={info.override}
+					onValueChange={async (v) => {
+						await api.setProjectIntegration({ projectId, integration: v as ProjectIntegrationChoice });
+						load();
+						emitDataChanged("worktrees"); // re-fetch MR/PR status with the new choice
+					}}
+					options={[
+						{ value: "auto", label: autoLabel },
+						{ value: "github", label: "GitHub" },
+						{ value: "gitlab", label: "GitLab" },
+						{ value: "none", label: "None" },
+					]}
+					ariaLabel="Code host integration"
+				/>
+			</div>
+			<p className={styles.hint}>{status}</p>
 		</div>
 	);
 }

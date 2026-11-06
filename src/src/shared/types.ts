@@ -59,6 +59,8 @@ export type ChangedFile = {
 	deletions: number | null;
 	/** uncommitted only: the file currently has staged changes in the index. */
 	staged: boolean;
+	/** Files view: matched by .gitignore (shown dimmed, tagged). */
+	ignored?: boolean;
 };
 
 /** One commit on a branch vs its base, for the review panel's Commits view. */
@@ -206,14 +208,23 @@ type AgentChatEventKind =
 	/** Session is up; carries the agent's own session id (for resume) + model. */
 	| { type: "system"; sessionId: string | null; model: string | null }
 	/** The user's own turn, echoed so it's buffered/replayed on reattach. */
-	| { type: "user_text"; text: string; attachments?: { name: string; isImage: boolean }[] }
-	/** A chunk of assistant prose. */
-	| { type: "assistant_text"; text: string }
+	| {
+			type: "user_text";
+			text: string;
+			attachments?: { name: string; isImage: boolean }[];
+			/** Added to a running turn (steered in) rather than sent as a new turn. */
+			steered?: boolean;
+	  }
+	/** A chunk of assistant prose. `messageId` (from the agent) identifies the
+	 *  message it belongs to — the point a chat can be branched from. */
+	| { type: "assistant_text"; text: string; messageId?: string }
 	/** A chunk of the agent's thinking. */
 	| { type: "thinking"; text: string }
 	/** The agent invoked a tool. `diffs` carries structured file edits (edit/write
 	 *  tools) so the UI can show a real diff instead of raw text. */
 	| { type: "tool_use"; id: string; name: string; input: unknown; diffs?: ChatDiff[] }
+	/** Context window use reported by the agent (tokens), and cost so far if known. */
+	| { type: "usage"; used: number; size: number; cost?: { amount: number; currency: string } }
 	/** A tool returned. `summary` is a short, display-ready result string. */
 	| { type: "tool_result"; id: string; ok: boolean; summary: string; diffs?: ChatDiff[] }
 	/** The turn finished (agent is idle, awaiting the next user message). */
@@ -304,8 +315,11 @@ export type IntegrationStatus = {
 	type: IntegrationType;
 	enabled: boolean;
 	host: string;
-	/** A credential is stored — a pasted token or a sign-in. */
+	/** A credential is stored — a pasted token, a sign-in, or the CLI. */
 	hasToken: boolean;
+	/** Connected through the provider's CLI (gh / glab) login, as this user
+	 *  (null = not using the CLI). */
+	cliUser?: string | null;
 	/** GitLab: signed in via OAuth, as this user (null = not signed in). */
 	signedInAs?: string | null;
 	/** GitLab: an OAuth application id is available for this host (built in, or
@@ -313,6 +327,24 @@ export type IntegrationStatus = {
 	oauthReady?: boolean;
 	/** GitLab: the per-host Application ID override, if set (self-managed hosts). */
 	clientId?: string;
+};
+
+export type ProjectIntegrationChoice = "auto" | IntegrationType | "none";
+
+/** A project's code-host integration: what origin points at and what's in use. */
+export type ProjectIntegrationInfo = {
+	/** origin as host/path (e.g. "gitlab.com/xysense/xynger"), or null if no origin. */
+	remote: string | null;
+	/** The integration whose host matches origin, if any. */
+	detected: IntegrationType | null;
+	override: ProjectIntegrationChoice;
+	/** What's actually used (override, else detected), and how it's connected. */
+	effective: {
+		type: IntegrationType;
+		enabled: boolean;
+		connection: "cli" | "oauth" | "token" | null;
+		user: string | null;
+	} | null;
 };
 
 /** A pull/merge request for a branch (states normalized across providers). */
@@ -408,9 +440,16 @@ export type RpcRequests = {
 				response: { before: string; after: string; binary: boolean };
 			};
 			/** Every file in the worktree (tracked + untracked), for the file browser. */
+			/** All files (tracked + untracked), plus gitignored entries with ignored
+			 *  directories collapsed to "dir/" (list them with listDir). */
 			listFiles: {
 				params: { id: string };
-				response: string[];
+				response: { files: string[]; ignored: string[] };
+			};
+			/** One level of a directory in the worktree (for browsing ignored folders). */
+			listDir: {
+				params: { id: string; path: string };
+				response: { name: string; dir: boolean }[];
 			};
 			/** Case-insensitive literal text search across the worktree's tracked files. */
 			searchText: {
@@ -621,6 +660,37 @@ export type RpcRequests = {
 			reattachWorktree: {
 				params: { id: string };
 				response: { ok: boolean; error?: string };
+			};
+			/** Steer: add a message to the chat's running turn — the agent picks it up
+			 *  at its next step, without cancelling. "sent" = nothing was running, so
+			 *  it was sent normally; "unsupported" = this agent can't steer. */
+			agentChatSteer: {
+				params: { sessionId: string; text: string; attachments: ChatAttachment[] };
+				response: { result: "steered" | "sent" | "unsupported" };
+			};
+			/** Branch a chat: fork its agent session at an agent message (or its latest
+			 *  state) into a new chat `newSessionId`, seeded with the conversation up to
+			 *  that point. Open it as a resumed chat to continue from there. */
+			agentChatFork: {
+				params: { sessionId: string; newSessionId: string; messageId?: string };
+				response: { ok: boolean; error?: string };
+			};
+			/** Connect an integration through its CLI's existing login — `gh` for GitHub,
+			 *  `glab` for GitLab — or stop using it. Enabling checks the CLI is installed
+			 *  and signed in to that host. */
+			integrationUseCli: {
+				params: { type: IntegrationType; host: string; enable: boolean };
+				response: { ok: boolean; user?: string; error?: string };
+			};
+			/** Which integration a project uses: detected from origin, and any override. */
+			projectIntegration: {
+				params: { projectId: string };
+				response: ProjectIntegrationInfo | null;
+			};
+			/** Set a project's integration: auto (match origin's host), a provider, or none. */
+			setProjectIntegration: {
+				params: { projectId: string; integration: ProjectIntegrationChoice };
+				response: { ok: boolean };
 			};
 			/** Forget (and best-effort revoke) the GitLab sign-in. */
 			gitlabSignOut: {

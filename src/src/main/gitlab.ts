@@ -1,11 +1,21 @@
 /** Minimal GitLab REST client for per-branch MR + pipeline status. */
 
 import type { BranchIntegrations } from "../shared/types";
-import { parseRemote, remoteUrl } from "./git";
+import { execFile } from "node:child_process";
+import { AUGMENTED_PATH, parseRemote, remoteUrl } from "./git";
 
 /** `bearer`: an OAuth access token (Sign in with GitLab) rather than a pasted
  *  personal access token — they go in different headers. */
-export type GitLabConfig = { host: string; token: string; bearer?: boolean };
+export type GitLabConfig = {
+	host: string;
+	token: string;
+	/** An OAuth access token (Sign in with GitLab), sent as Bearer. */
+	bearer?: boolean;
+	/** Make calls through the `glab` CLI with its own login (no token here). */
+	viaCli?: boolean;
+	/** Per-project override: use this integration even if origin's host differs. */
+	forceHost?: boolean;
+};
 
 /** Normalize a host into a scheme-qualified site URL with no trailing slash. */
 function siteUrl(host: string): string {
@@ -14,7 +24,43 @@ function siteUrl(host: string): string {
 	return h;
 }
 
+/**
+ * Call the API through `glab api`, using the user's existing glab login — glab
+ * picks the token and refreshes it, so nothing is registered on GitLab and no
+ * token is stored here.
+ */
+function glabApi<T>(config: GitLabConfig, path: string, body?: unknown): Promise<T> {
+	const hostname = siteUrl(config.host).replace(/^https?:\/\//i, "");
+	const args = ["api", path.replace(/^\//, ""), "--hostname", hostname];
+	if (body) args.push("--method", "POST", "--input", "-", "--header", "Content-Type: application/json");
+	return new Promise<T>((resolve, reject) => {
+		const proc = execFile(
+			"glab",
+			args,
+			// Dock-launched apps don't get the shell's PATH (glab lives in /opt/homebrew/bin).
+			{ env: { ...process.env, PATH: AUGMENTED_PATH }, maxBuffer: 32 * 1024 * 1024, timeout: 30_000 },
+			(err, stdout, stderr) => {
+				if (err) {
+					const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+					const why = missing
+						? "glab isn't installed (brew install glab)"
+						: (stderr || err.message).trim().split("\n").pop();
+					reject(new Error(`GitLab via glab: ${why}`));
+					return;
+				}
+				try {
+					resolve(JSON.parse(stdout) as T);
+				} catch {
+					reject(new Error("GitLab via glab: unexpected response"));
+				}
+			},
+		);
+		proc.stdin?.end(body ? JSON.stringify(body) : undefined);
+	});
+}
+
 async function gl<T>(config: GitLabConfig, path: string, body?: unknown): Promise<T> {
+	if (config.viaCli) return glabApi<T>(config, path, body);
 	const res = await fetch(`${siteUrl(config.host)}/api/v4${path}`, {
 		method: body ? "POST" : "GET",
 		headers: {
@@ -52,13 +98,13 @@ export async function testConnection(
 }
 
 /** The GitLab project path (namespace/project) for a repo, if its origin matches the configured host. */
-async function projectPathFor(repoPath: string, host: string): Promise<string | null> {
+async function projectPathFor(repoPath: string, host: string, force = false): Promise<string | null> {
 	const url = await remoteUrl(repoPath);
 	if (!url) return null;
 	const parsed = parseRemote(url);
 	if (!parsed) return null;
 	const cfgHost = host.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-	if (parsed.host.toLowerCase() !== cfgHost.toLowerCase()) return null;
+	if (!force && parsed.host.toLowerCase() !== cfgHost.toLowerCase()) return null;
 	return parsed.path;
 }
 
@@ -84,7 +130,7 @@ export async function createRequest(
 	base: string,
 	title: string,
 ): Promise<{ ok: boolean; url?: string; number?: number; error?: string } | null> {
-	const path = await projectPathFor(repoPath, config.host);
+	const path = await projectPathFor(repoPath, config.host, config.forceHost);
 	if (!path) return null;
 	const id = encodeURIComponent(path);
 	try {
@@ -105,7 +151,7 @@ export async function branchStatus(
 	repoPath: string,
 	branch: string,
 ): Promise<BranchIntegrations | null> {
-	const path = await projectPathFor(repoPath, config.host);
+	const path = await projectPathFor(repoPath, config.host, config.forceHost);
 	if (!path) return null;
 	const id = encodeURIComponent(path);
 	const projectUrl = `${siteUrl(config.host)}/${path}`;
