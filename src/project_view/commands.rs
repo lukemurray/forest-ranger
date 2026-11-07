@@ -1,4 +1,4 @@
-//! Run commands: launching one in the external terminal (apps.ts runInTerminal),
+//! Run commands: launching one in a terminal tab or the external terminal (apps.ts runInTerminal),
 //! the titlebar ▶ buttons (RunCommands.tsx), and the add/edit CommandDialog.
 
 use std::path::Path;
@@ -75,12 +75,16 @@ fn clean_dir(dir: &str) -> String {
 }
 
 impl ForestRanger {
-    /// Run a project command in the worktree at `root` (`dir` joined on). In-app
-    /// targets run externally too: there's no in-app terminal yet.
+    /// Run a project command in the worktree at `root` (`dir` joined on): in a
+    /// terminal tab there, or the external terminal when the command asks for it.
     pub(crate) fn run_command(&mut self, cmd: &Command, root: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let app = cx.global::<Settings>().terminal.clone();
         let cwd = if cmd.dir.is_empty() { root.to_string() } else { Path::new(root).join(&cmd.dir).to_string_lossy().into_owned() };
         let command = cmd.command.clone();
+        let wt = self.projects.iter().flat_map(|p| &p.worktrees).find(|w| w.path == root).map(|w| w.id.clone());
+        if let Some(wt) = wt.filter(|_| cmd.run_target != "external") {
+            return self.open_terminal(&wt, &cwd, Some((cmd.label.clone(), command)), window, cx);
+        }
+        let app = cx.global::<Settings>().terminal.clone();
         let work = cx.background_executor().spawn(async move { run_in_terminal(app.as_deref(), &cwd, &command) });
         cx.spawn_in(window, async move |_, cx| {
             if let Err(e) = work.await {
@@ -169,7 +173,7 @@ struct CommandDialog {
     label: Entity<InputState>,
     command: Entity<InputState>,
     dir: Entity<InputState>,
-    /// Kept as stored ("in-app" survives an edit that doesn't touch it).
+    /// "external", else a terminal tab ("in-app", or Electron's "default").
     run_target: String,
     error: Option<String>,
     _subs: Vec<Subscription>,
@@ -179,7 +183,7 @@ struct CommandDialog {
 pub(crate) fn command_dialog(fr: Entity<ForestRanger>, project_id: String, editing: Option<Command>, window: &mut Window, cx: &mut App) {
     let title = if editing.is_some() { "Edit command" } else { "Add command" };
     let view = cx.new(|cx| {
-        let c = editing.clone().unwrap_or(Command { id: String::new(), label: String::new(), command: String::new(), dir: String::new(), run_target: "default".into() });
+        let c = editing.clone().unwrap_or(Command { id: String::new(), label: String::new(), command: String::new(), dir: String::new(), run_target: "in-app".into() });
         let label = cx.new(|cx| InputState::new(window, cx).placeholder("Run").default_value(c.label));
         let command = cx.new(|cx| InputState::new(window, cx).placeholder("npm run dev").default_value(c.command));
         let dir = cx.new(|cx| InputState::new(window, cx).placeholder("repo root — e.g. apps/web").default_value(c.dir));
@@ -248,7 +252,7 @@ impl Render for CommandDialog {
             .child(dialogs::field("Working directory (optional)", Input::new(&self.dir).font_family(mono), cx))
             .child(dialogs::field(
                 "Run in",
-                div().flex().gap_1().child(target("rt-default", "Default", !external, "default")).child(target("rt-external", "External", external, "external")),
+                div().flex().gap_1().child(target("rt-in-app", "Terminal tab", !external, "in-app")).child(target("rt-external", "External terminal", external, "external")),
                 cx,
             ))
             .child(dialogs::error_line(self.error.clone(), cx))

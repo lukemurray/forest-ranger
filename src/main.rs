@@ -17,6 +17,7 @@ mod review;
 mod session_state;
 mod settings;
 mod sidebar;
+mod term;
 mod theme;
 mod tree;
 
@@ -82,15 +83,16 @@ struct ForestRanger {
 
 actions!(
     forest_ranger,
-    [TogglePanel, GoBack, GoForward, ShowReview, ShowFiles, ShowSearch, CloseTab, Quit, JumpTo, OpenFile, SaveAll, About, Hide, HideOthers, ShowAll, Minimize, Zoom, CloseWindow]
+    [TogglePanel, GoBack, GoForward, ShowReview, ShowFiles, ShowSearch, CloseTab, NewTerminal, Quit, JumpTo, OpenFile, SaveAll, About, Hide, HideOthers, ShowAll, Minimize, Zoom, CloseWindow]
 );
 
-/// A center tab: an agent chat, a file's diff, or a file in the editor.
+/// A center tab: an agent chat, a file's diff, a file in the editor, or a terminal.
 enum Tab {
     Chat(Entity<ChatView>),
     /// `fixed`: built from given texts (an agent's edit), not from git.
     Diff { key: String, title: String, state: Entity<DiffState>, root: String, file: String, base: Option<String>, full: bool, fixed: bool },
     File(Entity<files::FileView>),
+    Term(Entity<term::TerminalView>),
 }
 
 impl Tab {
@@ -99,6 +101,7 @@ impl Tab {
             Tab::Chat(c) => format!("chat:{}", c.read(cx).session_id()),
             Tab::Diff { key, .. } => key.clone(),
             Tab::File(f) => format!("file:{}", f.read(cx).rel),
+            Tab::Term(t) => format!("term:{}", t.read(cx).id),
         }
     }
 }
@@ -770,6 +773,10 @@ impl ForestRanger {
                 Tab::File(self.file_view(&path, rel, None, window, cx))
             } else if let Some((base, file)) = parse_diff_key(key) {
                 self.diff_tab(&path, &file, base, false, cx)
+            } else if let Some(tid) = key.strip_prefix("term:") {
+                // Its shell ended with the app: a fresh one in the worktree.
+                let Ok(session) = term::start(&path, None) else { continue };
+                Tab::Term(self.term_view(session, Some(tid.into()), cx))
             } else {
                 continue;
             };
@@ -973,6 +980,36 @@ impl ForestRanger {
         let Some(wt) = self.selected.clone() else { return };
         let tab = self.chat_tab(&wt, chat, window, cx);
         self.push_tab(tab, cx);
+    }
+
+    /// Open a terminal tab in worktree `wt` (going there first), running
+    /// `command` (label, command line) if given.
+    pub(crate) fn open_terminal(&mut self, wt: &str, cwd: &str, command: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        let command_label = command.as_ref().map(|c| c.0.clone());
+        let session = match term::start(cwd, command) {
+            Ok(s) => s,
+            Err(e) => return window.push_notification(Notification::error(format!("Couldn't start a terminal: {e}")), cx),
+        };
+        let label = command_label;
+        let view = self.term_view(session, None, cx);
+        // A run command's tab keeps its label when reopened after a restart.
+        if let Some(label) = label {
+            let key = format!("term:{}", view.read(cx).id);
+            SessionState::update(cx, |s| {
+                s.worktree_mut(wt).titles.insert(key, label);
+            });
+        }
+        self.select(wt.to_string(), cx);
+        self.push_tab(Tab::Term(view.clone()), cx);
+        let focus = view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    }
+
+    fn term_view(&mut self, session: term::Session, id: Option<String>, cx: &mut Context<Self>) -> Entity<term::TerminalView> {
+        let view = cx.new(|cx| term::TerminalView::new(session, id, cx));
+        // ponytail: kept for the app's life like the file-view subs.
+        self._subs.push(cx.subscribe(&view, |_, _, _: &term::TermChanged, cx| cx.notify()));
+        view
     }
 
     fn new_chat(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1229,6 +1266,10 @@ impl ForestRanger {
                         }
                     }
                 }))
+                .child(self.icon_btn("terminal", "fr/terminal.svg", false, cx).tooltip(sidebar::tip("New terminal (⌃`)")).on_click(cx.listener({
+                    let (id, path) = (wt.id.clone(), path.clone());
+                    move |this, _, window, cx| this.open_terminal(&id, &path, None, window, cx)
+                })))
                 .child(div().w(px(1.)).h(px(20.)).mx(px(2.)).bg(theme.border))
                 .children(run)
                 .child(
@@ -1383,6 +1424,7 @@ impl ForestRanger {
                         .unwrap_or_else(|| sidebar::icon("fr/sparkle.svg", 12., theme.primary).into_any_element()),
                     Tab::Diff { .. } => sidebar::icon("fr/git-branch.svg", 12., x.amber).into_any_element(),
                     Tab::File(_) => sidebar::icon("fr/folder.svg", 12., theme.muted_foreground).into_any_element(),
+                    Tab::Term(_) => sidebar::icon("fr/terminal.svg", 12., theme.muted_foreground).into_any_element(),
                 };
                 let title = self.tab_title(tab, cx);
                 let editing = self.renaming.as_ref().filter(|r| r.0 == *key).map(|r| r.1.clone());
@@ -1562,6 +1604,7 @@ impl ForestRanger {
                     .into_any_element()
             }
             Some(Tab::File(f)) => f.clone().into_any_element(),
+            Some(Tab::Term(t)) => t.clone().into_any_element(),
             None => div().size_full().into_any_element(),
         }
     }
@@ -1736,6 +1779,7 @@ impl ForestRanger {
             Tab::Chat(c) => return c.read(cx).title(),
             Tab::Diff { title, .. } => title.clone(),
             Tab::File(f) => f.read(cx).title(),
+            Tab::Term(t) => t.read(cx).title(),
         };
         self.selected
             .as_deref()
@@ -1828,6 +1872,11 @@ impl Render for ForestRanger {
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
                 if let Some(i) = this.tabs_mut().and_then(|t| t.active) {
                     this.close_tab(i, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
+                if let Some((id, path)) = this.worktree().map(|w| (w.id.clone(), w.path.clone())) {
+                    this.open_terminal(&id, &path, None, window, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
@@ -2064,6 +2113,11 @@ fn main() {
             KeyBinding::new("cmd-k", JumpTo, None),
             KeyBinding::new("cmd-p", OpenFile, None),
             KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("ctrl-`", NewTerminal, None),
+            // In a terminal these go to the shell, not back/forward.
+            KeyBinding::new("ctrl--", NoAction, Some("Terminal")),
+            KeyBinding::new("ctrl-=", NoAction, Some("Terminal")),
+            KeyBinding::new("ctrl-shift--", NoAction, Some("Terminal")),
             KeyBinding::new("cmd-b", TogglePanel, None),
             KeyBinding::new("cmd-[", GoBack, None),
             KeyBinding::new("cmd-]", GoForward, None),

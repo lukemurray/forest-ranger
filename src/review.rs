@@ -1391,7 +1391,6 @@ impl ReviewPanel {
     }
 
     fn files_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
         let x = theme::extra(cx);
         let filter = self.filter.read(cx).value().trim().to_lowercase();
         if self.files.is_none() {
@@ -1430,10 +1429,9 @@ impl ReviewPanel {
                     .id("files-tree")
                     .flex_1()
                     .min_h_0()
-                    .py_1()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.border)
+                    // No frame: rows carry their own 10px inset, so pull them out to line
+                    // up with the filter box above.
+                    .mx(px(-10.))
                     .track_focus(&handle)
                     .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| this.files_key(&key_rows, ev, cx)))
                     .child(

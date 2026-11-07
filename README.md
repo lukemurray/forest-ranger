@@ -79,11 +79,14 @@ run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
   sync bar (ahead/behind origin, Fetch/Update, recent commits), Branches tab
   (ahead/behind, + Worktree, delete, clean up merged), Settings tab (run commands, code
   host, review prompt), ✦ Review a branch.
+- **Terminal tabs** (titlebar terminal icon, ⌃`) — your login shell in the worktree
+  (alacritty_terminal): 256/true color, selection + ⌘C (⇧-drag in mouse apps), ⌘V
+  (bracketed paste), scrollback, input methods / dead keys, mouse reporting for TUIs.
+  Run commands open in one unless set to "External terminal"; tabs reopen as fresh shells.
 - **Settings** (sidebar footer) — theme, editor, external terminal, default agent and
   mode, GitHub / GitLab via the `gh` / `glab` CLIs.
 
-Not here yet: an in-app terminal (run commands open your external terminal), a
-notarized/distributable build. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
+Not here yet: a notarized/distributable build. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
 
 ## Checks
 
