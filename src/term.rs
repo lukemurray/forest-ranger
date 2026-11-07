@@ -1,55 +1,261 @@
 //! The in-app terminal tab: your login shell (or a run command) on a PTY,
-//! emulated by alacritty_terminal and drawn cell by cell on a canvas.
+//! emulated by libghostty-vt (see ghostty.rs) and drawn cell by cell on a canvas.
 
-use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::ffi::c_void;
+use std::fs::File;
+use std::io::{Read as _, Write as _};
 use std::ops::Range;
+use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::unix::process::CommandExt as _;
+use std::ptr::{null, null_mut};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 
-use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify as _, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use gpui_kit::component::*;
 use gpui_kit::*;
 
+use crate::ghostty as g;
+
 const FONT_SIZE: f32 = 13.;
 const PAD: f32 = 8.;
+const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
+const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
 
-#[derive(Clone)]
-struct Listener(async_channel::Sender<TermEvent>);
+enum Event {
+    Wakeup,
+    Title(String),
+    Clipboard(String),
+    Exit(Option<i32>),
+}
 
-impl EventListener for Listener {
-    fn send_event(&self, e: TermEvent) {
-        let _ = self.0.try_send(e);
+/// What the terminal's callbacks (run inside `vt_write`, on the reader thread) need.
+struct Ctx {
+    events: async_channel::Sender<Event>,
+    pty: mpsc::Sender<Vec<u8>>,
+}
+
+/// libghostty's terminal plus the render state and encoders that read it.
+struct Vt {
+    t: g::Terminal,
+    rs: g::RenderState,
+    rows: g::RowIterator,
+    cells: g::RowCells,
+    keys: g::KeyEncoder,
+    key_ev: g::KeyEvent,
+    mouse: g::MouseEncoder,
+    mouse_ev: g::MouseEvent,
+    size: (u16, u16),
+    colors: Option<(g::Rgb, g::Rgb, bool)>,
+    _ctx: Box<Ctx>,
+}
+
+// The handles are only used under the Mutex that owns them.
+unsafe impl Send for Vt {}
+
+impl Drop for Vt {
+    fn drop(&mut self) {
+        unsafe {
+            g::ghostty_mouse_event_free(self.mouse_ev);
+            g::ghostty_mouse_encoder_free(self.mouse);
+            g::ghostty_key_event_free(self.key_ev);
+            g::ghostty_key_encoder_free(self.keys);
+            g::ghostty_render_state_row_cells_free(self.cells);
+            g::ghostty_render_state_row_iterator_free(self.rows);
+            g::ghostty_render_state_free(self.rs);
+            g::ghostty_terminal_free(self.t);
+        }
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct GridSize {
-    cols: usize,
-    rows: usize,
+fn ok(r: g::Result) -> std::io::Result<()> {
+    if r == g::SUCCESS { Ok(()) } else { Err(std::io::Error::other(format!("libghostty-vt error {r}"))) }
 }
 
-impl Dimensions for GridSize {
-    fn total_lines(&self) -> usize {
-        self.rows
+fn opt<T>(v: &T) -> *const c_void {
+    v as *const T as *const c_void
+}
+
+impl Vt {
+    fn new(cols: u16, rows: u16, ctx: Ctx) -> std::io::Result<Self> {
+        let ctx = Box::new(ctx);
+        let mut vt = Vt { t: null_mut(), rs: null_mut(), rows: null_mut(), cells: null_mut(), keys: null_mut(), key_ev: null_mut(), mouse: null_mut(), mouse_ev: null_mut(), size: (cols, rows), colors: None, _ctx: ctx };
+        unsafe {
+            ok(g::ghostty_terminal_new(null(), &mut vt.t, cols, rows))?;
+            ok(g::ghostty_render_state_new(null(), &mut vt.rs))?;
+            ok(g::ghostty_render_state_row_iterator_new(null(), &mut vt.rows))?;
+            ok(g::ghostty_render_state_row_cells_new(null(), &mut vt.cells))?;
+            ok(g::ghostty_key_encoder_new(null(), &mut vt.keys))?;
+            ok(g::ghostty_key_event_new(null(), &mut vt.key_ev))?;
+            ok(g::ghostty_mouse_encoder_new(null(), &mut vt.mouse))?;
+            ok(g::ghostty_mouse_event_new(null(), &mut vt.mouse_ev))?;
+            let t = vt.t;
+            g::ghostty_terminal_set(t, g::OPT_USERDATA, &*vt._ctx as *const Ctx as *const c_void);
+            g::ghostty_terminal_set(t, g::OPT_WRITE_PTY, on_write_pty as g::WritePtyFn as *const c_void);
+            g::ghostty_terminal_set(t, g::OPT_TITLE_CHANGED, on_title as g::NotifyFn as *const c_void);
+            g::ghostty_terminal_set(t, g::OPT_CLIPBOARD_WRITE, on_clipboard_write as g::ClipboardWriteFn as *const c_void);
+            // 10k lines of scrollback (the default is one ~400KB page).
+            g::ghostty_terminal_set(t, g::OPT_SCROLLBACK_MAX_BYTES, opt(&usize::MAX));
+            g::ghostty_terminal_set(t, g::OPT_SCROLLBACK_MAX_LINES, opt(&10_000usize));
+            g::ghostty_mouse_encoder_set(vt.mouse, g::MOUSE_ENC_TRACK_LAST_CELL, opt(&true));
+        }
+        Ok(vt)
     }
-    fn screen_lines(&self) -> usize {
-        self.rows
+
+    fn write(&mut self, bytes: &[u8]) {
+        unsafe { g::ghostty_terminal_vt_write(self.t, bytes.as_ptr(), bytes.len()) }
     }
-    fn columns(&self) -> usize {
-        self.cols
+
+    fn get<T>(&self, key: i32, mut out: T) -> Option<T> {
+        (unsafe { g::ghostty_terminal_get(self.t, key, &mut out as *mut T as *mut c_void) } == g::SUCCESS).then_some(out)
     }
+
+    fn mode(&self, mode: u16) -> bool {
+        self.get(g::DATA_MODE, g::ModeConfig { mode, value: false }).is_some_and(|m| m.value)
+    }
+
+    fn mouse_tracking(&self) -> bool {
+        self.get(g::DATA_MOUSE_TRACKING, false).unwrap_or(false)
+    }
+
+    fn alt_screen(&self) -> bool {
+        self.get(g::DATA_ACTIVE_SCREEN, 0i32) == Some(1)
+    }
+
+    fn scroll(&mut self, tag: i32, delta: isize) {
+        unsafe { g::ghostty_terminal_scroll_viewport(self.t, g::ScrollViewport::new(tag, delta)) };
+    }
+
+    fn grid_ref(&self, tag: i32, x: u16, y: u32) -> Option<g::GridRef> {
+        let mut r = g::GridRef { node: null_mut(), x: 0, y: 0 };
+        (unsafe { g::ghostty_terminal_grid_ref(self.t, g::Point::new(tag, x, y), &mut r) } == g::SUCCESS).then_some(r)
+    }
+
+    /// A viewport cell's position in the whole screen (stays put as output scrolls it).
+    fn screen_point(&self, col: u16, row: u16) -> Option<(u16, u32)> {
+        let r = self.grid_ref(g::POINT_VIEWPORT, col, row as u32)?;
+        let mut p = g::PointCoordinate { x: 0, y: 0 };
+        (unsafe { g::ghostty_terminal_point_from_grid_ref(self.t, &r, g::POINT_SCREEN, &mut p) } == g::SUCCESS).then_some((p.x, p.y))
+    }
+
+    fn set_selection(&mut self, sel: Option<&g::Selection>) {
+        unsafe { g::ghostty_terminal_set(self.t, g::OPT_SELECTION, sel.map_or(null(), |s| opt(s))) };
+    }
+
+    /// The selection's text, or (None) the whole screen's.
+    fn text(&self, selection: bool) -> Option<String> {
+        let none = g::GridRef { node: null_mut(), x: 0, y: 0 };
+        let sel = if selection { Some(self.get(g::DATA_SELECTION, g::Selection { start: none, end: none, rectangle: false })?) } else { None };
+        unsafe {
+            let mut f = null_mut();
+            ok(g::ghostty_formatter_terminal_new(null(), &mut f, self.t)).ok()?;
+            g::ghostty_formatter_set(f, g::FORMATTER_EMIT, opt(&0i32));
+            g::ghostty_formatter_set(f, g::FORMATTER_UNWRAP, opt(&true));
+            g::ghostty_formatter_set(f, g::FORMATTER_TRIM, opt(&true));
+            if let Some(s) = &sel {
+                g::ghostty_formatter_set(f, g::FORMATTER_SELECTION, opt(s));
+            }
+            let (mut ptr, mut len) = (null_mut(), 0);
+            let r = g::ghostty_formatter_format_alloc(f, null(), &mut ptr, &mut len);
+            g::ghostty_formatter_free(f);
+            ok(r).ok()?;
+            if ptr.is_null() {
+                return Some(String::new());
+            }
+            let s = String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned();
+            g::ghostty_free(null(), ptr, len);
+            Some(s)
+        }
+    }
+
+    /// Default colors and the palette, from the app theme (re-sent when it changes).
+    fn set_colors(&mut self, fg: g::Rgb, bg: g::Rgb, dark: bool) {
+        if self.colors == Some((fg, bg, dark)) {
+            return;
+        }
+        self.colors = Some((fg, bg, dark));
+        let palette: Vec<g::Rgb> = (0..256).map(|i| palette_rgb(i, dark)).collect();
+        unsafe {
+            g::ghostty_terminal_set(self.t, g::OPT_COLOR_FOREGROUND, opt(&fg));
+            g::ghostty_terminal_set(self.t, g::OPT_COLOR_BACKGROUND, opt(&bg));
+            g::ghostty_terminal_set(self.t, g::OPT_COLOR_PALETTE, palette.as_ptr() as *const c_void);
+        }
+    }
+
+    /// A keystroke as the program expects it (legacy xterm or the Kitty protocol,
+    /// per the terminal's modes).
+    fn encode_key(&mut self, key: i32, mods: u16, text: &str) -> Vec<u8> {
+        unsafe {
+            g::ghostty_key_encoder_set_from_terminal(self.keys, self.t);
+            g::ghostty_key_encoder_set(self.keys, g::KEY_ENC_OPTION_AS_ALT, opt(&1i32));
+            g::ghostty_key_event_set_action(self.key_ev, g::KEY_PRESS);
+            g::ghostty_key_event_set_key(self.key_ev, key);
+            g::ghostty_key_event_set_mods(self.key_ev, mods);
+            g::ghostty_key_event_set_utf8(self.key_ev, g::Str { ptr: text.as_ptr(), len: text.len() });
+            g::ghostty_key_event_set_unshifted_codepoint(self.key_ev, text.chars().next().map_or(0, |c| c as u32));
+            let mut buf = [0u8; 128];
+            let mut n = 0;
+            let r = g::ghostty_key_encoder_encode(self.keys, self.key_ev, buf.as_mut_ptr(), buf.len(), &mut n);
+            g::ghostty_key_event_set_utf8(self.key_ev, g::Str { ptr: null(), len: 0 });
+            if r == g::SUCCESS { buf[..n].to_vec() } else { vec![] }
+        }
+    }
+
+    /// A mouse event for a program that tracks the mouse; `pos` is in the
+    /// encoder's pixel space (see `TerminalView::mouse`).
+    fn encode_mouse(&mut self, action: i32, button: Option<i32>, mods: u16, any_pressed: bool, size: &g::MouseEncoderSize, pos: g::MousePosition) -> Vec<u8> {
+        unsafe {
+            g::ghostty_mouse_encoder_set_from_terminal(self.mouse, self.t);
+            g::ghostty_mouse_encoder_set(self.mouse, g::MOUSE_ENC_SIZE, opt(size));
+            g::ghostty_mouse_encoder_set(self.mouse, g::MOUSE_ENC_ANY_PRESSED, opt(&any_pressed));
+            g::ghostty_mouse_event_set_action(self.mouse_ev, action);
+            match button {
+                Some(b) => g::ghostty_mouse_event_set_button(self.mouse_ev, b),
+                None => g::ghostty_mouse_event_clear_button(self.mouse_ev),
+            };
+            g::ghostty_mouse_event_set_mods(self.mouse_ev, mods);
+            g::ghostty_mouse_event_set_position(self.mouse_ev, pos);
+            let mut buf = [0u8; 128];
+            let mut n = 0;
+            let r = g::ghostty_mouse_encoder_encode(self.mouse, self.mouse_ev, buf.as_mut_ptr(), buf.len(), &mut n);
+            if r == g::SUCCESS { buf[..n].to_vec() } else { vec![] }
+        }
+    }
+
+    fn paste(&self, text: String) -> Vec<u8> {
+        let bracketed = self.mode(g::MODE_BRACKETED_PASTE);
+        let mut data = text.into_bytes();
+        let mut buf = vec![0u8; data.len() * 2 + 16];
+        let mut n = 0;
+        let r = unsafe { g::ghostty_paste_encode(data.as_mut_ptr(), data.len(), bracketed, buf.as_mut_ptr(), buf.len(), &mut n) };
+        if r == g::SUCCESS { buf.truncate(n); buf } else { vec![] }
+    }
+}
+
+extern "C" fn on_write_pty(_: g::Terminal, ud: *mut c_void, data: *const u8, len: usize) {
+    let ctx = unsafe { &*(ud as *const Ctx) };
+    let _ = ctx.pty.send(unsafe { std::slice::from_raw_parts(data, len) }.to_vec());
+}
+
+extern "C" fn on_title(t: g::Terminal, ud: *mut c_void) {
+    let ctx = unsafe { &*(ud as *const Ctx) };
+    let mut s = g::Str { ptr: null(), len: 0 };
+    if unsafe { g::ghostty_terminal_get(t, g::DATA_TITLE, &mut s as *mut g::Str as *mut c_void) } == g::SUCCESS {
+        let title = if s.len == 0 { String::new() } else { String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned() };
+        let _ = ctx.events.try_send(Event::Title(title));
+    }
+}
+
+/// OSC 52 and friends: put the program's text on the clipboard.
+extern "C" fn on_clipboard_write(_: g::Terminal, ud: *mut c_void, w: *const g::ClipboardWrite) {
+    let ctx = unsafe { &*(ud as *const Ctx) };
+    let w = unsafe { &*w };
+    let contents = if w.contents_len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(w.contents, w.contents_len) } };
+    let bytes = |s: g::Str| if s.len == 0 { &[][..] } else { unsafe { std::slice::from_raw_parts(s.ptr, s.len) } };
+    if let Some(c) = contents.iter().find(|c| bytes(c.mime).starts_with(b"text/plain")).or(contents.first()) {
+        let _ = ctx.events.try_send(Event::Clipboard(String::from_utf8_lossy(bytes(c.data)).into_owned()));
+    }
+    (w.reply)(w, &g::ClipboardWriteReply { size: size_of::<g::ClipboardWriteReply>(), result: 0, remember: false });
 }
 
 /// Where the grid was last drawn: its top-left and one cell's size.
@@ -66,17 +272,15 @@ pub struct TerminalView {
     pub id: String,
     label: Option<String>,
     shell_title: Option<String>,
-    term: Arc<FairMutex<Term<Listener>>>,
-    notifier: Notifier,
+    vt: Arc<Mutex<Vt>>,
+    pty: Arc<Pty>,
     exited: Option<Option<i32>>,
     focus: FocusHandle,
     geometry: Rc<Cell<Option<Geometry>>>,
-    window_size: Rc<Cell<WindowSize>>,
-    selecting: bool,
-    /// The button held down while reporting the mouse to the program, and the
-    /// last cell reported (motion is sent once per cell).
-    mouse_button: Option<u8>,
-    mouse_cell: Option<(usize, usize)>,
+    /// Where a drag selection started, in screen coordinates.
+    anchor: Option<(u16, u32)>,
+    /// The button held down while reporting the mouse to the program.
+    mouse_button: Option<i32>,
     /// Text being composed by the input method (dead keys, CJK…), drawn at the cursor.
     marked: Option<String>,
     /// Where the cursor was last drawn, for the input method's candidate window.
@@ -93,20 +297,39 @@ impl Focusable for TerminalView {
     }
 }
 
-impl Drop for TerminalView {
+/// The PTY's master side and the shell on it.
+struct Pty {
+    master: File,
+    pid: i32,
+    tx: mpsc::Sender<Vec<u8>>,
+}
+
+impl Pty {
+    fn write(&self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            let _ = self.tx.send(bytes);
+        }
+    }
+
+    fn resize(&self, cols: u16, rows: u16, cell: (u16, u16)) {
+        let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: cols * cell.0, ws_ypixel: rows * cell.1 };
+        unsafe { libc::ioctl(self.master.as_raw_fd(), TIOCSWINSZ, &ws) };
+    }
+}
+
+impl Drop for Pty {
     fn drop(&mut self) {
-        // The loop exits and drops the PTY, which hangs up the shell.
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        // Hang up the shell, as closing a terminal window does.
+        unsafe { libc::kill(self.pid, libc::SIGHUP) };
     }
 }
 
 /// A started shell, before it has a view.
 pub struct Session {
     label: Option<String>,
-    term: Arc<FairMutex<Term<Listener>>>,
-    notifier: Notifier,
-    rx: async_channel::Receiver<TermEvent>,
-    window_size: WindowSize,
+    vt: Arc<Mutex<Vt>>,
+    pty: Arc<Pty>,
+    rx: async_channel::Receiver<Event>,
 }
 
 /// A login shell in `cwd`; with `command` (label, command line), it runs that
@@ -115,18 +338,120 @@ pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Se
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let args = match &command {
         Some((_, c)) => vec!["-l".into(), "-c".into(), format!("{c}; exec {shell} -i")],
-        None => vec!["-l".into()],
+        None => vec!["-l".to_string()],
     };
-    let env = HashMap::from([("TERM".into(), "xterm-256color".into()), ("COLORTERM".into(), "truecolor".into())]);
-    let opts = tty::Options { shell: Some(tty::Shell::new(shell, args)), working_directory: Some(cwd.into()), drain_on_exit: true, env };
-    let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 17 };
-    let pty = tty::new(&opts, window_size, 0)?;
-    let (tx, rx) = async_channel::unbounded();
-    let term = Arc::new(FairMutex::new(Term::new(Config::default(), &GridSize { cols: 80, rows: 24 }, Listener(tx.clone()))));
-    let event_loop = EventLoop::new(term.clone(), Listener(tx), pty, true, false)?;
-    let notifier = Notifier(event_loop.channel());
-    event_loop.spawn();
-    Ok(Session { label: command.map(|c| c.0), term, notifier, rx, window_size })
+    let (cols, rows) = (80, 24);
+    let (mut master, mut slave) = (0, 0);
+    let mut ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+    if unsafe { libc::openpty(&mut master, &mut slave, null_mut(), null_mut(), &mut ws) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe {
+        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.args(&args).current_dir(cwd).env("TERM", "xterm-256color").env("COLORTERM", "truecolor");
+    cmd.stdin(slave.try_clone()?).stdout(slave.try_clone()?).stderr(slave);
+    unsafe {
+        // Its own session, with the PTY as its controlling terminal (for job control).
+        cmd.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, TIOCSCTTY, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    drop(cmd); // closes our copies of the slave side
+
+    let (events, rx) = async_channel::unbounded();
+    let (pty_tx, pty_rx) = mpsc::channel::<Vec<u8>>();
+    let vt = Arc::new(Mutex::new(Vt::new(cols, rows, Ctx { events: events.clone(), pty: pty_tx.clone() })?));
+    // ponytail: one reader, one writer and one waiter thread per terminal; an
+    // event loop on kqueue if anyone opens hundreds.
+    let mut writer = master.try_clone()?;
+    std::thread::spawn(move || {
+        for bytes in pty_rx {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+        }
+    });
+    let mut reader = master.try_clone()?;
+    let (vt2, ev2) = (vt.clone(), events.clone());
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    vt2.lock().unwrap().write(&buf[..n]);
+                    let _ = ev2.try_send(Event::Wakeup);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break, // EIO: the shell and everything on the PTY exited
+            }
+        }
+    });
+    let pid = child.id() as i32;
+    std::thread::spawn(move || {
+        let code = child.wait().ok().and_then(|s| s.code());
+        let _ = events.try_send(Event::Exit(code));
+    });
+    Ok(Session { label: command.map(|c| c.0), vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx })
+}
+
+/// GPUI key name → libghostty key, and the text it types (for letters and symbols).
+fn ghostty_key(key: &str) -> Option<(i32, &str)> {
+    let named = match key {
+        "enter" => 58,
+        "backspace" => 53,
+        "tab" => 64,
+        "escape" => 120,
+        "space" => return Some((63, " ")),
+        "up" => 78,
+        "down" => 75,
+        "left" => 76,
+        "right" => 77,
+        "home" => 71,
+        "end" => 69,
+        "pageup" => 74,
+        "pagedown" => 73,
+        "insert" => 72,
+        "delete" => 68,
+        f if f.len() > 1 && f.starts_with('f') => match f[1..].parse::<i32>() {
+            Ok(n @ 1..=24) => 120 + n,
+            _ => return None,
+        },
+        _ => {
+            let mut chars = key.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else { return None };
+            let k = match c.to_ascii_lowercase() {
+                c @ 'a'..='z' => 20 + (c as i32 - 'a' as i32),
+                '0' => 6,
+                c @ '1'..='9' => 7 + (c as i32 - '1' as i32),
+                '`' => 1,
+                '\\' => 2,
+                '[' => 3,
+                ']' => 4,
+                ',' => 5,
+                '=' => 16,
+                '-' => 46,
+                '.' => 47,
+                '\'' => 48,
+                ';' => 49,
+                '/' => 50,
+                _ => return None,
+            };
+            return Some((k, key));
+        }
+    };
+    Some((named, ""))
+}
+
+fn mods(m: &Modifiers) -> u16 {
+    (m.shift as u16 * g::MODS_SHIFT) | (m.control as u16 * g::MODS_CTRL) | (m.alt as u16 * g::MODS_ALT) | (m.platform as u16 * g::MODS_SUPER)
 }
 
 impl TerminalView {
@@ -144,15 +469,13 @@ impl TerminalView {
             id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             label: s.label,
             shell_title: None,
-            term: s.term,
-            notifier: s.notifier,
+            vt: s.vt,
+            pty: s.pty,
             exited: None,
             focus: cx.focus_handle(),
             geometry: Rc::new(Cell::new(None)),
-            window_size: Rc::new(Cell::new(s.window_size)),
-            selecting: false,
+            anchor: None,
             mouse_button: None,
-            mouse_cell: None,
             marked: None,
             cursor_bounds: Rc::new(Cell::new(None)),
             scroll_px: 0.,
@@ -165,177 +488,147 @@ impl TerminalView {
         self.label.clone().or_else(|| self.shell_title.clone().filter(|t| !t.trim().is_empty())).unwrap_or_else(|| "Terminal".into())
     }
 
-    fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        self.notifier.notify(bytes);
-    }
-
-    fn on_event(&mut self, ev: TermEvent, cx: &mut Context<Self>) {
+    fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
         match ev {
-            TermEvent::Wakeup => {}
-            TermEvent::Title(t) => {
+            Event::Wakeup => {}
+            Event::Title(t) => {
                 self.shell_title = Some(t);
                 cx.emit(TermChanged);
             }
-            TermEvent::ResetTitle => {
-                self.shell_title = None;
+            Event::Clipboard(s) => cx.write_to_clipboard(ClipboardItem::new_string(s)),
+            Event::Exit(code) => {
+                self.exited = Some(code);
                 cx.emit(TermChanged);
             }
-            TermEvent::PtyWrite(s) => self.write(s.into_bytes()),
-            TermEvent::ClipboardStore(_, s) => cx.write_to_clipboard(ClipboardItem::new_string(s)),
-            TermEvent::ClipboardLoad(_, f) => {
-                let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
-                self.write(f(&text).into_bytes());
-            }
-            TermEvent::ColorRequest(i, f) => {
-                let dark = cx.theme().mode.is_dark();
-                let colors = *self.term.lock().colors();
-                let rgb = colors[i].unwrap_or_else(|| default_rgb(i, dark, cx));
-                self.write(f(rgb).into_bytes());
-            }
-            TermEvent::TextAreaSizeRequest(f) => self.write(f(self.window_size.get()).into_bytes()),
-            TermEvent::ChildExit(status) => {
-                self.exited = Some(status.code());
-                cx.emit(TermChanged);
-            }
-            _ => return,
         }
         cx.notify();
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
-        let mut term = self.term.lock();
-        if ks.modifiers.platform {
+        let m = &ks.modifiers;
+        if m.platform {
             match ks.key.as_str() {
                 "c" => {
-                    if let Some(text) = term.selection_to_string().filter(|t| !t.is_empty()) {
+                    if let Some(text) = self.vt.lock().unwrap().text(true).filter(|t| !t.is_empty()) {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                         cx.stop_propagation();
                     }
                 }
                 "v" => {
                     let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
-                    let text = if term.mode().contains(TermMode::BRACKETED_PASTE) {
-                        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
-                    } else {
-                        text.replace("\r\n", "\r").replace('\n', "\r")
-                    };
-                    term.scroll_display(Scroll::Bottom);
-                    drop(term);
-                    self.write(text.into_bytes());
+                    let bytes = self.vt.lock().unwrap().paste(text);
+                    self.type_bytes(bytes, cx);
                     cx.stop_propagation();
                 }
                 _ => {}
             }
             return;
         }
-        let Some(bytes) = key_bytes(ks, *term.mode()) else { return };
-        drop(term);
-        self.type_bytes(bytes, cx);
-        cx.stop_propagation();
+        let Some((key, text)) = ghostty_key(&ks.key) else { return };
+        // Typed text arrives through the input method (EntityInputHandler), which
+        // also composes dead keys and CJK; ⌥ letters type their symbols.
+        if !text.is_empty() && !m.control {
+            return;
+        }
+        let bytes = self.vt.lock().unwrap().encode_key(key, mods(m), text);
+        if !bytes.is_empty() {
+            self.type_bytes(bytes, cx);
+            cx.stop_propagation();
+        }
     }
 
     /// Send typed input: back to the bottom, selection cleared.
     fn type_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        let mut term = self.term.lock();
-        term.selection = None;
-        term.scroll_display(Scroll::Bottom);
-        drop(term);
-        self.write(bytes);
+        let mut vt = self.vt.lock().unwrap();
+        vt.set_selection(None);
+        vt.scroll(g::SCROLL_BOTTOM, 0);
+        drop(vt);
+        self.pty.write(bytes);
         cx.notify();
     }
 
-    /// The grid cell under a window position: its viewport (col, row), its grid
-    /// point, and which half of it.
-    fn cell_at(&self, pos: Point<Pixels>) -> Option<(usize, usize, GridPoint, Side)> {
+    /// The viewport cell under a window position.
+    fn cell_at(&self, pos: Point<Pixels>) -> Option<(u16, u16)> {
         let g = self.geometry.get()?;
-        let term = self.term.lock();
+        let (cols, rows) = self.vt.lock().unwrap().size;
         let x = f32::from(pos.x - g.origin.x) / f32::from(g.cell.width);
         let y = f32::from(pos.y - g.origin.y) / f32::from(g.cell.height);
-        let col = (x.max(0.) as usize).min(term.columns() - 1);
-        let row = (y.max(0.) as usize).min(term.screen_lines() - 1);
-        let side = if x.fract() > 0.5 { Side::Right } else { Side::Left };
-        let line = Line(row as i32 - term.grid().display_offset() as i32);
-        Some((col, row, GridPoint::new(line, Column(col)), side))
+        Some(((x.max(0.) as u16).min(cols - 1), (y.max(0.) as u16).min(rows - 1)))
     }
 
     /// The program asked for mouse events (and ⇧ isn't held to select instead).
-    fn mouse_mode(&self, m: &Modifiers) -> Option<TermMode> {
-        let mode = *self.term.lock().mode();
-        (mode.intersects(TermMode::MOUSE_MODE) && !m.shift).then_some(mode)
+    fn mouse_mode(&self, m: &Modifiers) -> bool {
+        !m.shift && self.vt.lock().unwrap().mouse_tracking()
     }
 
-    /// Report a mouse event to the program: `button` is xterm's code (0 left,
-    /// 1 middle, 2 right, 64/65 wheel; +32 for motion).
-    fn report_mouse(&mut self, mode: TermMode, button: u8, pressed: bool, pos: Point<Pixels>, m: &Modifiers) {
-        let Some((col, row, ..)) = self.cell_at(pos) else { return };
-        let code = button + 4 * m.shift as u8 + 8 * m.alt as u8 + 16 * m.control as u8;
-        self.write(mouse_report(mode, code, pressed, col, row));
+    /// Report a mouse event to the program (libghostty picks the format and
+    /// drops what the program didn't ask for).
+    fn mouse(&mut self, action: i32, button: Option<i32>, any_pressed: bool, pos: Point<Pixels>, m: &Modifiers) {
+        let Some(g) = self.geometry.get() else { return };
+        // The encoder works in whole pixels per cell; map onto a grid of rounded cells.
+        let cw = f32::from(g.cell.width);
+        let (cw_i, ch_i) = (cw.round().max(1.) as u32, f32::from(g.cell.height).round().max(1.) as u32);
+        let (cols, rows) = self.vt.lock().unwrap().size;
+        let size = g::MouseEncoderSize { size: size_of::<g::MouseEncoderSize>(), screen_width: 2 * PAD as u32 + cols as u32 * cw_i, screen_height: 2 * PAD as u32 + rows as u32 * ch_i, cell_width: cw_i, cell_height: ch_i, padding_top: PAD as u32, padding_bottom: PAD as u32, padding_right: PAD as u32, padding_left: PAD as u32 };
+        let x = PAD + f32::from(pos.x - g.origin.x) / cw * cw_i as f32;
+        let y = PAD + f32::from(pos.y - g.origin.y);
+        let bytes = self.vt.lock().unwrap().encode_mouse(action, button, mods(m), any_pressed, &size, g::MousePosition { x, y });
+        self.pty.write(bytes);
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let button = match ev.button {
-            MouseButton::Left => 0,
-            MouseButton::Middle => 1,
+            MouseButton::Left => 1,
             MouseButton::Right => 2,
+            MouseButton::Middle => 3,
             _ => return,
         };
-        if let Some(mode) = self.mouse_mode(&ev.modifiers) {
+        if self.mouse_mode(&ev.modifiers) {
             self.mouse_button = Some(button);
-            return self.report_mouse(mode, button, true, ev.position, &ev.modifiers);
+            return self.mouse(g::MOUSE_PRESS, Some(button), true, ev.position, &ev.modifiers);
         }
-        if button != 0 {
+        if button != 1 {
             return;
         }
-        let Some((.., point, side)) = self.cell_at(ev.position) else { return };
-        let ty = match ev.click_count {
-            2 => SelectionType::Semantic,
-            3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
-        };
-        self.term.lock().selection = Some(Selection::new(ty, point, side));
-        self.selecting = true;
+        let Some((col, row)) = self.cell_at(ev.position) else { return };
+        let mut vt = self.vt.lock().unwrap();
+        self.anchor = vt.screen_point(col, row);
+        let sel = vt.grid_ref(g::POINT_VIEWPORT, col, row as u32).and_then(|r| {
+            let mut s = g::Selection { start: r, end: r, rectangle: false };
+            let found = match ev.click_count {
+                2 => unsafe { g::ghostty_terminal_select_word(vt.t, &g::SelectWordOptions { size: size_of::<g::SelectWordOptions>(), grid_ref: r, boundary_codepoints: null(), boundary_codepoints_len: 0 }, &mut s) },
+                3 => unsafe { g::ghostty_terminal_select_line(vt.t, &g::SelectLineOptions { size: size_of::<g::SelectLineOptions>(), grid_ref: r, whitespace: null(), whitespace_len: 0, semantic_prompt_boundary: false }, &mut s) },
+                _ => return None,
+            };
+            (found == g::SUCCESS).then_some(s)
+        });
+        vt.set_selection(sel.as_ref());
         cx.notify();
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let cell = self.cell_at(ev.position).map(|c| (c.0, c.1));
-        if let Some(mode) = self.mouse_mode(&ev.modifiers) {
-            // Motion is reported once per cell: while dragging (MOUSE_DRAG), or always (MOUSE_MOTION).
-            if cell == self.mouse_cell {
-                return;
-            }
-            self.mouse_cell = cell;
-            match self.mouse_button.filter(|_| ev.pressed_button.is_some()) {
-                Some(b) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => self.report_mouse(mode, b + 32, true, ev.position, &ev.modifiers),
-                None if mode.contains(TermMode::MOUSE_MOTION) => self.report_mouse(mode, 3 + 32, true, ev.position, &ev.modifiers),
-                _ => {}
-            }
-            return;
+        if self.mouse_mode(&ev.modifiers) {
+            let held = self.mouse_button.filter(|_| ev.pressed_button.is_some());
+            return self.mouse(g::MOUSE_MOTION, held, held.is_some(), ev.position, &ev.modifiers);
         }
-        if !self.selecting || ev.pressed_button != Some(MouseButton::Left) {
-            return;
-        }
-        let Some((.., point, side)) = self.cell_at(ev.position) else { return };
-        if let Some(sel) = self.term.lock().selection.as_mut() {
-            sel.update(point, side);
+        let (Some((ax, ay)), Some(MouseButton::Left)) = (self.anchor, ev.pressed_button) else { return };
+        let Some((col, row)) = self.cell_at(ev.position) else { return };
+        let mut vt = self.vt.lock().unwrap();
+        if let (Some(start), Some(end)) = (vt.grid_ref(g::POINT_SCREEN, ax, ay), vt.grid_ref(g::POINT_VIEWPORT, col, row as u32)) {
+            vt.set_selection(Some(&g::Selection { start, end, rectangle: false }));
         }
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.anchor = None;
         if let Some(b) = self.mouse_button.take()
-            && let Some(mode) = self.mouse_mode(&ev.modifiers)
+            && self.mouse_mode(&ev.modifiers)
         {
-            return self.report_mouse(mode, b, false, ev.position, &ev.modifiers);
+            self.mouse(g::MOUSE_RELEASE, Some(b), false, ev.position, &ev.modifiers);
         }
-        self.selecting = false;
-        let mut term = self.term.lock();
-        if term.selection.as_ref().is_some_and(|s| s.is_empty()) {
-            term.selection = None;
-        }
-        cx.notify();
     }
 
     fn on_scroll(&mut self, ev: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -347,26 +640,26 @@ impl TerminalView {
             return;
         }
         self.scroll_px -= lines as f32 * line_h;
-        if let Some(mode) = self.mouse_mode(&ev.modifiers) {
+        if self.mouse_mode(&ev.modifiers) {
+            let wheel = if lines > 0 { 4 } else { 5 };
             for _ in 0..lines.unsigned_abs() {
-                self.report_mouse(mode, if lines > 0 { 64 } else { 65 }, true, ev.position, &ev.modifiers);
+                self.mouse(g::MOUSE_PRESS, Some(wheel), false, ev.position, &ev.modifiers);
             }
             return;
         }
-        let mut term = self.term.lock();
-        let mode = *term.mode();
-        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+        let mut vt = self.vt.lock().unwrap();
+        if vt.alt_screen() && vt.mode(g::MODE_ALT_SCROLL) {
             // Full-screen apps (less, vim…) get arrow keys instead.
-            let key: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+            let key: &[u8] = match (lines > 0, vt.mode(g::MODE_CURSOR_KEYS)) {
                 (true, true) => b"\x1bOA",
                 (true, false) => b"\x1b[A",
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
-            drop(term);
-            self.write(key.repeat(lines.unsigned_abs() as usize));
+            drop(vt);
+            self.pty.write(key.repeat(lines.unsigned_abs() as usize));
         } else {
-            term.scroll_display(Scroll::Delta(lines));
+            vt.scroll(g::SCROLL_DELTA, -lines as isize);
         }
         cx.notify();
     }
@@ -411,75 +704,6 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
-/// xterm mouse report bytes for `code` at viewport cell (col, row): SGR when the
-/// program enabled it, else the legacy X10 form (release = code 3; cells past 222 can't be sent).
-fn mouse_report(mode: TermMode, code: u8, pressed: bool, col: usize, row: usize) -> Vec<u8> {
-    if mode.contains(TermMode::SGR_MOUSE) {
-        return format!("\x1b[<{code};{};{}{}", col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes();
-    }
-    let code = if pressed { code } else { 3 + (code & !3) };
-    if col > 222 || row > 222 {
-        return vec![];
-    }
-    vec![0x1b, b'[', b'M', 32 + code, 33 + col as u8, 33 + row as u8]
-}
-
-/// The bytes a keystroke sends to the shell (xterm conventions), or None to let
-/// the app have it.
-fn key_bytes(ks: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
-    let m = &ks.modifiers;
-    let modp = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
-    let app_cursor = mode.contains(TermMode::APP_CURSOR);
-    let arrow = |c: char| match (modp > 1, app_cursor) {
-        (true, _) => format!("\x1b[1;{modp}{c}"),
-        (false, true) => format!("\x1bO{c}"),
-        (false, false) => format!("\x1b[{c}"),
-    };
-    let tilde = |n: u8| if modp > 1 { format!("\x1b[{n};{modp}~") } else { format!("\x1b[{n}~") };
-    let s = match ks.key.as_str() {
-        "enter" => (if m.alt { "\x1b\r" } else { "\r" }).into(),
-        "backspace" => (if m.control { "\x08" } else if m.alt { "\x1b\x7f" } else { "\x7f" }).into(),
-        "tab" => (if m.shift { "\x1b[Z" } else { "\t" }).into(),
-        "escape" => "\x1b".into(),
-        "up" => arrow('A'),
-        "down" => arrow('B'),
-        "right" => arrow('C'),
-        "left" => arrow('D'),
-        "home" => arrow('H'),
-        "end" => arrow('F'),
-        "insert" => tilde(2),
-        "delete" => tilde(3),
-        "pageup" => tilde(5),
-        "pagedown" => tilde(6),
-        "f1" => "\x1bOP".into(),
-        "f2" => "\x1bOQ".into(),
-        "f3" => "\x1bOR".into(),
-        "f4" => "\x1bOS".into(),
-        f if f.len() > 1 && f.starts_with('f') && f[1..].parse::<u8>().is_ok_and(|n| (5..=12).contains(&n)) => {
-            tilde([15, 17, 18, 19, 20, 21, 23, 24][f[1..].parse::<usize>().unwrap() - 5])
-        }
-        k if m.control && k.chars().count() == 1 => {
-            let c = k.chars().next()?.to_ascii_lowercase();
-            let b = match c {
-                'a'..='z' => c as u8 - b'a' + 1,
-                '@' | '2' | ' ' => 0,
-                '[' | '3' => 27,
-                '\\' | '4' => 28,
-                ']' | '5' => 29,
-                '^' | '6' => 30,
-                '_' | '-' | '7' => 31,
-                _ => return None,
-            };
-            return Some(if m.alt { vec![0x1b, b] } else { vec![b] });
-        }
-        "space" if m.control => "\0".into(),
-        // Typed text arrives through the input method (EntityInputHandler), which
-        // also composes dead keys and CJK.
-        _ => return None,
-    };
-    Some(s.into_bytes())
-}
-
 // --- Colors -------------------------------------------------------------------
 
 /// The 16 ANSI colors, tuned to the app's dark and light grounds.
@@ -492,54 +716,38 @@ const ANSI_LIGHT: [u32; 16] = [
     0x5c636e, 0xe0453c, 0x2bb36d, 0xb9852a, 0x4a86e8, 0xb35bcc, 0x1fa0b8, 0xe6e8ec,
 ];
 
-fn hex(v: u32) -> Rgb {
-    Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 }
+fn hex(v: u32) -> g::Rgb {
+    g::Rgb { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 }
 }
 
-fn hsla(c: Rgb) -> Hsla {
+fn hsla(c: g::Rgb) -> Hsla {
     rgb(((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32).into()
 }
 
-fn to_rgb(c: Hsla) -> Rgb {
+fn to_rgb(c: Hsla) -> g::Rgb {
     let c = c.to_rgb();
-    Rgb { r: (c.r * 255.) as u8, g: (c.g * 255.) as u8, b: (c.b * 255.) as u8 }
+    g::Rgb { r: (c.r * 255.) as u8, g: (c.g * 255.) as u8, b: (c.b * 255.) as u8 }
 }
 
-/// Color `i` (0–255 palette, then the named ones) before any program overrides it.
-fn default_rgb(i: usize, dark: bool, cx: &App) -> Rgb {
-    let theme = cx.theme().colors;
+/// Palette color `i`: our ANSI 16, then xterm's color cube and grays.
+fn palette_rgb(i: usize, dark: bool) -> g::Rgb {
     let level = |x: usize| if x == 0 { 0 } else { (55 + x * 40) as u8 };
     match i {
         0..16 => hex(if dark { ANSI_DARK } else { ANSI_LIGHT }[i]),
         16..232 => {
             let i = i - 16;
-            Rgb { r: level(i / 36), g: level(i / 6 % 6), b: level(i % 6) }
+            g::Rgb { r: level(i / 36), g: level(i / 6 % 6), b: level(i % 6) }
         }
-        232..256 => {
+        _ => {
             let v = (8 + (i - 232) * 10) as u8;
-            Rgb { r: v, g: v, b: v }
+            g::Rgb { r: v, g: v, b: v }
         }
-        _ if i == NamedColor::Background as usize => to_rgb(theme.background),
-        _ if i >= NamedColor::DimBlack as usize && i <= NamedColor::DimWhite as usize => {
-            let c = default_rgb(i - NamedColor::DimBlack as usize, dark, cx);
-            Rgb { r: (c.r as f32 * 0.66) as u8, g: (c.g as f32 * 0.66) as u8, b: (c.b as f32 * 0.66) as u8 }
-        }
-        _ => to_rgb(theme.foreground),
     }
-}
-
-fn resolve(c: Color, colors: &Colors, dark: bool, cx: &App) -> Hsla {
-    let i = match c {
-        Color::Spec(rgb) => return hsla(rgb),
-        Color::Indexed(i) => i as usize,
-        Color::Named(n) => n as usize,
-    };
-    hsla(colors[i].unwrap_or_else(|| default_rgb(i, dark, cx)))
 }
 
 // --- Drawing ------------------------------------------------------------------
 
-/// One row's text, its style runs, and the cell backgrounds to fill first.
+/// One row's text and its style runs.
 struct Row {
     text: String,
     runs: Vec<TextRun>,
@@ -557,17 +765,20 @@ struct Frame {
 
 /// What drawing needs from the view, cloned into the canvas.
 struct Painter {
-    term: Arc<FairMutex<Term<Listener>>>,
+    vt: Arc<Mutex<Vt>>,
+    pty: Arc<Pty>,
     geometry: Rc<Cell<Option<Geometry>>>,
-    window_size: Rc<Cell<WindowSize>>,
-    tx: alacritty_terminal::event_loop::EventLoopSender,
     cursor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     marked: Option<String>,
 }
 
+fn cell_get<T>(cells: g::RowCells, key: i32, mut out: T) -> Option<T> {
+    (unsafe { g::ghostty_render_state_row_cells_get(cells, key, &mut out as *mut T as *mut c_void) } == g::SUCCESS).then_some(out)
+}
+
 impl Painter {
-    /// Lay out the grid in `bounds`: resize the PTY to fit, then build each row's
-    /// shaped text and fills.
+    /// Lay out the grid in `bounds`: resize the terminal and PTY to fit, then build
+    /// each row's shaped text and fills.
     fn frame(&self, bounds: Bounds<Pixels>, focused: bool, window: &mut Window, cx: &mut App) -> Frame {
         let theme = cx.theme().colors;
         let dark = cx.theme().mode.is_dark();
@@ -580,91 +791,110 @@ impl Painter {
         let origin = bounds.origin + point(px(PAD), px(PAD));
         self.geometry.set(Some(Geometry { origin, cell: size(cell_w, line_h) }));
 
-        let size = GridSize {
-            cols: (f32::from(bounds.size.width - px(PAD * 2.)) / f32::from(cell_w)).floor().max(2.) as usize,
-            rows: (f32::from(bounds.size.height - px(PAD * 2.)) / f32::from(line_h)).floor().max(1.) as usize,
-        };
-        let mut term = self.term.lock();
-        if (term.columns(), term.screen_lines()) != (size.cols, size.rows) {
-            term.resize(size);
-            let ws = WindowSize { num_lines: size.rows as u16, num_cols: size.cols as u16, cell_width: f32::from(cell_w) as u16, cell_height: f32::from(line_h) as u16 };
-            self.window_size.set(ws);
-            let _ = self.tx.send(Msg::Resize(ws));
+        let cols = (f32::from(bounds.size.width - px(PAD * 2.)) / f32::from(cell_w)).floor().clamp(2., u16::MAX as f32) as u16;
+        let rows = (f32::from(bounds.size.height - px(PAD * 2.)) / f32::from(line_h)).floor().clamp(1., u16::MAX as f32) as u16;
+        let mut vt = self.vt.lock().unwrap();
+        let (fg_default, bg_default) = (to_rgb(theme.foreground), to_rgb(theme.background));
+        vt.set_colors(fg_default, bg_default, dark);
+        if vt.size != (cols, rows) {
+            let cell = (f32::from(cell_w) as u16, f32::from(line_h) as u16);
+            unsafe { g::ghostty_terminal_resize(vt.t, cols, rows, cell.0 as u32, cell.1 as u32) };
+            vt.size = (cols, rows);
+            self.pty.resize(cols, rows, cell);
         }
 
-        let content = term.renderable_content();
-        let colors = content.colors;
-        let offset = content.display_offset as i32;
-        let cursor = content.cursor;
-        let selection = content.selection;
-        let mut rows: Vec<Row> = (0..size.rows).map(|_| Row { text: String::new(), runs: vec![] }).collect();
+        let mut out_rows: Vec<Row> = Vec::with_capacity(rows as usize);
         let mut fills = vec![];
         let mut cursor_cell = None;
         let cell_bounds = |row: usize, col: usize, w: usize| Bounds::new(origin + point(cell_w * col as f32, line_h * row as f32), gpui_kit::size(cell_w * w as f32, line_h));
-        for cell in content.display_iter {
-            let row = (cell.point.line.0 + offset) as usize;
-            let col = cell.point.column.0;
-            let Some(r) = rows.get_mut(row) else { continue };
-            let flags = cell.flags;
-            let mut fg = resolve(cell.fg, colors, dark, cx);
-            let mut bg = resolve(cell.bg, colors, dark, cx);
-            let default_bg = matches!(cell.bg, Color::Named(NamedColor::Background));
-            let mut paint_bg = !default_bg;
-            if flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-                paint_bg = true;
-            }
-            if flags.contains(Flags::DIM) {
-                fg = fg.opacity(0.7);
-            }
-            if flags.contains(Flags::HIDDEN) {
-                fg = bg;
-            }
-            if selection.is_some_and(|s| s.contains(cell.point)) {
-                bg = theme.selection;
-                paint_bg = true;
-            }
-            let at_cursor = cell.point == cursor.point && cursor.shape != CursorShape::Hidden;
-            if at_cursor {
-                let wide = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
-                let block = focused && cursor.shape == CursorShape::Block;
-                cursor_cell = Some((cell_bounds(row, col, wide), theme.foreground, block, cursor.shape));
-                if block {
-                    fg = theme.background;
+        unsafe {
+            g::ghostty_render_state_update(vt.rs, vt.t);
+            let mut cur = g::Cursor { size: size_of::<g::Cursor>(), ..Default::default() };
+            g::ghostty_render_state_get(vt.rs, g::RS_CURSOR, &mut cur as *mut g::Cursor as *mut c_void);
+            let cursor_at = (cur.visible && cur.viewport_has_value).then_some((cur.viewport_x as usize, cur.viewport_y as usize));
+            let mut iter = vt.rows;
+            g::ghostty_render_state_get(vt.rs, g::RS_ROW_ITERATOR, &mut iter as *mut g::RowIterator as *mut c_void);
+            let mut row = 0;
+            while g::ghostty_render_state_row_iterator_next(iter) {
+                let mut r = Row { text: String::new(), runs: vec![] };
+                let mut sel = g::RowSelection { size: size_of::<g::RowSelection>(), ..Default::default() };
+                let selected = (g::ghostty_render_state_row_get(iter, g::ROW_SELECTION, &mut sel as *mut g::RowSelection as *mut c_void) == g::SUCCESS).then_some(sel.start_x as usize..=sel.end_x as usize);
+                let mut cells = vt.cells;
+                g::ghostty_render_state_row_get(iter, g::ROW_CELLS, &mut cells as *mut g::RowCells as *mut c_void);
+                let mut col = 0;
+                while g::ghostty_render_state_row_cells_next(cells) {
+                    let style = cell_get(cells, g::CELL_STYLE, g::Style { fg: g::StyleColor { tag: 0, value: [0; 3] }, bg: g::StyleColor { tag: 0, value: [0; 3] }, underline_color: g::StyleColor { tag: 0, value: [0; 3] }, flags: 0, reserved: 0 });
+                    let flags = style.map_or(0, |s| s.flags);
+                    let mut fg = hsla(cell_get(cells, g::CELL_FG, g::Rgb::default()).unwrap_or(fg_default));
+                    let own_bg = cell_get(cells, g::CELL_BG, g::Rgb::default());
+                    let mut paint_bg = own_bg.is_some();
+                    let mut bg = hsla(own_bg.unwrap_or(bg_default));
+                    if flags & g::STYLE_INVERSE != 0 {
+                        std::mem::swap(&mut fg, &mut bg);
+                        paint_bg = true;
+                    }
+                    if flags & g::STYLE_FAINT != 0 {
+                        fg = fg.opacity(0.7);
+                    }
+                    if flags & g::STYLE_INVISIBLE != 0 {
+                        fg = bg;
+                    }
+                    if selected.as_ref().is_some_and(|s| s.contains(&col)) {
+                        bg = theme.selection;
+                        paint_bg = true;
+                    }
+                    if cursor_at == Some((col, row)) {
+                        let wide = cell_get(cells, g::CELL_RAW, 0u64).and_then(|raw| {
+                            let mut w = 0i32;
+                            (g::ghostty_cell_get(raw, g::CELL_DATA_WIDE, &mut w as *mut i32 as *mut c_void) == g::SUCCESS).then_some(w)
+                        }) == Some(g::CELL_WIDE);
+                        let block = focused && cur.visual_style == g::CURSOR_BLOCK;
+                        cursor_cell = Some((cell_bounds(row, col, if wide { 2 } else { 1 }), block, cur.visual_style));
+                        if block {
+                            fg = theme.background;
+                        }
+                    }
+                    if paint_bg {
+                        fills.push((cell_bounds(row, col, 1), bg));
+                    }
+                    let mut utf8 = [0u8; 64];
+                    let mut buf = g::Buffer { ptr: utf8.as_mut_ptr(), cap: utf8.len(), len: 0 };
+                    let text = match g::ghostty_render_state_row_cells_get(cells, g::CELL_UTF8, &mut buf as *mut g::Buffer as *mut c_void) {
+                        g::SUCCESS if buf.len > 0 => std::str::from_utf8(&utf8[..buf.len]).unwrap_or(" "),
+                        _ => " ",
+                    };
+                    let mut f = font.clone();
+                    if flags & g::STYLE_BOLD != 0 {
+                        f.weight = FontWeight::BOLD;
+                    }
+                    if flags & g::STYLE_ITALIC != 0 {
+                        f.style = FontStyle::Italic;
+                    }
+                    let ul = (flags >> g::UNDERLINE_SHIFT) & 7;
+                    let underline = (ul != 0).then(|| UnderlineStyle { thickness: px(1.), color: Some(fg), wavy: ul == 3 });
+                    let strikethrough = (flags & g::STYLE_STRIKETHROUGH != 0).then(|| StrikethroughStyle { thickness: px(1.), color: Some(fg) });
+                    r.text.push_str(text);
+                    match r.runs.last_mut() {
+                        Some(last) if last.font == f && last.color == fg && last.underline == underline && last.strikethrough == strikethrough => last.len += text.len(),
+                        _ => r.runs.push(TextRun { len: text.len(), font: f, color: fg, background_color: None, underline, strikethrough }),
+                    }
+                    col += 1;
                 }
-            }
-            if paint_bg {
-                fills.push((cell_bounds(row, col, 1), bg));
-            }
-            let ch = if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { ' ' } else { cell.c };
-            let mut f = font.clone();
-            if flags.contains(Flags::BOLD) {
-                f.weight = FontWeight::BOLD;
-            }
-            if flags.contains(Flags::ITALIC) {
-                f.style = FontStyle::Italic;
-            }
-            let underline = flags.intersects(Flags::ALL_UNDERLINES).then(|| UnderlineStyle { thickness: px(1.), color: Some(fg), wavy: flags.contains(Flags::UNDERCURL) });
-            let strikethrough = flags.contains(Flags::STRIKEOUT).then(|| StrikethroughStyle { thickness: px(1.), color: Some(fg) });
-            let len = ch.len_utf8();
-            r.text.push(ch);
-            match r.runs.last_mut() {
-                Some(last) if last.font == f && last.color == fg && last.underline == underline && last.strikethrough == strikethrough => last.len += len,
-                _ => r.runs.push(TextRun { len, font: f, color: fg, background_color: None, underline, strikethrough }),
+                out_rows.push(r);
+                row += 1;
             }
         }
-        drop(term);
+        drop(vt);
 
-        let cursor = cursor_cell.map(|(b, color, block, shape)| {
+        let cursor = cursor_cell.map(|(b, block, shape)| {
             let b = match shape {
                 _ if !focused || block => b,
-                CursorShape::Beam => Bounds::new(b.origin, gpui_kit::size(px(2.), b.size.height)),
-                CursorShape::Underline => Bounds::new(b.origin + point(px(0.), b.size.height - px(2.)), gpui_kit::size(b.size.width, px(2.))),
+                g::CURSOR_BAR => Bounds::new(b.origin, gpui_kit::size(px(2.), b.size.height)),
+                g::CURSOR_UNDERLINE => Bounds::new(b.origin + point(px(0.), b.size.height - px(2.)), gpui_kit::size(b.size.width, px(2.))),
                 _ => b,
             };
-            // Solid for a focused block/beam/underline; an outline when unfocused or hollow.
-            let solid = focused && shape != CursorShape::HollowBlock;
-            (b, color, solid)
+            // Solid for a focused block/bar/underline; an outline when unfocused or hollow.
+            (b, theme.foreground, focused && shape != g::CURSOR_HOLLOW)
         });
         self.cursor_bounds.set(cursor.map(|c| c.0));
         let marked = self.marked.as_ref().zip(cursor).map(|(m, (b, ..))| {
@@ -672,7 +902,7 @@ impl Painter {
             let line = window.text_system().shape_line(m.clone().into(), font_size, &[run], Some(cell_w));
             (line, Bounds::new(b.origin, gpui_kit::size(cell_w * m.chars().count() as f32, line_h)))
         });
-        let rows = rows
+        let rows = out_rows
             .into_iter()
             .map(|r| window.text_system().shape_line(r.text.into(), font_size, &r.runs, Some(cell_w)))
             .collect();
@@ -703,7 +933,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let focused = self.focus.is_focused(window);
-        let painter = Painter { term: self.term.clone(), geometry: self.geometry.clone(), window_size: self.window_size.clone(), tx: self.notifier.0.clone(), cursor_bounds: self.cursor_bounds.clone(), marked: self.marked.clone() };
+        let painter = Painter { vt: self.vt.clone(), pty: self.pty.clone(), geometry: self.geometry.clone(), cursor_bounds: self.cursor_bounds.clone(), marked: self.marked.clone() };
         let (view, focus) = (cx.entity(), self.focus.clone());
         div()
             .id("terminal")
@@ -746,27 +976,43 @@ impl Render for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dimensions as _, Keystroke, TermMode, key_bytes, start};
+    use super::{Ctx, Vt, ghostty_key, start};
+    use crate::ghostty as g;
 
-    fn ks(s: &'static str) -> Keystroke {
-        Keystroke::parse(s).unwrap()
+    fn vt() -> Vt {
+        Vt::new(80, 24, Ctx { events: async_channel::unbounded().0, pty: std::sync::mpsc::channel().0 }).unwrap()
+    }
+
+    fn key(vt: &mut Vt, name: &str, mods: u16) -> Vec<u8> {
+        let (k, text) = ghostty_key(name).unwrap();
+        vt.encode_key(k, mods, text)
     }
 
     #[test]
     fn keys() {
-        let none = TermMode::empty();
-        assert_eq!(key_bytes(&ks("enter"), none), Some(b"\r".to_vec()));
-        assert_eq!(key_bytes(&ks("a"), none), None);
-        assert_eq!(key_bytes(&ks("ctrl-space"), none), Some(vec![0]));
-        assert_eq!(key_bytes(&ks("ctrl-c"), none), Some(vec![3]));
-        assert_eq!(key_bytes(&ks("up"), none), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_bytes(&ks("up"), TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
-        assert_eq!(key_bytes(&ks("shift-right"), none), Some(b"\x1b[1;2C".to_vec()));
-        assert_eq!(key_bytes(&ks("f5"), none), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(key_bytes(&ks("shift-tab"), none), Some(b"\x1b[Z".to_vec()));
-        assert_eq!(super::mouse_report(TermMode::SGR_MOUSE, 0, true, 4, 2), b"\x1b[<0;5;3M");
-        assert_eq!(super::mouse_report(TermMode::SGR_MOUSE, 0, false, 4, 2), b"\x1b[<0;5;3m");
-        assert_eq!(super::mouse_report(TermMode::empty(), 0, false, 0, 0), [0x1b, b'[', b'M', 35, 33, 33]);
+        let mut vt = vt();
+        assert_eq!(key(&mut vt, "enter", 0), b"\r");
+        assert_eq!(key(&mut vt, "c", g::MODS_CTRL), [3]);
+        assert_eq!(key(&mut vt, "space", g::MODS_CTRL), [0]);
+        assert_eq!(key(&mut vt, "up", 0), b"\x1b[A");
+        assert_eq!(key(&mut vt, "right", g::MODS_SHIFT), b"\x1b[1;2C");
+        assert_eq!(key(&mut vt, "f5", 0), b"\x1b[15~");
+        assert_eq!(key(&mut vt, "tab", g::MODS_SHIFT), b"\x1b[Z");
+        assert_eq!(key(&mut vt, "backspace", g::MODS_ALT), b"\x1b\x7f");
+        vt.write(b"\x1b[?1h"); // application cursor keys
+        assert_eq!(key(&mut vt, "up", 0), b"\x1bOA");
+        assert!(ghostty_key("a").is_some_and(|(_, t)| t == "a"));
+    }
+
+    #[test]
+    fn screen_and_selection() {
+        let mut vt = vt();
+        vt.write(b"hello \x1b[1;32mworld\x1b[0m\r\nsecond");
+        assert_eq!(vt.text(false).unwrap().trim(), "hello world\nsecond");
+        let (a, b) = (vt.grid_ref(g::POINT_VIEWPORT, 6, 0).unwrap(), vt.grid_ref(g::POINT_VIEWPORT, 10, 0).unwrap());
+        vt.set_selection(Some(&g::Selection { start: a, end: b, rectangle: false }));
+        assert_eq!(vt.text(true).unwrap(), "world");
+        assert_eq!(vt.screen_point(1, 1), Some((1, 1)));
     }
 
     /// A real shell on a PTY: the command's output lands in the grid.
@@ -776,11 +1022,7 @@ mod tests {
         let s = start(&dir.to_string_lossy(), Some(("t".into(), "printf FR-%s OK".into()))).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let text: String = {
-                let term = s.term.lock();
-                let grid = term.grid();
-                (0..term.screen_lines()).flat_map(|l| (0..term.columns()).map(move |c| (l, c))).map(|(l, c)| grid[super::Line(l as i32)][super::Column(c)].c).collect()
-            };
+            let text = s.vt.lock().unwrap().text(false).unwrap_or_default();
             if text.contains("FR-OK") {
                 break;
             }

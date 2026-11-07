@@ -7,6 +7,7 @@ mod chat;
 mod codehost;
 mod data;
 mod files;
+mod ghostty;
 mod git;
 mod log;
 mod notify;

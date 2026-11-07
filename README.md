@@ -12,6 +12,9 @@ cargo run            # first build takes a few minutes
 ```
 
 Needs a recent stable Rust (`rust-toolchain.toml` pins `stable`; GPUI needs ≥ 1.93).
+The first build also fetches libghostty-vt 1.0 (the terminal emulator, a prebuilt static
+library from Ghostty's releases, checksum-verified) into `vendor/` via
+`scripts/fetch-libghostty.sh`.
 
 ### Release app
 
@@ -80,8 +83,9 @@ run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
   (ahead/behind, + Worktree, delete, clean up merged), Settings tab (run commands, code
   host, review prompt), ✦ Review a branch.
 - **Terminal tabs** (titlebar terminal icon, ⌃`) — your login shell in the worktree
-  (alacritty_terminal): 256/true color, selection + ⌘C (⇧-drag in mouse apps), ⌘V
-  (bracketed paste), scrollback, input methods / dead keys, mouse reporting for TUIs.
+  ([libghostty-vt](https://lib.ghostty.org)): 256/true color, selection (double-click
+  word, triple-click line) + ⌘C (⇧-drag in mouse apps), ⌘V (bracketed paste), 10k lines of
+  scrollback, input methods / dead keys, Kitty keyboard protocol, mouse reporting for TUIs.
   Run commands open in one unless set to "External terminal"; tabs reopen as fresh shells.
 - **Settings** (sidebar footer) — theme, editor, external terminal, default agent and
   mode, GitHub / GitLab via the `gh` / `glab` CLIs.

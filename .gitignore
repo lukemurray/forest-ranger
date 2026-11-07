@@ -2,3 +2,4 @@
 /target
 /agents/node_modules
 /dist
+/vendor
