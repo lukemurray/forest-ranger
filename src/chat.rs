@@ -772,6 +772,7 @@ impl ChatView {
     }
 
     fn send(&mut self, out: Outgoing, cx: &mut Context<Self>) {
+        self.fresh_banner = false; // sending is "Continue here"
         self.apply(user_event(&out, false), cx);
         self.ensure_agent(cx);
         if let Some(agent) = &self.agent {

@@ -91,8 +91,9 @@ pub(super) fn build_items(rows: &[Row]) -> Vec<Item> {
 }
 
 /// The question pinned while item `k` is at the top: the last of its turn's
-/// leading questions, if that one has scrolled off.
-pub(super) fn header_at(items: &[Item], k: usize, offset: Pixels) -> Option<usize> {
+/// leading questions, once it has scrolled fully off (pinning it while part is
+/// still showing would show it twice).
+pub(super) fn header_at(items: &[Item], k: usize) -> Option<usize> {
     let k = k.min(items.len().checked_sub(1)?);
     let start = (0..=k).rev().find(|&j| items[j].turn_start)?;
     if !items[start].user {
@@ -102,7 +103,7 @@ pub(super) fn header_at(items: &[Item], k: usize, offset: Pixels) -> Option<usiz
     while h + 1 < items.len() && items[h + 1].user {
         h += 1;
     }
-    (h < k || (h == k && offset > px(0.))).then_some(h)
+    (h < k).then_some(h)
 }
 
 /// Only blank lines and `---` / `***` / `___` rules.
@@ -650,7 +651,7 @@ impl ChatView {
         if top.item_ix >= self.items.len() {
             return None;
         }
-        let h = header_at(&self.items, top.item_ix, top.offset_in_item)?;
+        let h = header_at(&self.items, top.item_ix)?;
         let Node::Row(r) = self.items[h].node else { return None };
         let Some(Row::User { text, attachments, .. }) = self.rows.rows.get(r) else { return None };
         let theme = cx.theme().colors;
@@ -779,7 +780,6 @@ mod tests {
     }
 
     use super::{FOREST_WORDS, Node, Row, build_items, describe_input, find_urls, header_at, is_blank, next_forest_word, strip_rules, tool_preview};
-    use gpui_kit::px;
 
     fn user(t: &str, ts: i64) -> Row {
         Row::User { text: t.into(), steered: false, attachments: vec![], ts: Some(ts) }
@@ -801,9 +801,9 @@ mod tests {
         assert_eq!(nodes, [Node::Row(0), Node::Strip(vec![1, 2, 4]), Node::Row(5), Node::Row(6), Node::Row(7), Node::Row(8)]);
         assert_eq!(items.iter().map(|i| i.turn_start).collect::<Vec<_>>(), [true, false, false, true, false, false]);
         assert_eq!(items[3].divider, Some(h));
-        assert_eq!(header_at(&items, 5, px(0.)), Some(4));
-        assert_eq!(header_at(&items, 4, px(0.)), None);
-        assert_eq!(header_at(&items, 0, px(3.)), Some(0));
+        assert_eq!(header_at(&items, 5), Some(4));
+        assert_eq!(header_at(&items, 4), None);
+        assert_eq!(header_at(&items, 0), None);
     }
 
     #[test]
