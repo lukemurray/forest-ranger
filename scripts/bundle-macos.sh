@@ -5,6 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# --install bumps the patch version first (0.9.1 → 0.9.2); the build updates Cargo.lock.
+if [ "${1:-}" = "--install" ]; then
+  perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.$2.".($3+1)."\""/me' Cargo.toml
+fi
+
 NAME="Forest Ranger"
 ID="dev.forestranger.app" # same bundle id as the old Electron app, so OS permissions carry over
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)

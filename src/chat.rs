@@ -333,6 +333,9 @@ pub struct ChatView {
     last_activity: Instant,
     find: Option<find::Find>,
     fresh_banner: bool,
+    /// Drawn heights, for pinning: each question's list item, and the pinned copy.
+    question_h: std::rc::Rc<std::cell::RefCell<HashMap<usize, Pixels>>>,
+    pinned_h: std::rc::Rc<std::cell::Cell<Pixels>>,
     forms: HashMap<String, elicitation::Form>,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
@@ -447,6 +450,8 @@ impl ChatView {
             last_activity: Instant::now(),
             find: None,
             fresh_banner,
+            question_h: Default::default(),
+            pinned_h: std::rc::Rc::new(std::cell::Cell::new(px(56.))),
             forms: HashMap::new(),
             _tasks: vec![idle],
             _subs: vec![sub, scrolled],

@@ -91,9 +91,9 @@ pub(super) fn build_items(rows: &[Row]) -> Vec<Item> {
 }
 
 /// The question pinned while item `k` is at the top: the last of its turn's
-/// leading questions, once it has scrolled fully off (pinning it while part is
-/// still showing would show it twice).
-pub(super) fn header_at(items: &[Item], k: usize) -> Option<usize> {
+/// leading questions, once it has scrolled off — `k` itself, when it is the
+/// question, only once less of it shows than the pinned copy covers.
+pub(super) fn header_at(items: &[Item], k: usize, offset: Pixels, question_h: Pixels, pinned_h: Pixels) -> Option<usize> {
     let k = k.min(items.len().checked_sub(1)?);
     let start = (0..=k).rev().find(|&j| items[j].turn_start)?;
     if !items[start].user {
@@ -103,7 +103,7 @@ pub(super) fn header_at(items: &[Item], k: usize) -> Option<usize> {
     while h + 1 < items.len() && items[h + 1].user {
         h += 1;
     }
-    (h < k).then_some(h)
+    (h < k || (h == k && offset > px(0.) && question_h - offset < pinned_h)).then_some(h)
 }
 
 /// Only blank lines and `---` / `***` / `___` rules.
@@ -340,9 +340,15 @@ impl ChatView {
             Some(current) => div().rounded_md().bg(x.amber.opacity(if current { 0.16 } else { 0.06 })).child(body).into_any_element(),
             None => body,
         };
+        let heights = self.question_h.clone();
         div()
+            .relative()
             .flex()
             .flex_col()
+            // A question records its height, for pinning (see `render_pinned`).
+            .when(item.user, |d| {
+                d.child(canvas(move |b, _, _| { heights.borrow_mut().insert(ix, b.size.height); }, |_, _, _, _| {}).absolute().size_full())
+            })
             .when_some(item.divider, |d, ts| {
                 d.child(
                     div()
@@ -651,13 +657,16 @@ impl ChatView {
         if top.item_ix >= self.items.len() {
             return None;
         }
-        let h = header_at(&self.items, top.item_ix)?;
+        let question_h = self.question_h.borrow().get(&top.item_ix).copied().unwrap_or(px(f32::MAX));
+        let h = header_at(&self.items, top.item_ix, top.offset_in_item, question_h, self.pinned_h.get())?;
         let Node::Row(r) = self.items[h].node else { return None };
         let Some(Row::User { text, attachments, .. }) = self.rows.rows.get(r) else { return None };
         let theme = cx.theme().colors;
         let v = view.clone();
+        let pinned_h = self.pinned_h.clone();
         Some(
             div()
+                .child(canvas(move |b, _, _| pinned_h.set(b.size.height), |_, _, _, _| {}).absolute().size_full())
                 .absolute()
                 .top_0()
                 .left_0()
@@ -779,6 +788,7 @@ mod tests {
         assert_eq!(plain_markdown("see https://x.dev/a_b."), "see <https://x.dev/a_b>\\.");
     }
 
+    use gpui_kit::px;
     use super::{FOREST_WORDS, Node, Row, build_items, describe_input, find_urls, header_at, is_blank, next_forest_word, strip_rules, tool_preview};
 
     fn user(t: &str, ts: i64) -> Row {
@@ -801,9 +811,11 @@ mod tests {
         assert_eq!(nodes, [Node::Row(0), Node::Strip(vec![1, 2, 4]), Node::Row(5), Node::Row(6), Node::Row(7), Node::Row(8)]);
         assert_eq!(items.iter().map(|i| i.turn_start).collect::<Vec<_>>(), [true, false, false, true, false, false]);
         assert_eq!(items[3].divider, Some(h));
-        assert_eq!(header_at(&items, 5), Some(4));
-        assert_eq!(header_at(&items, 4), None);
-        assert_eq!(header_at(&items, 0), None);
+        let (q, p) = (px(100.), px(40.));
+        assert_eq!(header_at(&items, 5, px(0.), q, p), Some(4));
+        assert_eq!(header_at(&items, 4, px(0.), q, p), None);
+        assert_eq!(header_at(&items, 0, px(30.), q, p), None); // most of it still shows
+        assert_eq!(header_at(&items, 0, px(70.), q, p), Some(0)); // the pinned copy covers the rest
     }
 
     #[test]
