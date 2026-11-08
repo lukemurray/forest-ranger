@@ -222,6 +222,8 @@ struct RemoveWorktree {
     delete_branch: bool,
     busy: bool,
     error: Option<String>,
+    /// git refused a plain remove (e.g. a locked worktree): offer force even when clean.
+    refused: bool,
 }
 
 pub fn remove_worktree(fr: Entity<ForestRanger>, project_id: String, wt_id: String, window: &mut Window, cx: &mut App) {
@@ -248,7 +250,7 @@ fn remove_worktree_now(fr: Entity<ForestRanger>, project_id: String, wt_id: Stri
             });
         })
         .detach();
-        RemoveWorktree { fr: fr.downgrade(), project_id, repo, wt_id, path, primary_id, info: None, force: false, delete_branch: false, busy: false, error: None }
+        RemoveWorktree { fr: fr.downgrade(), project_id, repo, wt_id, path, primary_id, info: None, force: false, delete_branch: false, busy: false, error: None, refused: false }
     });
     show("Remove worktree", view, None, window, cx);
 }
@@ -258,6 +260,11 @@ impl RemoveWorktree {
         self.info.as_ref().is_some_and(|i| i.uncommitted > 0)
     }
 
+    /// The force checkbox shows: there are changes to lose, or git said no.
+    fn can_force(&self) -> bool {
+        self.dirty() || self.refused
+    }
+
     fn remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(info) = &self.info else { return };
         if self.busy || (self.dirty() && !self.force) || self.path == self.repo {
@@ -265,7 +272,7 @@ impl RemoveWorktree {
         }
         self.busy = true;
         self.error = None;
-        let force = self.dirty() && self.force;
+        let force = self.can_force() && self.force;
         let branch = info.branch.clone().filter(|_| self.delete_branch);
         let (pid, repo, path) = (self.project_id.clone(), self.repo.clone(), self.path.clone());
         let work = cx.background_executor().spawn(async move {
@@ -280,6 +287,7 @@ impl RemoveWorktree {
             let _ = this.update_in(cx, |this, window, cx| match res {
                 Err(e) => {
                     this.busy = false;
+                    this.refused |= !force;
                     this.error = Some(e);
                     cx.notify();
                 }
@@ -288,14 +296,8 @@ impl RemoveWorktree {
                     let (id, primary) = (this.wt_id.clone(), this.primary_id.clone());
                     let Some(fr) = this.fr.upgrade() else { return };
                     fr.update(cx, |fr, cx| {
-                        fr.tabs.remove(&id);
-                        fr.reviews.remove(&id);
-                        fr.back.retain(|b| *b != id);
-                        fr.forward.retain(|b| *b != id);
+                        // reload drops the worktree's tabs, panel and history.
                         let was_open = fr.selected.as_deref() == Some(&id);
-                        if was_open {
-                            fr.selected = None;
-                        }
                         fr.reload(cx);
                         if let Some(p) = primary.filter(|_| was_open) {
                             fr.select(p, cx);
@@ -349,8 +351,9 @@ impl Render for RemoveWorktree {
                             (false, _) => line(false, "Not pushed to any remote".into()),
                         }),
                 )
-                .when(dirty, |d| {
-                    d.child(Checkbox::new("force").label("Force remove — discards uncommitted changes").checked(self.force).on_click(cx.listener(|this, v: &bool, _, cx| {
+                .when(self.can_force(), |d| {
+                    let label = if dirty { "Force remove — discards uncommitted changes" } else { "Force remove — overrides git's refusal (e.g. a locked worktree)" };
+                    d.child(Checkbox::new("force").label(label).checked(self.force).on_click(cx.listener(|this, v: &bool, _, cx| {
                         this.force = *v;
                         cx.notify();
                     })))
@@ -382,13 +385,16 @@ impl Render for RemoveWorktree {
 
 // --- Rename worktree (label) / rename branch ---------------------------------
 
-/// A one-field dialog; `save` returns an error to show, or None to close.
+/// A one-field dialog; `save` runs (possibly off the UI thread) and either
+/// closes it or returns an error to show.
 struct OneField {
     input: Entity<InputState>,
     label: &'static str,
     button: &'static str,
     error: Option<String>,
-    save: Box<dyn Fn(&str, &mut App) -> Option<String>>,
+    save: Box<dyn Fn(&str, &mut App) -> Task<Result<(), String>>>,
+    /// The save is running (it may shell out): ignore another submit meanwhile.
+    busy: bool,
     _sub: Subscription,
 }
 
@@ -398,7 +404,7 @@ fn one_field(
     button: &'static str,
     value: String,
     placeholder: &'static str,
-    save: impl Fn(&str, &mut App) -> Option<String> + 'static,
+    save: impl Fn(&str, &mut App) -> Task<Result<(), String>> + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -409,7 +415,7 @@ fn one_field(
                 this.submit(window, cx);
             }
         });
-        OneField { input, label, button, error: None, save: Box::new(save), _sub: sub }
+        OneField { input, label, button, error: None, save: Box::new(save), busy: false, _sub: sub }
     });
     let focus = view.read(cx).input.clone();
     show(title, view, Some(focus), window, cx);
@@ -417,12 +423,24 @@ fn one_field(
 
 impl OneField {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.input.read(cx).value().trim().to_string();
-        self.error = (self.save)(&value, cx);
-        if self.error.is_none() {
-            window.close_dialog(cx);
+        if self.busy {
+            return;
         }
-        cx.notify();
+        self.busy = true;
+        let value = self.input.read(cx).value().trim().to_string();
+        let saved = (self.save)(&value, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let res = saved.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match res {
+                    Ok(()) => window.close_dialog(cx),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -443,7 +461,7 @@ pub fn rename_worktree(fr: Entity<ForestRanger>, wt_id: String, current: String,
     let save = move |v: &str, cx: &mut App| {
         data::set_label(&wt_id, (!v.is_empty()).then_some(v));
         fr.update(cx, |fr, cx| fr.reload(cx));
-        None
+        Task::ready(Ok(()))
     };
     one_field("Rename worktree", "Display name", "Save", current, "leave blank to use the branch name", save, window, cx);
 }
@@ -453,13 +471,15 @@ pub fn rename_branch(fr: Entity<ForestRanger>, repo: String, branch: String, win
     let from = branch.clone();
     let save = move |to: &str, cx: &mut App| {
         if to.is_empty() || to == from {
-            return Some("Enter a new branch name.".into());
+            return Task::ready(Err("Enter a new branch name.".into()));
         }
-        if let Err(e) = git::rename_branch(&repo, &from, to) {
-            return Some(e);
-        }
-        fr.update(cx, |fr, cx| fr.reload(cx));
-        None
+        let (repo, from, to, fr) = (repo.clone(), from.clone(), to.to_string(), fr.clone());
+        let work = cx.background_executor().spawn(async move { git::rename_branch(&repo, &from, &to) });
+        cx.spawn(async move |cx| {
+            work.await?;
+            let _ = fr.update(cx, |fr, cx| fr.reload(cx));
+            Ok(())
+        })
     };
     one_field("Rename branch", "Branch name", "Rename", branch, "branch name", save, window, cx);
 }
@@ -478,10 +498,6 @@ pub fn remove_project(fr: Entity<ForestRanger>, project_id: String, name: String
             .on_ok(move |_, _, cx| {
                 if data::remove_project(&pid).is_ok() {
                     fr.update(cx, |fr, cx| {
-                        let inside = project_of(fr, &pid).is_some_and(|p| p.worktrees.iter().any(|w| fr.selected.as_ref() == Some(&w.id)));
-                        if inside {
-                            fr.selected = None;
-                        }
                         if fr.project_view.as_ref().is_some_and(|v| v.id == pid) {
                             fr.project_view = None;
                         }

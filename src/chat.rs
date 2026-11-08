@@ -47,8 +47,8 @@ pub enum ChatEvent {
 
 impl EventEmitter<ChatEvent> for ChatView {}
 
-/// What a chat wants from you, most urgent first (for tab / sidebar dots).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What a chat wants from you, most urgent first (for tab / sidebar dots): `min` is the most urgent.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Attention {
     NeedsAnswer,
     Working,
@@ -192,6 +192,16 @@ impl Rows {
     fn pending_ask(&self) -> bool {
         self.open_asks() != (0, 0)
     }
+
+    /// Resolution events for every open ask — for when the agent that asked is gone.
+    fn cancel_asks(&self) -> Vec<Value> {
+        let perms = self.perms.iter().filter(|&(_, &ix)| matches!(self.rows.get(ix), Some(Row::Permission { answer: None, .. })));
+        let elicits = self.elicits.iter().filter(|&(_, &ix)| matches!(self.rows.get(ix), Some(Row::Elicitation(e)) if !e.done));
+        perms
+            .map(|(id, _)| json!({ "type": "permission_resolved", "id": id, "label": "Cancelled" }))
+            .chain(elicits.map(|(id, _)| json!({ "type": "elicitation_resolved", "id": id })))
+            .collect()
+    }
 }
 
 fn diffs_of(e: &Value) -> Vec<FileDiff> {
@@ -301,6 +311,7 @@ pub struct ChatView {
     menu_open: bool,
     menu_row: Option<usize>,
     persist: Option<Task<()>>,
+    persist_due: bool,
     /// The list items the scroller shows (rows folded into strips).
     items: Vec<Item>,
     /// Disclosures flipped from their default, by row; strips by their first row.
@@ -334,6 +345,10 @@ pub struct ChatView {
     grace: Option<Task<()>>,
     /// The provider changed mid-turn: relaunch when it ends.
     relaunch: bool,
+    /// The tag of the prompt whose turn is running (see acp `Pending::Prompt`).
+    current_prompt: Option<String>,
+    /// Prompts given up on after a cancel: their late result / error is dropped.
+    stale_prompts: HashSet<String>,
     /// "Branch from here" waiting for the session to come up.
     pending_branch: Option<String>,
     last_activity: Instant,
@@ -405,6 +420,12 @@ impl ChatView {
         let commands = log.last("commands").map(commands_of).unwrap_or_default();
         find::bind(cx);
         let fresh_banner = fresh::cold(&log.events, now_ms());
+        // Cmd-Q may not drop views: write out the log on quit.
+        let quit = cx.on_app_quit(|v, _| {
+            v.log.flush(true);
+            v.log.write_meta();
+            async {}
+        });
         // Stop the agent after 30 idle minutes; the next send resumes it.
         let idle = cx.spawn(async move |this, cx| {
             loop {
@@ -433,6 +454,7 @@ impl ChatView {
             menu_open: false,
             menu_row: None,
             persist: None,
+            persist_due: false,
             items,
             open: HashSet::new(),
             open_strips: HashSet::new(),
@@ -452,6 +474,8 @@ impl ChatView {
             steers: HashMap::new(),
             grace: None,
             relaunch: false,
+            current_prompt: None,
+            stale_prompts: HashSet::new(),
             pending_branch: None,
             last_activity: Instant::now(),
             find: None,
@@ -460,7 +484,7 @@ impl ChatView {
             pinned_h: std::rc::Rc::new(std::cell::Cell::new(px(56.))),
             forms: HashMap::new(),
             _tasks: vec![idle],
-            _subs: vec![sub, scrolled],
+            _subs: vec![sub, scrolled, quit],
         }
     }
 
@@ -553,6 +577,18 @@ impl ChatView {
 
     /// Re-fold the rows and move the scroller's items to match.
     fn sync_items(&mut self, changed: Option<usize>, cx: &mut Context<Self>) {
+        // A row changed in place (streamed text, a tool finishing, an answer) keeps
+        // the same items — row kinds and times decide those — unless it was hidden
+        // (blank) until now. So per streamed token: remeasure one item, no rebuild.
+        if let Some(r) = changed {
+            if self.rows.rows.get(r).is_some_and(transcript::hidden) {
+                return;
+            }
+            if let Some(ix) = self.item_of_row(r) {
+                self.scroller.update(cx, |s, cx| s.remeasure_items(ix..ix + 1, cx));
+                return;
+            }
+        }
         let items = transcript::build_items(&self.rows.rows);
         let old = std::mem::replace(&mut self.items, items);
         let first = old.iter().zip(&self.items).position(|(a, b)| a != b).unwrap_or(old.len().min(self.items.len()));
@@ -571,6 +607,10 @@ impl ChatView {
     fn ensure_agent(&mut self, cx: &mut Context<Self>) {
         if self.agent.is_some() {
             return;
+        }
+        // Prompts still open in a reopened log belong to an agent that's gone.
+        for e in self.rows.cancel_asks() {
+            self.apply(e, cx);
         }
         let first = !self.had_agent;
         // First start this run: the user's default mode, not the chat's saved one
@@ -613,11 +653,18 @@ impl ChatView {
         }
     }
 
-    /// Stop the agent (it's killed on drop); its late events are ignored.
-    fn drop_agent(&mut self) {
+    /// Stop the agent (it's killed on drop); its late events are ignored. Its open
+    /// prompts can't be answered any more, and steers it never took go back in the queue.
+    fn drop_agent(&mut self, cx: &mut Context<Self>) {
         self.agent = None;
         self.agent_gen += 1;
         self.session_up = false;
+        for e in self.rows.cancel_asks() {
+            self.apply(e, cx);
+        }
+        for (_, out) in self.steers.drain() {
+            self.queue.insert(0, out);
+        }
     }
 
     /// An error row that isn't the end of a turn (not logged).
@@ -630,7 +677,7 @@ impl ChatView {
     fn idle_check(&mut self, cx: &mut Context<Self>) {
         const IDLE_STOP: Duration = Duration::from_secs(30 * 60);
         if self.agent.is_some() && self.status == Status::Idle && !self.rows.pending_ask() && self.last_activity.elapsed() >= IDLE_STOP {
-            self.drop_agent();
+            self.drop_agent(cx);
             cx.notify();
         }
     }
@@ -654,11 +701,22 @@ impl ChatView {
     }
 
     fn apply(&mut self, mut e: Value, cx: &mut Context<Self>) {
+        // A cancelled prompt's late answer: its turn was already ended.
+        if let Some(tag) = e["prompt"].as_str() {
+            if self.stale_prompts.remove(tag) {
+                return;
+            }
+            if self.current_prompt.as_deref() == Some(tag) {
+                self.current_prompt = None;
+            }
+        }
         if e.get("ts").is_none() {
             e["ts"] = now_ms().into();
         }
         self.last_activity = Instant::now();
         let first_message = e["type"] == "user_text" && !self.log.events.iter().any(|e| e["type"] == "user_text");
+        // Ending the turn may send the next queued message: log this event first.
+        let mut end_turn = false;
         match e["type"].as_str().unwrap_or_default() {
             "system" => {
                 self.fresh = false;
@@ -680,19 +738,15 @@ impl ChatView {
                 // A resumed agent starts on its defaults — put back this chat's picks.
                 if let (Some(prev), Some(agent)) = (self.restore_config.take(), &self.agent) {
                     for p in prev {
-                        let cur = self.config.iter().find(|o| o["id"] == p["id"]);
-                        let valid = cur.is_some_and(|c| {
-                            c["currentValue"] != p["currentValue"]
-                                && c["options"].as_array().is_some_and(|os| os.iter().any(|o| o["value"] == p["currentValue"]))
-                        });
-                        if valid {
-                            agent.set_config(p["id"].as_str().unwrap_or_default(), p["currentValue"].as_str().unwrap_or_default());
+                        let want = p["currentValue"].as_str().unwrap_or_default();
+                        if self.config.iter().any(|o| o["id"] == p["id"] && should_switch(o, want)) {
+                            agent.set_config(p["id"].as_str().unwrap_or_default(), want);
                         }
                     }
                 }
                 if let (Some(want), Some(agent)) = (self.default_mode.take(), &self.agent) {
                     let mode = self.config.iter().find(|o| is_mode(o));
-                    if let Some(m) = mode.filter(|m| m["currentValue"] != want.as_str() && m["options"].as_array().is_some_and(|os| os.iter().any(|o| o["value"] == want.as_str()))) {
+                    if let Some(m) = mode.filter(|m| should_switch(m, &want)) {
                         agent.set_config(m["id"].as_str().unwrap_or_default(), &want);
                     }
                 }
@@ -703,6 +757,10 @@ impl ChatView {
                     // Taken into the turn, or (not taken) sent by acp as the next prompt.
                     let steered = e["injected"] == true;
                     self.apply(user_event(&out, steered), cx);
+                    if !steered {
+                        // acp sent it as a prompt, tagged with the steer's id.
+                        self.current_prompt = e["id"].as_str().map(str::to_string);
+                    }
                     if !steered && self.status == Status::Idle {
                         self.status = Status::Working;
                         self.start_activity(cx);
@@ -714,11 +772,11 @@ impl ChatView {
                 if !self.focused_by_user {
                     self.unread = true;
                 }
-                self.log.flush(true);
-                self.turn_ended(cx);
+                end_turn = true;
             }
+            // A refused setting change: shown, but the turn goes on.
+            "error" if e["soft"] == true => {}
             "error" => {
-                self.log.flush(true);
                 self.status = Status::Idle;
                 // An error may be the adapter dying ("exited" follows): wait a beat
                 // so the queue drains into a new agent rather than the dead one.
@@ -732,8 +790,8 @@ impl ChatView {
                 }));
             }
             "exited" => {
-                self.drop_agent();
-                self.turn_ended(cx);
+                self.drop_agent(cx);
+                end_turn = true;
             }
             _ => {}
         }
@@ -742,20 +800,33 @@ impl ChatView {
             Change::Updated(ix) => self.sync_items(Some(ix), cx),
             Change::None => {}
         }
+        let flush_now = matches!(e["type"].as_str(), Some("result" | "error"));
         self.log.push(e);
+        if flush_now {
+            self.log.flush(true);
+        }
         self.schedule_persist(cx);
         self.sync_attention(cx);
         if first_message && self.log.custom_name.is_none() {
             cx.emit(ChatEvent::TitleChanged);
         }
+        if end_turn {
+            self.turn_ended(cx);
+        }
         cx.notify();
     }
 
-    /// Debounced append + meta write (like the Electron app's 400ms persist).
+    /// Append + meta write at most every 400ms (throttled, not debounced: a busy
+    /// stream would otherwise never be written until the turn ends).
     fn schedule_persist(&mut self, cx: &mut Context<Self>) {
+        if self.persist_due {
+            return;
+        }
+        self.persist_due = true;
         self.persist = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(400)).await;
             let _ = this.update(cx, |v, _| {
+                v.persist_due = false;
                 v.log.flush(false);
                 v.log.write_meta();
             });
@@ -791,9 +862,11 @@ impl ChatView {
         self.fresh_banner = false; // sending is "Continue here"
         self.apply(user_event(&out, false), cx);
         self.ensure_agent(cx);
-        if let Some(agent) = &self.agent {
-            agent.prompt(out.blocks());
-        }
+        // Couldn't start (the error row says why): nothing is running.
+        let Some(agent) = &self.agent else { return cx.notify() };
+        let tag = uuid::Uuid::new_v4().to_string();
+        agent.prompt(out.blocks(), &tag);
+        self.current_prompt = Some(tag);
         if self.status == Status::Idle {
             self.status = Status::Working;
             self.start_activity(cx);
@@ -832,10 +905,13 @@ impl ChatView {
             cx.background_executor().timer(Duration::from_secs(3)).await;
             let _ = this.update(cx, |v, cx| {
                 if v.status == Status::Working {
-                    v.grace = None;
-                    v.turn_ended(cx);
+                    // Give up on it: its answer, if it ever comes, is dropped (else
+                    // it would end whatever turn runs next). Log the end ourselves.
+                    if let Some(t) = v.current_prompt.take() {
+                        v.stale_prompts.insert(t);
+                    }
+                    v.apply(json!({ "type": "result", "ok": true, "durationMs": null, "stopReason": "cancelled" }), cx);
                     v.sync_attention(cx);
-                    cx.notify();
                 }
             });
         }));
@@ -944,12 +1020,13 @@ impl ChatView {
         }
         self.log.provider = provider.into();
         self.log.model = None;
-        if self.status == Status::Idle { self.relaunch_agent(cx) } else { self.relaunch = true }
+        let idle = self.status == Status::Idle || (self.status == Status::Starting && !self.turn_pending());
+        if idle { self.relaunch_agent(cx) } else { self.relaunch = true }
         cx.notify();
     }
 
     fn relaunch_agent(&mut self, cx: &mut Context<Self>) {
-        self.drop_agent();
+        self.drop_agent(cx);
         self.config.clear();
         self.restore_config = None;
         self.permission_mode = None;
@@ -1232,7 +1309,7 @@ impl ChatView {
             ModeKind::Permission => {
                 self.permission_mode = Some(value);
                 if self.status == Status::Idle && self.agent.is_some() {
-                    self.drop_agent();
+                    self.drop_agent(cx);
                 }
                 cx.notify();
             }
@@ -1303,6 +1380,11 @@ fn commands_of(e: &Value) -> Vec<(String, String)> {
 
 fn is_mode(o: &Value) -> bool {
     o["id"] == "mode" || o["category"] == "mode"
+}
+
+/// A config option isn't on `value` yet, and offers it.
+fn should_switch(opt: &Value, value: &str) -> bool {
+    opt["currentValue"] != value && opt["options"].as_array().is_some_and(|os| os.iter().any(|o| o["value"] == value))
 }
 
 impl Drop for ChatView {

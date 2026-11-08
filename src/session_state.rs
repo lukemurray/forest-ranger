@@ -57,6 +57,9 @@ pub struct SessionState {
     pub panel_width: f32,
     /// What a worktree not visited yet starts with: the last panel state used.
     pub last_panel: Panel,
+    /// Diff tabs' last-used toggles; new diff tabs open the same way.
+    pub diff_unified: bool,
+    pub diff_full: bool,
     save_pending: bool,
 }
 
@@ -117,6 +120,8 @@ impl SessionState {
             sidebar_width: clamp(v["sidebarWidth"].as_f64(), SIDEBAR_WIDTH),
             panel_width: clamp(v["panelWidth"].as_f64(), PANEL_WIDTH),
             last_panel: panel_of(&v["lastPanel"]).unwrap_or_default(),
+            diff_unified: v["diffUnified"].as_bool().unwrap_or(false),
+            diff_full: v["diffFull"].as_bool().unwrap_or(false),
             save_pending: false,
         }
     }
@@ -144,6 +149,8 @@ impl SessionState {
             "sidebarWidth": self.sidebar_width.round(),
             "panelWidth": self.panel_width.round(),
             "lastPanel": panel_json(&self.last_panel),
+            "diffUnified": self.diff_unified,
+            "diffFull": self.diff_full,
         })
     }
 
@@ -154,10 +161,8 @@ impl SessionState {
 
     /// Atomic: write a sibling temp file, then rename over the real one.
     fn save(&self) {
-        let path = file();
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, self.to_json().to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        if let Err(e) = crate::data::write_atomic(&file(), self.to_json().to_string()) {
+            eprintln!("couldn't save session state: {e}");
         }
     }
 
@@ -221,10 +226,53 @@ pub fn next_focus<'a>(open: &'a [String], mru: &[String]) -> Option<&'a String> 
     mru.iter().find_map(|m| open.iter().find(|k| *k == m)).or(open.last())
 }
 
+// --- window-state.json (the Electron app's window bounds) ---
+
+fn read_window_state() -> Option<(f32, f32, Option<(f32, f32)>)> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(data_dir().join("window-state.json")).ok()?).ok()?;
+    let (w, h) = (v["width"].as_f64()? as f32, v["height"].as_f64()? as f32);
+    let pos = v["x"].as_f64().zip(v["y"].as_f64()).map(|(x, y)| (x as f32, y as f32));
+    Some((w, h, pos))
+}
+
+/// The saved window bounds (Electron's window-state.json), if they still land
+/// on a connected display; else centred.
+pub(crate) fn initial_bounds(cx: &App) -> Bounds<Pixels> {
+    let (w, h, pos) = read_window_state().unwrap_or((1440., 900., None));
+    let sz = size(px(w.max(600.)), px(h.max(400.)));
+    if let Some((x, y)) = pos {
+        let b = Bounds::new(point(px(x), px(y)), sz);
+        if cx.displays().iter().any(|d| d.bounds().intersects(&b)) {
+            return b;
+        }
+    }
+    Bounds::centered(None, sz, cx)
+}
+
+pub(crate) fn write_window_state(b: Bounds<Pixels>) {
+    let (o, s) = (b.origin, b.size);
+    let v = serde_json::json!({
+        "width": f32::from(s.width).round() as i64,
+        "height": f32::from(s.height).round() as i64,
+        "x": f32::from(o.x).round() as i64,
+        "y": f32::from(o.y).round() as i64,
+    });
+    let _ = crate::data::write_atomic(&data_dir().join("window-state.json"), v.to_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Panel, RECENT_CAP, SessionState, Worktree, next_focus};
     use serde_json::json;
+
+    #[test]
+    fn diff_prefs_round_trip() {
+        let mut s = SessionState::from_json(&json!(null));
+        assert!(!s.diff_unified && !s.diff_full);
+        (s.diff_unified, s.diff_full) = (true, true);
+        let back = SessionState::from_json(&s.to_json());
+        assert!(back.diff_unified && back.diff_full);
+    }
 
     #[test]
     fn round_trip_and_clamp() {

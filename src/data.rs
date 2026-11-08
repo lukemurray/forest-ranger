@@ -1,7 +1,9 @@
 //! The Electron app's data: projects/worktrees from its SQLite DB (read here)
 //! and the chat list from its meta sidecars. Chat logs themselves: see log.rs.
 
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{fs, path::{Path, PathBuf}};
+
+use crate::git;
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -10,6 +12,19 @@ pub fn data_dir() -> PathBuf {
     std::env::var_os("FOREST_RANGER_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".forest-ranger"))
+}
+
+/// Write a file via a temp file + rename, so a crash mid-write never leaves it
+/// truncated. Keeps the old file's permissions.
+pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents)?;
+    if let Ok(m) = fs::metadata(path) {
+        let _ = fs::set_permissions(&tmp, m.permissions());
+    }
+    fs::rename(&tmp, path).inspect_err(|_| _ = fs::remove_file(&tmp))
 }
 
 pub struct Project {
@@ -91,14 +106,15 @@ pub fn load_projects() -> Result<Vec<Project>, String> {
     Ok(out)
 }
 
-/// A worktree's git dir: `.git` itself, or where a linked worktree's `.git` file points.
-fn gitdir(path: &str) -> Option<PathBuf> {
+/// A worktree's git dir: `.git` itself, or where a linked worktree's `.git` file
+/// points (relative to the worktree, with `worktree.useRelativePaths`).
+pub(crate) fn gitdir(path: &str) -> Option<PathBuf> {
     let dot = Path::new(path).join(".git");
     if dot.is_dir() {
         return Some(dot);
     }
     let s = fs::read_to_string(&dot).ok()?;
-    Some(PathBuf::from(s.strip_prefix("gitdir:")?.trim()))
+    Some(Path::new(path).join(s.strip_prefix("gitdir:")?.trim()))
 }
 
 /// The checked-out branch, read straight from HEAD (no git process per worktree).
@@ -109,7 +125,7 @@ fn head_branch(gitdir: &Path) -> Option<String> {
 
 /// Where a detached HEAD came from: the newest "checkout: moving from A to B" in
 /// the reflog naming a branch (prefer the target), like the Electron app.
-fn reflog_origin(gitdir: &Path) -> Option<String> {
+pub(crate) fn reflog_origin(gitdir: &Path) -> Option<String> {
     let log = fs::read_to_string(gitdir.join("logs/HEAD")).ok()?;
     let branch_of = |r: &str| {
         let r = r.trim();
@@ -125,13 +141,15 @@ fn reflog_origin(gitdir: &Path) -> Option<String> {
 
 /// Last activity (ms): HEAD commit time or the newest dirty file's mtime.
 pub fn activity(path: &str) -> i64 {
-    let git = |args: &[&str]| {
-        Command::new("git").arg("-C").arg(path).args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let mut latest = git(&["log", "-1", "--format=%ct"]).and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(0) * 1000;
-    for line in git(&["status", "--porcelain"]).unwrap_or_default().lines() {
-        let rel = line.get(3..).unwrap_or_default();
-        let rel = rel.rsplit(" -> ").next().unwrap_or(rel).trim_matches('"');
+    let mut latest = git::git_line(path, &["log", "-1", "--format=%ct"]).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0) * 1000;
+    // -z: "XY path" fields, unquoted; a rename/copy's old path follows as its own field.
+    let status = git::git(path, &["status", "--porcelain", "-z"]).stdout;
+    let mut fields = status.split('\0');
+    while let Some(f) = fields.next() {
+        let Some(rel) = f.get(3..) else { continue };
+        if f.as_bytes()[..2].iter().any(|c| matches!(c, b'R' | b'C')) {
+            fields.next();
+        }
         if let Ok(m) = fs::metadata(Path::new(path).join(rel)).and_then(|m| m.modified()) {
             let ms = m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
             latest = latest.max(ms);
@@ -277,21 +295,9 @@ pub fn worktree_id(project_id: &str, path: &str) -> String {
 /// Make the DB match `git worktree list` for a project (git is the source of
 /// truth for which worktrees exist), exactly like the Electron app's syncWorktrees.
 pub fn sync_worktrees(project_id: &str, repo: &str) -> Result<(), String> {
-    let out = Command::new("git")
-        .args(["-C", repo, "worktree", "list", "--porcelain"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let mut paths = vec![];
-    for entry in String::from_utf8_lossy(&out.stdout).split("\n\n") {
-        let path = entry.lines().find_map(|l| l.strip_prefix("worktree "));
-        if let (Some(p), false) = (path, entry.lines().any(|l| l == "bare")) {
-            paths.push(p.to_string());
-        }
-    }
-    let db = db_rw()?;
+    let paths: Vec<String> = git::try_list_worktrees(repo)?.into_iter().map(|w| w.path).collect();
+    let mut db = db_rw()?;
+    let db = db.transaction().map_err(|e| e.to_string())?;
     for p in &paths {
         db.execute(
             "INSERT INTO worktrees (id, project_id, path, last_opened_at, created_at) VALUES (?1, ?2, ?3, NULL, ?4)
@@ -305,16 +311,12 @@ pub fn sync_worktrees(project_id: &str, repo: &str) -> Result<(), String> {
         rusqlite::params![project_id, serde_json::to_string(&paths).unwrap_or_default()],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    db.commit().map_err(|e| e.to_string())
 }
 
 /// Add a git repo as a project (its top level), or return the existing one's id.
 pub fn add_project(picked: &Path) -> Result<String, String> {
-    let out = Command::new("git").arg("-C").arg(picked).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err("That folder isn't a git repository.".into());
-    }
-    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let top = git::git_line(&picked.to_string_lossy(), &["rev-parse", "--show-toplevel"]).ok_or("That folder isn't a git repository.")?;
     let db = db_rw()?;
     if let Ok(id) = db.query_row("SELECT id FROM projects WHERE path = ?1", [&top], |r| r.get::<_, String>(0)) {
         return Ok(id);
@@ -347,11 +349,12 @@ pub fn set_label(id: &str, name: Option<&str>) {
 /// Forget a project (the repo on disk is untouched). Electron's FK cascade,
 /// done by hand since this connection doesn't enable foreign keys.
 pub fn remove_project(id: &str) -> Result<(), String> {
-    let db = db_rw()?;
+    let mut db = db_rw()?;
+    let db = db.transaction().map_err(|e| e.to_string())?;
     for sql in ["DELETE FROM project_commands WHERE project_id = ?1", "DELETE FROM worktrees WHERE project_id = ?1", "DELETE FROM projects WHERE id = ?1"] {
         db.execute(sql, [id]).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    db.commit().map_err(|e| e.to_string())
 }
 
 pub fn set_worktree_dir(project_id: &str, dir: &str) {

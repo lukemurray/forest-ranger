@@ -156,11 +156,42 @@ impl ForestRanger {
         let Some((_, repo)) = self.page_repo() else { return };
         let fr = cx.entity();
         let n = names.len();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        // The list of what goes, behind a disclosure (there can be hundreds).
+        let shown = std::rc::Rc::new(std::cell::Cell::new(false));
+        window.open_alert_dialog(cx, move |alert, _, cx| {
             let (fr, names, repo) = (fr.clone(), names.clone(), repo.clone());
+            let (muted, mono, open) = (cx.theme().colors.muted_foreground, cx.theme().mono_font_family.clone(), shown.get());
+            let toggle = shown.clone();
+            let list = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(format!("Deletes local branches fully merged into {base} with no worktree. Unmerged branches are left untouched, so no work is lost."))
+                .child(
+                    div()
+                        .id("cleanup-show")
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .child(format!("{} {n} branch{}", if open { "▾ Hide" } else { "▸ Show" }, plural(n)))
+                        .on_click(move |_, window, _| {
+                            toggle.set(!toggle.get());
+                            window.refresh();
+                        }),
+                )
+                .when(open, |d| {
+                    d.child(
+                        div()
+                            .id("cleanup-list")
+                            .max_h(px(220.))
+                            .overflow_y_scroll()
+                            .font_family(mono)
+                            .text_size(px(12.))
+                            .children(names.iter().map(|b| div().child(b.clone()))),
+                    )
+                });
             alert
                 .title(format!("Clean up {n} merged branch{}?", plural(n)))
-                .description(format!("Deletes local branches fully merged into {base} with no worktree. Unmerged branches are left untouched, so no work is lost."))
+                .description(list)
                 .ok_text("Delete merged")
                 .ok_variant(ButtonVariant::Danger)
                 .show_cancel(true)

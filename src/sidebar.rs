@@ -1,7 +1,7 @@
 //! The left sidebar: brand, then a collapsible tree of projects → worktrees,
 //! styled after the Electron app's Sidebar.module.css.
 
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -13,12 +13,6 @@ use crate::settings::{self, Settings};
 use crate::theme;
 
 pub(crate) mod dialogs;
-
-/// The worktree whose label is being edited inline (double-click), if any.
-#[derive(Default)]
-struct LabelEdit(Option<(String, Entity<InputState>, Subscription)>);
-
-impl Global for LabelEdit {}
 
 /// A hover tooltip (the Electron app's `data-tip` / `title`).
 pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
@@ -265,7 +259,7 @@ impl ForestRanger {
         let active = self.selected.as_deref() == Some(&w.id);
         let (label, note) = w.label();
         let id = w.id.clone();
-        if let Some((_, input, _)) = cx.try_global::<LabelEdit>().and_then(|g| g.0.as_ref()).filter(|e| e.0 == w.id) {
+        if let Some((_, input, _)) = self.renaming.as_ref().filter(|e| e.0.strip_prefix("label:") == Some(&w.id)) {
             return div()
                 .flex()
                 .items_center()
@@ -275,7 +269,7 @@ impl ForestRanger {
                 .when(active, |d| d.bg(x.active))
                 .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
-                        cx.set_global(LabelEdit(None));
+                        this.renaming = None;
                         window.focus(&this.focus, cx);
                         cx.stop_propagation();
                         cx.notify();
@@ -389,33 +383,13 @@ impl ForestRanger {
         .detach();
     }
 
-    /// Swap a worktree row's label for an input. Enter or blur saves; Esc cancels.
+    /// Swap a worktree row's label for an input.
     fn edit_label(&mut self, id: String, initial: String, branch: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(initial).placeholder(branch.unwrap_or_else(|| "label".into())));
-        input.update(cx, |s, cx| {
-            s.focus(window, cx);
-            s.select_all(window, cx);
-        });
-        let wid = id.clone();
-        let sub = cx.subscribe_in(&input, window, move |this, _, ev: &InputEvent, window, cx| match ev {
-            InputEvent::PressEnter { .. } => {
-                this.commit_label(&wid, cx);
-                window.focus(&this.focus, cx);
-            }
-            InputEvent::Blur => this.commit_label(&wid, cx),
-            _ => {}
-        });
-        cx.set_global(LabelEdit(Some((id, input, sub))));
-        cx.notify();
+        self.start_inline_edit(format!("label:{id}"), initial, Some(branch.unwrap_or_else(|| "label".into())), window, cx);
     }
 
-    /// Save the inline label. Blank, or the branch name itself, clears it.
-    fn commit_label(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(value) = cx.try_global::<LabelEdit>().and_then(|g| g.0.as_ref()).filter(|e| e.0 == id).map(|e| e.1.read(cx).value().trim().to_string()) else {
-            return;
-        };
-        // Dropping the subscription from inside its own callback is fine: GPUI defers removal.
-        cx.set_global(LabelEdit(None));
+    /// Save an inline label edit. Blank, or the branch name itself, clears it.
+    pub(crate) fn save_label(&mut self, id: &str, value: String, cx: &mut Context<Self>) {
         if let Some(w) = self.projects.iter().flat_map(|p| &p.worktrees).find(|w| w.id == id) {
             let name = (!value.is_empty() && Some(&value) != w.branch.as_ref()).then_some(value);
             if name != w.name {

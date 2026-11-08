@@ -1,34 +1,60 @@
 //! The Electron app's git layer (src/main/git.ts), ported: shells out to `git`
 //! synchronously. Same commands, flags and parsing as the TS.
-#![allow(dead_code)]
 
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 
-struct Out {
-    ok: bool,
-    code: i32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Out {
+    pub ok: bool,
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-// ponytail: no timeouts (TS bounds push/rebase at 120s); add a wait-with-deadline if a hang shows up.
-fn git(cwd: &str, args: &[&str]) -> Out {
+/// Run a command, killing it after `limit`; both pipes are drained on threads so
+/// a big output can't block the child. Err: couldn't start, or timed out.
+pub(crate) fn output_with_deadline(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let drain = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    };
+    let out = drain(Box::new(child.stdout.take().expect("piped")));
+    let err = drain(Box::new(child.stderr.take().expect("piped")));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait()? {
+            Some(s) => break s,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out after {}s", limit.as_secs())));
+            }
+        }
+    };
+    Ok(Output { status, stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
+/// git with a GUI app's environment: Homebrew on PATH, and never a prompt (a
+/// credential or SSH question would hang with no terminal). Bounded at 120s, like
+/// the Electron app's push/rebase.
+pub(crate) fn git(cwd: &str, args: &[&str]) -> Out {
     let path = format!("{}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", std::env::var("PATH").unwrap_or_default());
     let ssh = std::env::var("GIT_SSH_COMMAND")
         .unwrap_or_else(|_| "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10".into());
-    match Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("PATH", path)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", ssh)
-        .output()
-    {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(cwd).env("PATH", path).env("GIT_TERMINAL_PROMPT", "0").env("GIT_SSH_COMMAND", ssh);
+    match output_with_deadline(&mut cmd, Duration::from_secs(120)) {
         Ok(o) => Out {
             ok: o.status.success(),
             code: o.status.code().unwrap_or(-1),
@@ -40,7 +66,7 @@ fn git(cwd: &str, args: &[&str]) -> Out {
 }
 
 /// Trimmed stdout when the command succeeded and printed something.
-fn git_line(cwd: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn git_line(cwd: &str, args: &[&str]) -> Option<String> {
     let o = git(cwd, args);
     let s = o.stdout.trim();
     (o.ok && !s.is_empty()).then(|| s.to_string())
@@ -110,25 +136,36 @@ pub struct Detail {
     pub uncommitted: Vec<ChangedFile>,
 }
 
-/// `--name-status` + `--numstat` → files. Path is the last tab field (rename target);
-/// numstat `-` (binary) → None.
+/// `--name-status -z` + `--numstat -z` → files (unquoted paths; a rename is keyed
+/// by its new path). numstat `-` (binary) → None.
 fn parse_changes(name_status: &str, numstat: &str) -> Vec<ChangedFile> {
     let num = |s: &str| if s == "-" { None } else { s.parse().ok() };
-    let stats: std::collections::HashMap<&str, (Option<u32>, Option<u32>)> = lines(numstat)
-        .filter_map(|l| {
-            let mut p = l.splitn(3, '\t');
-            let (a, d, path) = (p.next()?, p.next()?, p.next()?);
-            Some((path, (num(a), num(d))))
-        })
-        .collect();
-    lines(name_status)
-        .map(|l| {
-            let path = l.rsplit('\t').next().unwrap_or_default();
-            let (insertions, deletions) = stats.get(path).copied().unwrap_or((None, None));
-            let kind = ChangeKind::from_letter(l.chars().next().unwrap_or('M'));
-            ChangedFile { path: path.into(), kind, insertions, deletions, staged: false }
-        })
-        .collect()
+    let mut stats = std::collections::HashMap::new();
+    let mut it = numstat.split('\0');
+    while let Some(rec) = it.next() {
+        let mut p = rec.splitn(3, '\t');
+        let (Some(a), Some(d), Some(path)) = (p.next(), p.next(), p.next()) else { continue };
+        // A rename: the path field is empty, then old and new follow as fields.
+        let path = if path.is_empty() { it.nth(1).unwrap_or_default() } else { path };
+        stats.insert(path, (num(a), num(d)));
+    }
+    let mut out = vec![];
+    let mut it = name_status.split('\0');
+    while let Some(status) = it.next() {
+        let Some(letter) = status.chars().next() else { continue };
+        if matches!(letter, 'R' | 'C') {
+            it.next(); // the old path
+        }
+        let Some(path) = it.next() else { break };
+        let (insertions, deletions) = stats.get(path).copied().unwrap_or((None, None));
+        out.push(ChangedFile { path: path.into(), kind: ChangeKind::from_letter(letter), insertions, deletions, staged: false });
+    }
+    out
+}
+
+/// NUL-separated output (`-z`) → its non-empty fields.
+fn nul_fields(s: &str) -> impl Iterator<Item = &str> {
+    s.split('\0').filter(|f| !f.is_empty())
 }
 
 /// Two numbers from `rev-list --count --left-right A...B`.
@@ -180,16 +217,16 @@ pub fn detail(worktree_path: &str, repo_path: &str, base: Option<&str>) -> Detai
 
     // Uncommitted: working tree vs HEAD, staged flags, plus untracked.
     let mut uncommitted = parse_changes(
-        &git(wt, &["diff", "--name-status", "-M", "HEAD"]).stdout,
-        &git(wt, &["diff", "--numstat", "-M", "HEAD"]).stdout,
+        &git(wt, &["diff", "--name-status", "-M", "-z", "HEAD"]).stdout,
+        &git(wt, &["diff", "--numstat", "-M", "-z", "HEAD"]).stdout,
     );
-    let staged_out = git(wt, &["diff", "--cached", "--name-only", "HEAD"]).stdout;
-    let staged: HashSet<&str> = lines(&staged_out).collect();
+    let staged_out = git(wt, &["diff", "--cached", "--name-only", "-z", "HEAD"]).stdout;
+    let staged: HashSet<&str> = nul_fields(&staged_out).collect();
     for f in &mut uncommitted {
         f.staged = staged.contains(f.path.as_str());
     }
     let mut seen: HashSet<String> = uncommitted.iter().map(|f| f.path.clone()).collect();
-    for p in lines(&git(wt, &["ls-files", "--others", "--exclude-standard"]).stdout) {
+    for p in nul_fields(&git(wt, &["ls-files", "--others", "--exclude-standard", "-z"]).stdout) {
         if seen.insert(p.into()) {
             uncommitted.push(ChangedFile { path: p.into(), kind: ChangeKind::Untracked, insertions: None, deletions: None, staged: false });
         }
@@ -200,8 +237,8 @@ pub fn detail(worktree_path: &str, repo_path: &str, base: Option<&str>) -> Detai
     if let Some(b) = &base {
         if let Some(mb) = git_line(wt, &["merge-base", b, "HEAD"]) {
             committed = parse_changes(
-                &git(wt, &["diff", "--name-status", "-M", &mb, "HEAD"]).stdout,
-                &git(wt, &["diff", "--numstat", "-M", &mb, "HEAD"]).stdout,
+                &git(wt, &["diff", "--name-status", "-M", "-z", &mb, "HEAD"]).stdout,
+                &git(wt, &["diff", "--numstat", "-M", "-z", &mb, "HEAD"]).stdout,
             );
             (behind, ahead) = left_right(wt, &format!("{b}...HEAD"));
             resolved = Some(b.clone());
@@ -334,9 +371,9 @@ pub fn commits_vs_base(path: &str, base: &str) -> Vec<Commit> {
 
 /// The files one commit changed.
 pub fn commit_files(path: &str, hash: &str) -> Vec<ChangedFile> {
-    let ns = git(path, &["show", "--name-status", "-M", "--format=", hash]);
+    let ns = git(path, &["show", "--name-status", "-M", "-z", "--format=", hash]);
     if !ns.ok { return vec![] }
-    let num = git(path, &["show", "--numstat", "-M", "--format=", hash]);
+    let num = git(path, &["show", "--numstat", "-M", "-z", "--format=", hash]);
     parse_changes(&ns.stdout, if num.ok { &num.stdout } else { "" })
 }
 
@@ -397,6 +434,21 @@ fn confined(root: &str, rel: &str) -> Option<PathBuf> {
     out.starts_with(&norm_root).then_some(out)
 }
 
+/// `confined`, with symlinks resolved: the real file must still be in the worktree.
+fn confined_real(root: &str, rel: &str) -> Option<PathBuf> {
+    let p = confined(root, rel)?;
+    let real = match fs::canonicalize(&p) {
+        Ok(r) => r,
+        Err(_) => fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?),
+    };
+    real.starts_with(fs::canonicalize(root).ok()?).then_some(real)
+}
+
+/// Branch names come from the user: one starting with `-` would be read as a flag.
+fn check_branch(name: &str) -> Result<(), String> {
+    if name.starts_with('-') { Err(format!("Invalid branch name: {name}")) } else { Ok(()) }
+}
+
 const MAX_DIR_ENTRIES: usize = 2000;
 
 /// One directory level inside the worktree (for ignored folders git won't list):
@@ -419,7 +471,6 @@ pub fn list_dir(path: &str, rel: &str) -> Vec<(String, bool)> {
 pub struct Hit {
     pub path: String,
     pub line: u32,
-    pub column: u32,
     pub text: String,
 }
 
@@ -429,37 +480,35 @@ const MAX_HITS: usize = 500;
 pub fn search(path: &str, query: &str) -> Vec<Hit> {
     if query.trim().is_empty() { return vec![] }
     // Exit 1 = no matches; just parse whatever stdout there is.
-    let o = git(path, &["grep", "-n", "--column", "-I", "-F", "-i", "-e", query, "--", "."]);
+    // -z: `path\0line\0text` — unquoted paths, and colons in them don't matter.
+    let o = git(path, &["grep", "-n", "-z", "-I", "-F", "-i", "-e", query, "--", "."]);
     o.stdout.lines().filter_map(parse_hit).take(MAX_HITS).collect()
 }
 
-/// `path:line:col:text`, splitting at the first `:N:N:` (TS `/^(.+?):(\d+):(\d+):(.*)$/`).
 fn parse_hit(l: &str) -> Option<Hit> {
-    let num = |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok()).flatten();
-    l.match_indices(':').filter(|(i, _)| *i > 0).find_map(|(i, _)| {
-        let mut p = l[i + 1..].splitn(3, ':');
-        let (line, column, text) = (num(p.next()?)?, num(p.next()?)?, p.next()?);
-        Some(Hit { path: l[..i].into(), line, column, text: text.chars().take(300).collect() })
-    })
+    let mut p = l.splitn(3, '\0');
+    let (path, line, text) = (p.next()?, p.next()?.parse().ok()?, p.next()?);
+    Some(Hit { path: path.into(), line, text: text.chars().take(300).collect() })
 }
 
 /// A working-tree file's text; Err for paths outside the worktree, read errors, or binary (NUL bytes).
 pub fn read_file(path: &str, rel: &str) -> Result<String, String> {
-    let full = confined(path, rel).ok_or("path is outside the worktree")?;
+    let full = confined_real(path, rel).ok_or("path is outside the worktree")?;
     let bytes = fs::read(full).map_err(|e| e.to_string())?;
     if bytes.contains(&0) { return Err("binary file".into()) }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Overwrite a working-tree file (the editor's save).
+/// Overwrite a working-tree file (the editor's save) — atomically, through symlinks.
 pub fn write_file(path: &str, rel: &str, content: &str) -> Result<(), String> {
-    let full = confined(path, rel).ok_or("path is outside the worktree")?;
-    fs::write(full, content).map_err(|e| e.to_string())
+    let full = confined_real(path, rel).ok_or("path is outside the worktree")?;
+    crate::data::write_atomic(&full, content).map_err(|e| e.to_string())
 }
 
 /// Add a worktree at `path` on `branch`: check it out if it exists locally,
 /// else create it off `base` — TS `addWorktree` (non-detached).
 pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) -> Result<(), String> {
+    check_branch(branch)?;
     let exists = git_line(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_some();
     let mut args = vec!["worktree", "add", path];
     if !exists {
@@ -471,8 +520,10 @@ pub fn worktree_add(repo: &str, path: &str, branch: &str, base: Option<&str>) ->
     run(repo, &args, "git worktree add failed")
 }
 
-/// Remove a worktree; a broken/locked one falls back to double force, then prune
-/// plus deleting the leftover folder — TS `removeWorktree`.
+/// Remove a worktree. Without `force`, git's refusal stands (it may be guarding
+/// changes) — unless the folder is already gone, which a prune clears. With
+/// `force`: double force, then prune plus deleting the leftover folder if it's
+/// still one of this repo's worktrees.
 pub fn worktree_remove(repo: &str, path: &str, force: bool) -> Result<(), String> {
     let mut args = vec!["worktree", "remove"];
     if force {
@@ -483,9 +534,11 @@ pub fn worktree_remove(repo: &str, path: &str, force: bool) -> Result<(), String
     if first.ok {
         return Ok(());
     }
-    // Dirty without force is a refusal, not breakage: never fall through to --force.
-    if !force && first.stderr.contains("modified or untracked") {
-        return Err(err_text(&first, "git worktree remove failed"));
+    if !force {
+        if Path::new(path).exists() {
+            return Err(err_text(&first, "git worktree remove failed"));
+        }
+        return run(repo, &["worktree", "prune"], "git worktree prune failed");
     }
     let second = git(repo, &["worktree", "remove", "--force", "--force", path]);
     if second.ok {
@@ -497,10 +550,21 @@ pub fn worktree_remove(repo: &str, path: &str, force: bool) -> Result<(), String
         let e = if first.stderr.trim().is_empty() { &second } else { &first };
         return Err(err_text(e, "git worktree remove failed"));
     }
-    if path != repo && Path::new(path).exists() {
+    if path != repo && is_worktree_of(repo, path) {
         let _ = fs::remove_dir_all(path);
     }
     Ok(())
+}
+
+/// `path/.git` is a file pointing at `<repo's git dir>/worktrees/<name>` — so the
+/// folder really is (or was) this repo's linked worktree, not something else since
+/// created at the same path.
+fn is_worktree_of(repo: &str, path: &str) -> bool {
+    let Some(common) = git_line(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { return false };
+    let Some(gitdir) = crate::data::gitdir(path) else { return false };
+    let (Some(wt_dir), Some(common_dir)) = (gitdir.parent(), gitdir.parent().and_then(Path::parent)) else { return false };
+    wt_dir.file_name().is_some_and(|n| n == "worktrees")
+        && fs::canonicalize(common_dir).ok().is_some_and(|c| fs::canonicalize(common).is_ok_and(|r| r == c))
 }
 
 pub struct WorktreeStatus {
@@ -534,6 +598,7 @@ pub fn delete_branch(repo: &str, name: &str, force: bool) -> Result<(), String> 
 }
 
 pub fn rename_branch(repo: &str, from: &str, to: &str) -> Result<(), String> {
+    check_branch(to)?;
     run(repo, &["branch", "-m", from, to], "rename failed")
 }
 
@@ -630,7 +695,13 @@ fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
 }
 
 pub fn list_worktrees(repo: &str) -> Vec<WorktreeEntry> {
-    parse_worktree_list(&git(repo, &["worktree", "list", "--porcelain"]).stdout)
+    try_list_worktrees(repo).unwrap_or_default()
+}
+
+/// `list_worktrees`, but a git failure is an error rather than "none".
+pub fn try_list_worktrees(repo: &str) -> Result<Vec<WorktreeEntry>, String> {
+    let o = git(repo, &["worktree", "list", "--porcelain"]);
+    if o.ok { Ok(parse_worktree_list(&o.stdout)) } else { Err(err_text(&o, "git worktree list failed")) }
 }
 
 /// Fetch origin (pruned), then best-effort fast-forward the local base: through
@@ -669,9 +740,69 @@ pub fn base_log(repo: &str, base: &str, n: usize) -> Vec<Commit> {
         .collect()
 }
 
+/// A file's patch; `full` asks git for the whole file as context.
+pub fn diff_patch(root: &str, file: &str, base: Option<&str>, full: bool) -> String {
+    if !full {
+        return match base {
+            Some(b) if b.starts_with("commit:") => commit_file_diff(root, &b["commit:".len()..], file),
+            b => file_diff(root, file, b),
+        };
+    }
+    let git = |args: &[&str]| git(root, args).stdout;
+    const U: &str = "-U1000000";
+    let out = match base {
+        Some(b) if b.starts_with("commit:") => git(&["show", "--format=", "--no-color", "--no-ext-diff", U, &b["commit:".len()..], "--", file]),
+        Some(b) => {
+            let mb = git(&["merge-base", b, "HEAD"]);
+            if mb.trim().is_empty() { String::new() } else { git(&["diff", "-M", U, mb.trim(), "HEAD", "--", file]) }
+        }
+        None => git(&["diff", "-M", U, "HEAD", "--", file]),
+    };
+    // Untracked files are all-added already.
+    if out.trim().is_empty() { diff_patch(root, file, base, false) } else { out }
+}
+
+/// Rewrite `git diff --no-index a b` output as a patch of `file`.
+fn rehead(file: &str, out: &str) -> String {
+    match out.find("\n@@") {
+        Some(i) => format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n{}", &out[i + 1..]),
+        None => String::new(),
+    }
+}
+
+/// A unified patch between two texts of `file`.
+pub fn text_patch(file: &str, old: &str, new: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("forest-ranger-diff-{}", uuid::Uuid::new_v4()));
+    if std::fs::create_dir_all(&dir).is_err() || std::fs::write(dir.join("a"), old).is_err() || std::fs::write(dir.join("b"), new).is_err() {
+        return String::new();
+    }
+    let out = git(&dir.to_string_lossy(), &["diff", "--no-index", "--no-color", "--no-ext-diff", "a", "b"]).stdout;
+    let _ = std::fs::remove_dir_all(&dir);
+    rehead(file, &out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_patch() {
+        let p = text_patch("src/x.rs", "a\nb\n", "a\nc\n");
+        assert!(p.starts_with("diff --git a/src/x.rs b/src/x.rs\n--- a/src/x.rs\n+++ b/src/x.rs\n@@"), "{p}");
+        assert!(p.contains("\n-b\n+c\n"));
+        assert_eq!(text_patch("x", "same", "same"), "");
+        assert_eq!(rehead("x", "diff --git a/a b/b\nnew file mode 100644\n--- /dev/null\n"), "");
+    }
+
+    #[test]
+    fn parses_nul_changes() {
+        let ns = "R100\0old.txt\0new.txt\0M\0\u{e9}.txt\0";
+        let num = "0\t0\t\0old.txt\0new.txt\0\x31\t0\t\u{e9}.txt\0-\t-\tbin\0";
+        let c = parse_changes(ns, num);
+        assert_eq!(c.len(), 2);
+        assert_eq!((c[0].path.as_str(), c[0].kind, c[0].insertions), ("new.txt", ChangeKind::Renamed, Some(0)));
+        assert_eq!((c[1].path.as_str(), c[1].kind, c[1].insertions), ("\u{e9}.txt", ChangeKind::Modified, Some(1)));
+    }
 
     #[test]
     fn round_trip() {
@@ -716,7 +847,7 @@ mod tests {
 
         let hits = search(&p, "needle");
         assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].path.as_str(), hits[0].line, hits[0].column), ("new file.txt", 1, 1));
+        assert_eq!((hits[0].path.as_str(), hits[0].line), ("new file.txt", 1));
         assert!(list_dir(&p, ".").iter().any(|(n, d)| n == "a.txt" && !d));
 
         // Worktree lifecycle.
@@ -728,6 +859,13 @@ mod tests {
         assert!(worktree_remove(&p, &wt, false).is_err());
         worktree_remove(&p, &wt, true).unwrap();
         assert!(!Path::new(&wt).exists());
+        // Folder deleted outside the app: a plain remove just prunes it.
+        worktree_add(&p, &wt, "gone", Some("main")).unwrap();
+        fs::remove_dir_all(&wt).unwrap();
+        worktree_remove(&p, &wt, false).unwrap();
+        assert!(list_worktrees(&p).iter().all(|w| w.path != wt));
+        delete_branch(&p, "gone", true).unwrap();
+        assert!(rename_branch(&p, "side", "-f").is_err());
         rename_branch(&p, "side", "side2").unwrap();
         delete_branch(&p, "side2", false).unwrap();
         assert_eq!(list_branches(&p), vec!["feat", "main"]);

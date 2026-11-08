@@ -330,6 +330,8 @@ pub struct Session {
     vt: Arc<Mutex<Vt>>,
     pty: Arc<Pty>,
     rx: async_channel::Receiver<Event>,
+    /// A Wakeup is queued and not yet handled: output bursts send just one.
+    woken: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A login shell in `cwd`; with `command` (label, command line), it runs that
@@ -379,7 +381,8 @@ pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Se
         }
     });
     let mut reader = master.try_clone()?;
-    let (vt2, ev2) = (vt.clone(), events.clone());
+    let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (vt2, ev2, woken2) = (vt.clone(), events.clone(), woken.clone());
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -387,7 +390,9 @@ pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Se
                 Ok(0) => break,
                 Ok(n) => {
                     vt2.lock().unwrap().write(&buf[..n]);
-                    let _ = ev2.try_send(Event::Wakeup);
+                    if !woken2.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                        let _ = ev2.try_send(Event::Wakeup);
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => break, // EIO: the shell and everything on the PTY exited
@@ -399,7 +404,7 @@ pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Se
         let code = child.wait().ok().and_then(|s| s.code());
         let _ = events.try_send(Event::Exit(code));
     });
-    Ok(Session { label: command.map(|c| c.0), vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx })
+    Ok(Session { label: command.map(|c| c.0), vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx, woken })
 }
 
 /// GPUI key name → libghostty key, and the text it types (for letters and symbols).
@@ -457,9 +462,13 @@ fn mods(m: &Modifiers) -> u16 {
 impl TerminalView {
     /// `id`: the tab's id from the last run when reopening it (a fresh shell).
     pub fn new(s: Session, id: Option<String>, cx: &mut Context<Self>) -> Self {
-        let rx = s.rx;
+        let (rx, woken) = (s.rx, s.woken);
         let events = cx.spawn(async move |this, cx| {
             while let Ok(ev) = rx.recv().await {
+                if matches!(ev, Event::Wakeup) {
+                    // Cleared before drawing: output after this point sends a new one.
+                    woken.store(false, std::sync::atomic::Ordering::Release);
+                }
                 if this.update(cx, |t, cx| t.on_event(ev, cx)).is_err() {
                     break;
                 }

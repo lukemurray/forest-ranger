@@ -7,7 +7,10 @@ mod change_tree;
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Not drawn for this long: the panel is hidden, so it stops polling.
+const HIDDEN: Duration = Duration::from_secs(10);
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -99,6 +102,11 @@ pub struct ReviewPanel {
     hits: Option<Vec<Hit>>,
     /// The pending / running search; replacing it drops a stale one.
     _search: Task<()>,
+    /// The latest git refresh (replacing it drops an older one's result), and whether it's running.
+    _refresh: Task<()>,
+    refreshing: bool,
+    /// Last drawn: a panel off screen (another worktree, panel closed) skips polling.
+    drawn: Instant,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -157,14 +165,9 @@ fn tree_key(ev: &KeyDownEvent) -> Option<&str> {
 /// The detached origin (only looked up when detached) and whether a linked
 /// worktree is locked (`<gitdir>/locked`).
 fn worktree_meta(path: &str, detached: bool) -> (Option<String>, bool) {
-    let p = std::path::Path::new(path);
-    let locked = std::fs::read_to_string(p.join(".git"))
-        .ok()
-        .and_then(|s| Some(std::path::Path::new(s.strip_prefix("gitdir:")?.trim()).join("locked").exists()))
-        .unwrap_or(false);
-    let from = detached
-        .then(|| crate::data::load_projects().ok()?.into_iter().flat_map(|p| p.worktrees).find(|w| w.path == path)?.detached_from)
-        .flatten();
+    let gitdir = crate::data::gitdir(path);
+    let locked = gitdir.as_ref().is_some_and(|g| g.join("locked").exists());
+    let from = gitdir.as_deref().filter(|_| detached).and_then(crate::data::reflog_origin);
     (from, locked)
 }
 
@@ -211,6 +214,12 @@ impl ReviewPanel {
             for tick in 1u64.. {
                 cx.background_executor().timer(Duration::from_secs(4)).await;
                 let ok = this.update(cx, |this, cx| {
+                    // A refresh notifies, so a visible panel redraws between ticks;
+                    // one not drawn lately is hidden. A slow repo: let the running
+                    // refresh finish rather than pile up.
+                    if this.drawn.elapsed() > HIDDEN || this.refreshing {
+                        return;
+                    }
                     this.refresh(cx);
                     if tick % 15 == 0 {
                         this.refresh_host(cx);
@@ -258,6 +267,9 @@ impl ReviewPanel {
             query,
             hits: None,
             _search: Task::ready(()),
+            _refresh: Task::ready(()),
+            refreshing: false,
+            drawn: Instant::now(),
             _poll: poll,
             _subs: subs,
         };
@@ -282,9 +294,13 @@ impl ReviewPanel {
             };
             (d, commits, activity)
         });
-        cx.spawn(async move |this, cx| {
+        // Replacing the task drops an older refresh's result, so a slow one can't
+        // land after a newer one (e.g. put back the base you just changed).
+        self.refreshing = true;
+        self._refresh = cx.spawn(async move |this, cx| {
             let (d, commits, activity) = work.await;
             let _ = this.update(cx, |this, cx| {
+                this.refreshing = false;
                 this.activity = activity;
                 // First load, or the branch changed: look up its MR/pipeline and
                 // detached origin / lock state.
@@ -300,8 +316,7 @@ impl ReviewPanel {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     fn load_meta(&mut self, detached: bool, cx: &mut Context<Self>) {
@@ -1591,6 +1606,12 @@ fn clone_head(d: &Detail) -> Detail {
 
 impl Render for ReviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Shown again after a while hidden: catch up now rather than at the next tick.
+        if self.drawn.elapsed() > HIDDEN && !self.refreshing {
+            self.refresh(cx);
+            self.refresh_host(cx);
+        }
+        self.drawn = Instant::now();
         // The view can be switched from outside (⌘1/⌘2/⌘⇧F set `view` directly).
         if self.view != self.last_view {
             self.last_view = self.view;

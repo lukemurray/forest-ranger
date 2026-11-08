@@ -2,13 +2,8 @@
 //! index.ts), ported: per-branch PR/MR + checks via the `gh` / `glab` CLIs and
 //! their own logins. Token / OAuth connections are encrypted with Electron's
 //! safeStorage, so they're reported as unsupported here rather than called.
-#![allow(dead_code)]
 
-use std::{
-    io::Read,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
-};
+use std::{process::Command, time::Duration};
 
 use rusqlite::{Connection as Db, OpenFlags, OptionalExtension};
 use serde_json::{Map, Value};
@@ -201,11 +196,6 @@ pub fn set_enabled(p: Provider, enabled: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// The `integrationUseCli` RPC with enable=true, against the stored host.
-pub fn use_cli(p: Provider) -> Result<String, String> {
-    use_cli_host(p, "")
-}
-
 /// The stored host unless `typed` is non-blank (index.ts: `host.trim() || prev.host || DEFAULT_HOST`).
 fn host_or_stored(p: Provider, typed: &str) -> Result<String, String> {
     let typed = typed.trim();
@@ -308,45 +298,12 @@ fn api_with(p: Provider, host: &str, path: &str, fields: &[(&str, &str)]) -> Res
 fn run_cli(cli: &str, args: &[&str]) -> Result<String, String> {
     // Dock-launched apps don't get the shell's PATH (gh / glab live in /opt/homebrew/bin).
     let path = format!("{}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", std::env::var("PATH").unwrap_or_default());
-    let mut child = Command::new(cli)
-        .args(args)
-        .env("PATH", path)
-        .env("GH_PROMPT_DISABLED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("{cli} isn't installed (brew install {cli})")
-            } else {
-                e.to_string()
-            }
-        })?;
-    // Drain both pipes on threads so a big response can't block the child.
-    let drain = |mut r: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = r.read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-    };
-    let out = drain(Box::new(child.stdout.take().unwrap()));
-    let err = drain(Box::new(child.stderr.take().unwrap()));
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("timed out after 30s".into());
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let (stdout, stderr) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let mut cmd = Command::new(cli);
+    cmd.args(args).env("PATH", path).env("GH_PROMPT_DISABLED", "1");
+    let o = crate::git::output_with_deadline(&mut cmd, Duration::from_secs(30)).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound { format!("{cli} isn't installed (brew install {cli})") } else { e.to_string() }
+    })?;
+    let (status, stdout, stderr) = (o.status, String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned());
     if status.success() {
         return Ok(stdout);
     }
@@ -368,18 +325,12 @@ fn enc(s: &str) -> String {
 
 // ---- remotes (git.ts remoteUrl / parseRemote) ----
 
-fn git_out(repo: &str, args: &[&str]) -> Option<String> {
-    let o = Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
-    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-    (o.status.success() && !s.is_empty()).then_some(s)
-}
-
 /// origin's URL, else the first remote's.
 fn remote_url(repo: &str) -> Option<String> {
-    git_out(repo, &["remote", "get-url", "origin"]).or_else(|| {
-        let remotes = git_out(repo, &["remote"]).unwrap_or_default();
+    crate::git::git_line(repo, &["remote", "get-url", "origin"]).or_else(|| {
+        let remotes = crate::git::git_line(repo, &["remote"]).unwrap_or_default();
         let first = remotes.lines().map(str::trim).find(|l| !l.is_empty())?;
-        git_out(repo, &["remote", "get-url", first])
+        crate::git::git_line(repo, &["remote", "get-url", first])
     })
 }
 

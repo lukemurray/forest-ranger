@@ -60,7 +60,9 @@ impl Settings {
             "defaultModeByProvider": self.default_mode_by_provider,
             "reviewPromptByProject": self.review_prompt_by_project,
         });
-        let _ = fs::write(file(), v.to_string());
+        if let Err(e) = crate::data::write_atomic(&file(), v.to_string()) {
+            eprintln!("couldn't save settings: {e}");
+        }
     }
 
     pub fn dark(&self, window: &Window) -> bool {
@@ -84,7 +86,6 @@ fn str_map(v: &Value) -> HashMap<String, String> {
 }
 
 /// Built-in review prompt (chatConfig.ts). `{branch}` and `{base}` are substituted at review time.
-#[allow(dead_code)]
 pub const DEFAULT_REVIEW_PROMPT: &str = r#"Review the branch `{branch}` against `{base}`. This worktree is checked out at `{branch}` for review.
 
 Start by seeing what changed:
@@ -101,29 +102,24 @@ If the branch has new commits on origin, update it with `git pull --ff-only` on 
 Don't change any code — this is a read-only review."#;
 
 /// The project's review template, or the default when unset / blank.
-#[allow(dead_code)]
 pub fn review_prompt(cx: &App, project_id: &str) -> String {
     template_or_default(cx.global::<Settings>().review_prompt_by_project.get(project_id)).to_string()
 }
 
-#[allow(dead_code)]
 fn template_or_default(t: Option<&String>) -> &str {
     t.map(|t| t.as_str()).filter(|t| !t.trim().is_empty()).unwrap_or(DEFAULT_REVIEW_PROMPT)
 }
 
 /// The review instruction for a branch + base (ReviewDialog.tsx reviewPrompt).
-#[allow(dead_code)]
 pub fn render_review_prompt(cx: &App, project_id: &str, branch: &str, base: Option<&str>) -> String {
     fill_review_prompt(&review_prompt(cx, project_id), branch, base)
 }
 
-#[allow(dead_code)]
 fn fill_review_prompt(template: &str, branch: &str, base: Option<&str>) -> String {
     template.trim().replace("{branch}", branch).replace("{base}", base.unwrap_or("the main branch"))
 }
 
 /// Save a project's template; None (or the default text) resets it.
-#[allow(dead_code)]
 pub fn set_review_prompt(cx: &mut App, project_id: &str, value: Option<String>) {
     let id = project_id.to_string();
     Settings::update(cx, move |s| match value.filter(|v| v != DEFAULT_REVIEW_PROMPT) {
@@ -157,7 +153,6 @@ pub fn detect_apps() -> Vec<&'static AppInfo> {
 }
 
 /// Open a folder in an app (`open -a`), or Finder when `app` is None.
-#[allow(dead_code)]
 pub fn open_in(app: Option<&str>, path: &str) {
     let bundle = app.and_then(|id| CATALOG.iter().find(|a| a.id == id)).map(|a| a.bundle);
     let mut cmd = Command::new("open");
@@ -275,7 +270,6 @@ impl Render for CodeHostView {
 
 /// The project Settings "Code host" field: origin, the Auto / GitHub / GitLab / None
 /// picker (writes `projects.integration`), and what's in effect.
-#[allow(dead_code)]
 pub fn project_code_host_section(project_id: &str, repo: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
     if let Some(v) = cx.try_global::<CodeHostViews>().and_then(|g| g.0.get(project_id)).cloned() {
         return v.into_any_element();

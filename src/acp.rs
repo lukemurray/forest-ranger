@@ -30,14 +30,14 @@ enum Pending {
     Init,
     Load,
     New,
-    Prompt,
+    /// The caller's tag, echoed as `prompt` on the turn's `result` / `error`, so a
+    /// late answer to a cancelled prompt can be told apart from the current one.
+    Prompt(String),
     SetConfig,
     /// Fire-and-forget (session/set_mode): the agent reports the change itself.
-    #[allow(dead_code)]
     Ignore,
     /// The steered blocks and our id for the `steer_result` event.
     Steer(Value, String),
-    #[allow(dead_code)]
     Fork(Sender<Result<String, String>>),
 }
 
@@ -46,8 +46,8 @@ struct Shared {
     next_id: u64,
     pending: HashMap<u64, Pending>,
     session: Option<String>,
-    /// Prompts (ACP content blocks) sent before the session was up.
-    queued: Vec<Value>,
+    /// Prompts (ACP content blocks, tag) sent before the session was up.
+    queued: Vec<(Value, String)>,
     /// While resuming, the agent replays history as updates — we already have it.
     suppress: bool,
     /// Open permission requests: our id → (JSON-RPC id, optionId → label).
@@ -67,7 +67,6 @@ pub struct Agent {
     stdin: Arc<Mutex<ChildStdin>>,
     shared: Arc<Mutex<Shared>>,
     tx: Sender<Value>,
-    #[allow(dead_code)]
     cwd: String,
 }
 
@@ -157,6 +156,9 @@ impl Agent {
             std::env::var("PATH").unwrap_or_default()
         );
         let mut cmd = adapter_command(&opts.provider)?;
+        // Its own process group, so closing the chat can stop the CLI it runs and
+        // that CLI's tool processes too, not just the adapter.
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         cmd.current_dir(&opts.cwd)
             .env("PATH", &path)
             .stdin(Stdio::piped())
@@ -226,13 +228,13 @@ impl Agent {
         Ok(Self { child, stdin, shared, tx, cwd })
     }
 
-    /// Send a prompt (ACP content blocks: text, images).
-    pub fn prompt(&self, blocks: Value) {
-        let session = self.shared.lock().unwrap().session.clone();
-        match session {
-            Some(sid) => request(&self.stdin, &self.shared, Pending::Prompt, "session/prompt", json!({ "sessionId": sid, "prompt": blocks })),
-            None => self.shared.lock().unwrap().queued.push(blocks),
-        }
+    /// Send a prompt (ACP content blocks: text, images); `tag` comes back on its result.
+    pub fn prompt(&self, blocks: Value, tag: &str) {
+        // Check and queue under one lock, or `session_ready` could drain the queue in between.
+        let mut s = self.shared.lock().unwrap();
+        let Some(sid) = s.session.clone() else { return s.queued.push((blocks, tag.to_string())) };
+        drop(s);
+        request(&self.stdin, &self.shared, Pending::Prompt(tag.to_string()), "session/prompt", json!({ "sessionId": sid, "prompt": blocks }));
     }
 
     pub fn can_steer(&self) -> bool {
@@ -245,7 +247,7 @@ impl Agent {
     pub fn steer_tagged(&self, id: &str, blocks: Value) {
         let Some(sid) = self.shared.lock().unwrap().session.clone() else {
             let _ = self.tx.send_blocking(json!({ "type": "steer_result", "id": id, "injected": false }));
-            return self.prompt(blocks);
+            return self.prompt(blocks, id);
         };
         request(
             &self.stdin,
@@ -267,7 +269,6 @@ impl Agent {
     }
 
     /// Answer an open elicitation: `action` is accept, decline or cancel.
-    #[allow(dead_code)] // chat wires these up in wave 2
     pub fn answer_elicitation(&self, id: &str, action: &str, content: Option<Value>) {
         let rpc_id = self.shared.lock().unwrap().elicits.remove(id);
         if let Some(rpc_id) = rpc_id {
@@ -278,7 +279,6 @@ impl Agent {
 
     /// Fork the agent's session at an agent message (None = its latest state). The
     /// receiver yields the new session's id.
-    #[allow(dead_code)]
     pub fn fork(&self, message_id: Option<&str>) -> Receiver<Result<String, String>> {
         let (tx, rx) = async_channel::bounded(1);
         let Some(sid) = self.shared.lock().unwrap().session.clone() else {
@@ -294,7 +294,6 @@ impl Agent {
     }
 
     /// Switch the agent's advertised session mode (it confirms via current_mode_update).
-    #[allow(dead_code)]
     pub fn set_session_mode(&self, mode_id: &str) {
         let Some(sid) = self.shared.lock().unwrap().session.clone() else { return };
         request(&self.stdin, &self.shared, Pending::Ignore, "session/set_mode", json!({ "sessionId": sid, "modeId": mode_id }));
@@ -334,7 +333,11 @@ impl Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        let _ = self.child.lock().map(|mut c| c.kill());
+        let _ = self.child.lock().map(|mut c| {
+            // The group id is the adapter's pid (process_group(0) at spawn).
+            unsafe { libc::killpg(c.id() as libc::pid_t, libc::SIGTERM) };
+            c.kill()
+        });
     }
 }
 
@@ -392,8 +395,8 @@ impl Reader {
             s.session = Some(sid.clone());
             std::mem::take(&mut s.queued)
         };
-        for blocks in queued {
-            request(&self.stdin, &self.shared, Pending::Prompt, "session/prompt", json!({ "sessionId": sid, "prompt": blocks }));
+        for (blocks, tag) in queued {
+            request(&self.stdin, &self.shared, Pending::Prompt(tag), "session/prompt", json!({ "sessionId": sid, "prompt": blocks }));
         }
     }
 
@@ -454,9 +457,9 @@ impl Reader {
                 Some(e) => self.emit(json!({ "type": "error", "message": format!("Couldn't start a session: {e}") })),
                 None => self.session_ready(result["sessionId"].as_str().unwrap_or_default().to_string(), result),
             },
-            Pending::Prompt => match err {
-                Some(e) => self.emit(json!({ "type": "error", "message": format!("Send failed: {e}") })),
-                None => self.emit(json!({ "type": "result", "ok": result["stopReason"] != "refusal", "durationMs": null })),
+            Pending::Prompt(tag) => match err {
+                Some(e) => self.emit(json!({ "type": "error", "message": format!("Send failed: {e}"), "prompt": tag })),
+                None => self.emit(json!({ "type": "result", "ok": result["stopReason"] != "refusal", "durationMs": null, "prompt": tag })),
             },
             Pending::Ignore => {}
             Pending::Fork(tx) => {
@@ -467,7 +470,8 @@ impl Reader {
                 let _ = tx.try_send(r);
             }
             Pending::SetConfig => match err {
-                Some(e) => self.emit(json!({ "type": "error", "message": e })),
+                // Soft: a refused setting doesn't end the running turn.
+                Some(e) => self.emit(json!({ "type": "error", "message": e, "soft": true })),
                 None => self.emit_config(&result["configOptions"]),
             },
             // Not taken into a running turn — send it as a normal prompt.
@@ -476,7 +480,7 @@ impl Reader {
                 self.emit(json!({ "type": "steer_result", "id": tag, "injected": injected }));
                 if !injected {
                     let sid = self.shared.lock().unwrap().session.clone().unwrap_or_default();
-                    request(&self.stdin, &self.shared, Pending::Prompt, "session/prompt", json!({ "sessionId": sid, "prompt": blocks }));
+                    request(&self.stdin, &self.shared, Pending::Prompt(tag), "session/prompt", json!({ "sessionId": sid, "prompt": blocks }));
                 }
             }
         }
@@ -502,6 +506,9 @@ impl Reader {
             "fs/write_text_file" => self.reply(
                 id,
                 self.in_cwd(p["path"].as_str().unwrap_or_default()).and_then(|path| {
+                    if let Some(dir) = path.parent() {
+                        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                    }
                     fs::write(path, p["content"].as_str().unwrap_or_default()).map_err(|e| e.to_string())?;
                     Ok(json!({}))
                 }),
@@ -519,11 +526,22 @@ impl Reader {
     fn in_cwd(&self, p: &str) -> Result<PathBuf, String> {
         let root = fs::canonicalize(&self.opts.cwd).map_err(|e| e.to_string())?;
         let path = Path::new(p);
-        let parent = path.parent().and_then(|d| fs::canonicalize(d).ok()).ok_or("bad path")?;
-        if !parent.starts_with(&root) {
+        if !path.is_absolute() {
+            return Err(format!("bad path: {p}"));
+        }
+        // Resolve the nearest existing ancestor (symlinks too); the rest are folders a
+        // write will create. `..` in that rest has no file_name, so it's refused.
+        let (mut existing, mut rest) = (path, vec![]);
+        while fs::symlink_metadata(existing).is_err() {
+            rest.push(existing.file_name().ok_or("bad path")?);
+            existing = existing.parent().ok_or("bad path")?;
+        }
+        let mut real = fs::canonicalize(existing).map_err(|e| e.to_string())?;
+        real.extend(rest.iter().rev());
+        if !real.starts_with(&root) {
             return Err(format!("path outside worktree: {p}"));
         }
-        Ok(parent.join(path.file_name().ok_or("bad path")?))
+        Ok(real)
     }
 
     fn on_permission(&self, rpc_id: &Value, p: &Value) {

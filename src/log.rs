@@ -11,7 +11,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::data::data_dir;
+use crate::data::{data_dir, write_atomic};
 
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
@@ -55,8 +55,11 @@ fn append(events: &mut Vec<Value>, e: Value, frozen: usize) {
         return *last = e;
     }
     if (kind == "assistant_text" || kind == "thinking") && last["type"] == kind {
-        let text = format!("{}{}", last["text"].as_str().unwrap_or_default(), e["text"].as_str().unwrap_or_default());
-        last["text"] = text.into();
+        let add = e["text"].as_str().unwrap_or_default();
+        match &mut last["text"] {
+            Value::String(t) => t.push_str(add), // in place: no copy of the whole message per chunk
+            t => *t = add.into(),
+        }
         // The merged entry keeps the newest message id (branch points).
         if e["messageId"].is_string() {
             last["messageId"] = e["messageId"].clone();
@@ -85,10 +88,15 @@ fn load_events(dir: &Path, id: &str) -> Vec<Value> {
             return vec![];
         };
         let events = coalesce(arr);
-        let _ = fs::write(&jsonl, events.iter().map(|e| format!("{e}\n")).collect::<String>());
+        let _ = write_atomic(&jsonl, events.iter().map(|e| format!("{e}\n")).collect::<String>());
         return events;
     }
-    coalesce(fs::read_to_string(jsonl).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()))
+    let text = fs::read_to_string(&jsonl).unwrap_or_default();
+    // A torn last line (crash mid-write): end it, so the next append starts a fresh line.
+    if !text.is_empty() && !text.ends_with('\n') {
+        let _ = OpenOptions::new().append(true).open(&jsonl).and_then(|mut f| f.write_all(b"\n"));
+    }
+    coalesce(text.lines().filter_map(|l| serde_json::from_str(l).ok()))
 }
 
 impl ChatLog {
@@ -150,12 +158,16 @@ impl ChatLog {
             .map(|e| format!("{e}\n"))
             .collect();
         let _ = fs::create_dir_all(chat_dir());
+        // A failed write is cut back off, so the retry doesn't duplicate what got through.
         let ok = lines.is_empty()
             || OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(chat_dir().join(format!("{}.jsonl", self.id)))
-                .and_then(|mut f| f.write_all(lines.as_bytes()))
+                .and_then(|mut f| {
+                    let len = f.metadata()?.len();
+                    f.write_all(lines.as_bytes()).inspect_err(|_| _ = f.set_len(len))
+                })
                 .is_ok();
         if ok {
             self.written = to;
@@ -193,7 +205,7 @@ impl ChatLog {
         if self.custom_name.is_some() {
             meta["renamed"] = true.into();
         }
-        let _ = fs::write(chat_dir().join(format!("{}.meta.json", self.id)), meta.to_string());
+        let _ = write_atomic(&chat_dir().join(format!("{}.meta.json", self.id)), meta.to_string());
     }
 
     /// The first user message, collapsed and truncated — the chat's name.
@@ -219,7 +231,6 @@ impl ChatLog {
 /// Branch a chat: a new log `new_id` holding `src` up to and including agent
 /// message `message_id` (None = all of it), resuming agent session `new_session`.
 /// Written to disk like Electron's forkChat.
-#[allow(dead_code)] // chat's Branch from here (wave 2)
 pub fn fork_log(src: &ChatLog, message_id: Option<&str>, new_id: String, new_session: &str) -> Result<ChatLog, String> {
     let mut log = ChatLog {
         id: new_id,

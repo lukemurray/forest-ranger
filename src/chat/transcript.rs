@@ -169,56 +169,20 @@ fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s.to_string() }
 }
 
-#[repr(C)]
-struct Tm {
-    sec: i32,
-    min: i32,
-    hour: i32,
-    mday: i32,
-    mon: i32,
-    year: i32,
-    wday: i32,
-    yday: i32,
-    isdst: i32,
-    gmtoff: std::ffi::c_long,
-    zone: *const std::ffi::c_char,
-}
-
-unsafe extern "C" {
-    fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
-}
-
-fn local(ms: i64) -> Tm {
-    let t = ms / 1000;
-    let mut tm = Tm { sec: 0, min: 0, hour: 0, mday: 1, mon: 0, year: 70, wday: 4, yday: 0, isdst: 0, gmtoff: 0, zone: std::ptr::null() };
-    // SAFETY: both pointers are valid for the call; localtime_r is reentrant.
-    unsafe { localtime_r(&t, &mut tm) };
-    tm
-}
-
-const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-fn hm(tm: &Tm) -> String {
-    let h = if tm.hour % 12 == 0 { 12 } else { tm.hour % 12 };
-    format!("{h}:{:02} {}", tm.min, if tm.hour < 12 { "AM" } else { "PM" })
+fn local(ms: i64) -> chrono::DateTime<chrono::Local> {
+    chrono::DateTime::from_timestamp_millis(ms).unwrap_or_default().with_timezone(&chrono::Local)
 }
 
 /// "Nov 6, 2026, 2:41:07 PM" — a message's hover time.
 fn clock_time(ms: i64) -> String {
-    let tm = local(ms);
-    let h = if tm.hour % 12 == 0 { 12 } else { tm.hour % 12 };
-    let m = MONTHS[tm.mon.clamp(0, 11) as usize];
-    format!("{m} {}, {}, {h}:{:02}:{:02} {}", tm.mday, tm.year + 1900, tm.min, tm.sec, if tm.hour < 12 { "AM" } else { "PM" })
+    local(ms).format("%b %-d, %Y, %-I:%M:%S %p").to_string()
 }
 
 /// "2:41 PM" today, else "Thu, Nov 6 · 2:41 PM".
 fn time_divider(ms: i64) -> String {
-    let (tm, now) = (local(ms), local(crate::log::now_ms()));
-    if (tm.year, tm.yday) == (now.year, now.yday) {
-        return hm(&tm);
-    }
-    format!("{}, {} {} · {}", DAYS[tm.wday.clamp(0, 6) as usize], MONTHS[tm.mon.clamp(0, 11) as usize], tm.mday, hm(&tm))
+    let t = local(ms);
+    let today = t.date_naive() == chrono::Local::now().date_naive();
+    t.format(if today { "%-I:%M %p" } else { "%a, %b %-d · %-I:%M %p" }).to_string()
 }
 
 pub(super) const FOREST_WORDS: &[&str] = &[
@@ -309,7 +273,8 @@ fn chevron(open: bool, color: Hsla) -> Svg {
 
 impl ChatView {
     pub(super) fn item_of_row(&self, row: usize) -> Option<usize> {
-        self.items.iter().position(|it| match &it.node {
+        // From the end: updates are almost always to the latest rows.
+        self.items.iter().rposition(|it| match &it.node {
             Node::Row(r) => *r == row,
             Node::Strip(rs) => rs.contains(&row),
         })
