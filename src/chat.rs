@@ -353,8 +353,8 @@ pub struct ChatView {
     last_activity: Instant,
     find: Option<find::Find>,
     fresh_banner: bool,
-    /// Drawn heights, for pinning: each question's list item, and the pinned copy.
-    question_h: std::rc::Rc<std::cell::RefCell<HashMap<usize, Pixels>>>,
+    /// Drawn heights, for pinning: each list item (as last painted), and the pinned copy.
+    item_h: std::rc::Rc<std::cell::RefCell<HashMap<usize, Pixels>>>,
     pinned_h: std::rc::Rc<std::cell::Cell<Pixels>>,
     forms: HashMap<String, elicitation::Form>,
     _tasks: Vec<Task<()>>,
@@ -479,7 +479,7 @@ impl ChatView {
             last_activity: Instant::now(),
             find: None,
             fresh_banner,
-            question_h: Default::default(),
+            item_h: Default::default(),
             pinned_h: std::rc::Rc::new(std::cell::Cell::new(px(56.))),
             forms: HashMap::new(),
             _tasks: vec![idle],
@@ -1492,6 +1492,8 @@ impl Render for ChatView {
             .child(
                 div()
                     .relative()
+                    // Clips the pinned question as the next one pushes it up and off.
+                    .overflow_hidden()
                     .flex_1()
                     .min_h_0()
                     .flex()

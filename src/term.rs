@@ -268,6 +268,18 @@ struct Geometry {
 /// Its title changed or its process exited: the tab strip should redraw.
 pub struct TermChanged;
 
+/// A run command with `close_on_success` exited 0: its tab can close.
+pub struct TermFinished;
+
+/// A command for a new terminal to run (a project's run command).
+pub struct Run {
+    pub label: String,
+    pub command: String,
+    /// Exit when it succeeds (the tab then closes); on failure the shell stays so
+    /// the error can be read.
+    pub close_on_success: bool,
+}
+
 pub struct TerminalView {
     pub id: String,
     label: Option<String>,
@@ -275,6 +287,7 @@ pub struct TerminalView {
     vt: Arc<Mutex<Vt>>,
     pty: Arc<Pty>,
     exited: Option<Option<i32>>,
+    close_on_success: bool,
     focus: FocusHandle,
     geometry: Rc<Cell<Option<Geometry>>>,
     /// Where a drag selection started, in screen coordinates.
@@ -290,6 +303,7 @@ pub struct TerminalView {
 }
 
 impl EventEmitter<TermChanged> for TerminalView {}
+impl EventEmitter<TermFinished> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -327,6 +341,7 @@ impl Drop for Pty {
 /// A started shell, before it has a view.
 pub struct Session {
     label: Option<String>,
+    close_on_success: bool,
     vt: Arc<Mutex<Vt>>,
     pty: Arc<Pty>,
     rx: async_channel::Receiver<Event>,
@@ -334,12 +349,15 @@ pub struct Session {
     woken: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// A login shell in `cwd`; with `command` (label, command line), it runs that
-/// first and then stays open as an interactive shell, like the external terminal.
-pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Session> {
+/// A login shell in `cwd`; with a `Run`, it runs that command first and then
+/// stays open as an interactive shell, like the external terminal — unless it
+/// asks to close on success and the command exits 0.
+pub fn start(cwd: &str, run: Option<Run>) -> std::io::Result<Session> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let args = match &command {
-        Some((_, c)) => vec!["-l".into(), "-c".into(), format!("{c}; exec {shell} -i")],
+    let args = match &run {
+        // Braces + newline: the whole command line (`a; b`, a trailing comment) is the test.
+        Some(r) if r.close_on_success => vec!["-l".into(), "-c".into(), format!("{{ {}\n}} && exit 0; exec {shell} -i", r.command)],
+        Some(r) => vec!["-l".into(), "-c".into(), format!("{}; exec {shell} -i", r.command)],
         None => vec!["-l".to_string()],
     };
     let (cols, rows) = (80, 24);
@@ -404,7 +422,8 @@ pub fn start(cwd: &str, command: Option<(String, String)>) -> std::io::Result<Se
         let code = child.wait().ok().and_then(|s| s.code());
         let _ = events.try_send(Event::Exit(code));
     });
-    Ok(Session { label: command.map(|c| c.0), vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx, woken })
+    let close_on_success = run.as_ref().is_some_and(|r| r.close_on_success);
+    Ok(Session { label: run.map(|r| r.label), close_on_success, vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx, woken })
 }
 
 /// GPUI key name → libghostty key, and the text it types (for letters and symbols).
@@ -481,6 +500,7 @@ impl TerminalView {
             vt: s.vt,
             pty: s.pty,
             exited: None,
+            close_on_success: s.close_on_success,
             focus: cx.focus_handle(),
             geometry: Rc::new(Cell::new(None)),
             anchor: None,
@@ -508,6 +528,9 @@ impl TerminalView {
             Event::Exit(code) => {
                 self.exited = Some(code);
                 cx.emit(TermChanged);
+                if self.close_on_success && code == Some(0) {
+                    cx.emit(TermFinished);
+                }
             }
         }
         cx.notify();
@@ -985,7 +1008,7 @@ impl Render for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ctx, Vt, ghostty_key, start};
+    use super::{Ctx, Event, Run, Vt, ghostty_key, start};
     use crate::ghostty as g;
 
     fn vt() -> Vt {
@@ -1028,7 +1051,7 @@ mod tests {
     #[test]
     fn runs_a_command() {
         let dir = std::env::temp_dir();
-        let s = start(&dir.to_string_lossy(), Some(("t".into(), "printf FR-%s OK".into()))).unwrap();
+        let s = start(&dir.to_string_lossy(), Some(Run { label: "t".into(), command: "printf FR-%s OK".into(), close_on_success: false })).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let text = s.vt.lock().unwrap().text(false).unwrap_or_default();
@@ -1038,5 +1061,25 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no output: {text:?}");
             let _ = s.rx.recv_blocking();
         }
+    }
+    /// Close on success: a passing command ends the shell with 0; a failing one
+    /// leaves an interactive shell running (no exit).
+    #[test]
+    fn closes_only_on_success() {
+        let run = |command: &str| {
+            let dir = std::env::temp_dir();
+            let s = start(&dir.to_string_lossy(), Some(Run { label: "t".into(), command: command.into(), close_on_success: true })).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match s.rx.try_recv() {
+                    Ok(Event::Exit(code)) => return Some(code),
+                    Ok(_) => {}
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+            None
+        };
+        assert_eq!(run("true; echo done # trailing comment"), Some(Some(0)));
+        assert_eq!(run("false"), None, "a failed command keeps the shell open");
     }
 }

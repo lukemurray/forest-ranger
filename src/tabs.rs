@@ -397,9 +397,9 @@ impl ForestRanger {
 
     /// Open a terminal tab in worktree `wt` (going there first), running
     /// `command` (label, command line) if given.
-    pub(crate) fn open_terminal(&mut self, wt: &str, cwd: &str, command: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
-        let command_label = command.as_ref().map(|c| c.0.clone());
-        let session = match term::start(cwd, command) {
+    pub(crate) fn open_terminal(&mut self, wt: &str, cwd: &str, run: Option<term::Run>, window: &mut Window, cx: &mut Context<Self>) {
+        let command_label = run.as_ref().map(|r| r.label.clone());
+        let session = match term::start(cwd, run) {
             Ok(s) => s,
             Err(e) => return window.push_notification(crate::notify::error(format!("Couldn't start a terminal: {e}")), cx),
         };
@@ -423,7 +423,24 @@ impl ForestRanger {
         // ponytail: kept for the app's life like the file-view subs.
         let sub = cx.subscribe(&view, |_, _, _: &term::TermChanged, cx| cx.notify());
         self.tab_subs.push((view.entity_id(), sub));
+        let done = cx.subscribe(&view, |this, view, _: &term::TermFinished, cx| this.close_term(&view, cx));
+        self.tab_subs.push((view.entity_id(), done));
         view
+    }
+
+    /// Close a terminal's tab, in whichever worktree it's in.
+    fn close_term(&mut self, view: &Entity<term::TerminalView>, cx: &mut Context<Self>) {
+        let found = self.tabs.iter().find_map(|(wt, t)| {
+            let i = t.open.iter().position(|t| matches!(t, Tab::Term(v) if v == view))?;
+            Some((wt.clone(), i))
+        });
+        let Some((wt, i)) = found else { return };
+        // close_tab works on the selected worktree's tabs (and saves them): point it
+        // at this one for the call. The selection itself doesn't change.
+        let shown = self.selected.replace(wt);
+        self.close_tab(i, cx);
+        self.selected = shown;
+        cx.notify();
     }
 
     pub(crate) fn new_chat(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {

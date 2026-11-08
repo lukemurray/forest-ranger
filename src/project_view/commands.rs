@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
@@ -81,7 +82,8 @@ impl ForestRanger {
         let command = cmd.command.clone();
         let wt = self.projects.iter().flat_map(|p| &p.worktrees).find(|w| w.path == root).map(|w| w.id.clone());
         if let Some(wt) = wt.filter(|_| cmd.run_target != "external") {
-            return self.open_terminal(&wt, &cwd, Some((cmd.label.clone(), command)), window, cx);
+            let run = crate::term::Run { label: cmd.label.clone(), command, close_on_success: cmd.close_on_success };
+            return self.open_terminal(&wt, &cwd, Some(run), window, cx);
         }
         let app = cx.global::<Settings>().terminal.clone();
         let work = cx.background_executor().spawn(async move { run_in_terminal(app.as_deref(), &cwd, &command) });
@@ -174,6 +176,7 @@ struct CommandDialog {
     dir: Entity<InputState>,
     /// "external", else a terminal tab ("in-app", or Electron's "default").
     run_target: String,
+    close_on_success: bool,
     error: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -182,7 +185,7 @@ struct CommandDialog {
 pub(crate) fn command_dialog(fr: Entity<ForestRanger>, project_id: String, editing: Option<Command>, window: &mut Window, cx: &mut App) {
     let title = if editing.is_some() { "Edit command" } else { "Add command" };
     let view = cx.new(|cx| {
-        let c = editing.clone().unwrap_or(Command { id: String::new(), label: String::new(), command: String::new(), dir: String::new(), run_target: "in-app".into() });
+        let c = editing.clone().unwrap_or(Command { id: String::new(), label: String::new(), command: String::new(), dir: String::new(), run_target: "in-app".into(), close_on_success: false });
         let label = cx.new(|cx| InputState::new(window, cx).placeholder("Run").default_value(c.label));
         let command = cx.new(|cx| InputState::new(window, cx).placeholder("npm run dev").default_value(c.command));
         let dir = cx.new(|cx| InputState::new(window, cx).placeholder("repo root — e.g. apps/web").default_value(c.dir));
@@ -194,7 +197,7 @@ pub(crate) fn command_dialog(fr: Entity<ForestRanger>, project_id: String, editi
                 _ => {}
             }));
         }
-        CommandDialog { fr: fr.downgrade(), project_id, editing: editing.map(|c| c.id), label, command, dir, run_target: c.run_target, error: None, _subs: subs }
+        CommandDialog { fr: fr.downgrade(), project_id, editing: editing.map(|c| c.id), label, command, dir, run_target: c.run_target, close_on_success: c.close_on_success, error: None, _subs: subs }
     });
     let focus = view.read(cx).label.clone();
     dialogs::show(title, view, Some(focus), window, cx);
@@ -211,10 +214,15 @@ impl CommandDialog {
             return;
         }
         let dir = clean_dir(&self.dir.read(cx).value());
-        let res = match &self.editing {
-            Some(id) => data::update_command(id, &label, &command, &dir, &self.run_target),
-            None => data::add_command(&self.project_id, &label, &command, &dir, &self.run_target),
+        let c = Command {
+            id: self.editing.clone().unwrap_or_default(),
+            label,
+            command,
+            dir,
+            run_target: self.run_target.clone(),
+            close_on_success: self.close_on_success,
         };
+        let res = if self.editing.is_some() { data::update_command(&c) } else { data::add_command(&self.project_id, &c) };
         if let Err(e) = res {
             self.error = Some(e);
             cx.notify();
@@ -254,6 +262,18 @@ impl Render for CommandDialog {
                 div().flex().gap_1().child(target("rt-in-app", "Terminal tab", !external, "in-app")).child(target("rt-external", "External terminal", external, "external")),
                 cx,
             ))
+            // Only a tab can close itself; an external terminal is the terminal app's.
+            .when(!external, |d| {
+                d.child(
+                    Checkbox::new("close-on-success")
+                        .label("Close the tab when the command succeeds (stays open on failure)")
+                        .checked(self.close_on_success)
+                        .on_click(cx.listener(|this, v: &bool, _, cx| {
+                            this.close_on_success = *v;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(dialogs::error_line(self.error.clone(), cx))
             .child(dialogs::actions(
                 Button::new("save-command")

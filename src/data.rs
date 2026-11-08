@@ -248,6 +248,7 @@ fn ensure_schema_at(path: &Path) -> Result<(), String> {
              command    TEXT NOT NULL,
              dir        TEXT NOT NULL DEFAULT '',
              run_target TEXT NOT NULL DEFAULT 'in-app',
+             close_on_success INTEGER NOT NULL DEFAULT 0,
              sort       INTEGER NOT NULL DEFAULT 0,
              created_at INTEGER NOT NULL
          );
@@ -262,6 +263,7 @@ fn ensure_schema_at(path: &Path) -> Result<(), String> {
     let migrations = [
         ("project_commands", "dir", "TEXT NOT NULL DEFAULT ''"),
         ("project_commands", "run_target", "TEXT NOT NULL DEFAULT 'in-app'"),
+        ("project_commands", "close_on_success", "INTEGER NOT NULL DEFAULT 0"),
         ("projects", "worktree_dir", "TEXT"),
         ("projects", "integration", "TEXT"),
         ("worktrees", "name", "TEXT"),
@@ -404,14 +406,16 @@ pub struct RunCommand {
     pub dir: String,
     /// "default" | "in-app" | "external"
     pub run_target: String,
+    /// In a terminal tab: close the tab when the command exits 0.
+    pub close_on_success: bool,
 }
 
 pub fn list_commands(project_id: &str) -> Vec<RunCommand> {
     let Ok(db) = db_rw() else { return vec![] };
-    db.prepare("SELECT id, label, command, dir, run_target FROM project_commands WHERE project_id = ?1 ORDER BY sort, created_at")
+    db.prepare("SELECT id, label, command, dir, run_target, close_on_success FROM project_commands WHERE project_id = ?1 ORDER BY sort, created_at")
         .and_then(|mut s| {
             s.query_map([project_id], |r| {
-                Ok(RunCommand { id: r.get(0)?, label: r.get(1)?, command: r.get(2)?, dir: r.get(3)?, run_target: r.get(4)? })
+                Ok(RunCommand { id: r.get(0)?, label: r.get(1)?, command: r.get(2)?, dir: r.get(3)?, run_target: r.get(4)?, close_on_success: r.get(5)? })
             })?
             .collect()
         })
@@ -419,20 +423,23 @@ pub fn list_commands(project_id: &str) -> Vec<RunCommand> {
 }
 
 /// Appended after the project's last command, like Electron's commandsRepo.insert.
-pub fn add_command(project_id: &str, label: &str, command: &str, dir: &str, run_target: &str) -> Result<(), String> {
+pub fn add_command(project_id: &str, c: &RunCommand) -> Result<(), String> {
     let db = db_rw()?;
     let max: Option<i64> = db.query_row("SELECT MAX(sort) FROM project_commands WHERE project_id = ?1", [project_id], |r| r.get(0)).map_err(|e| e.to_string())?;
     db.execute(
-        "INSERT INTO project_commands (id, project_id, label, command, dir, run_target, sort, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![uuid::Uuid::new_v4().to_string(), project_id, label, command, dir, run_target, max.unwrap_or(-1) + 1, now()],
+        "INSERT INTO project_commands (id, project_id, label, command, dir, run_target, close_on_success, sort, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![uuid::Uuid::new_v4().to_string(), project_id, c.label, c.command, c.dir, c.run_target, c.close_on_success, max.unwrap_or(-1) + 1, now()],
     )
     .map(drop)
     .map_err(|e| e.to_string())
 }
 
-pub fn update_command(id: &str, label: &str, command: &str, dir: &str, run_target: &str) -> Result<(), String> {
+pub fn update_command(c: &RunCommand) -> Result<(), String> {
     db_rw()?
-        .execute("UPDATE project_commands SET label = ?1, command = ?2, dir = ?3, run_target = ?4 WHERE id = ?5", rusqlite::params![label, command, dir, run_target, id])
+        .execute(
+            "UPDATE project_commands SET label = ?1, command = ?2, dir = ?3, run_target = ?4, close_on_success = ?5 WHERE id = ?6",
+            rusqlite::params![c.label, c.command, c.dir, c.run_target, c.close_on_success, c.id],
+        )
         .map(drop)
         .map_err(|e| e.to_string())
 }
