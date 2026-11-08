@@ -5,7 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# --install bumps the patch version first (0.9.1 → 0.9.2); the build updates Cargo.lock.
+# --install bumps the patch version first (0.9.1 → 0.9.2; the build updates Cargo.lock)
+# and commits the bump once installed.
 if [ "${1:-}" = "--install" ]; then
   perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.$2.".($3+1)."\""/me' Cargo.toml
 fi
@@ -77,4 +78,5 @@ if [ "${1:-}" = "--install" ]; then
   cp -R "$APP" /Applications/
   "$LSREGISTER" -f "/Applications/$NAME.app" >/dev/null 2>&1 || true
   echo "Installed /Applications/$NAME.app"
+  git commit -q -m "$VERSION" -- Cargo.toml Cargo.lock && echo "Committed $VERSION"
 fi
