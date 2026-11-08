@@ -86,14 +86,14 @@ const ICONS: &[(&str, &str)] = &[
 pub struct Assets;
 
 impl AssetSource for Assets {
-    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
         match ICONS.iter().find(|(p, _)| *p == path) {
             Some((_, svg)) => Ok(Some(Cow::Borrowed(svg.as_bytes()))),
             None => gpui_kit::assets::Assets.load(path),
         }
     }
 
-    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         gpui_kit::assets::Assets.list(path)
     }
 }
