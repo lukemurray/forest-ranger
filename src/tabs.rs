@@ -92,6 +92,11 @@ impl Render for DraggedDivider {
     }
 }
 
+/// `pos` moved by `step`, wrapping within `len`.
+fn next_index(pos: usize, step: isize, len: usize) -> usize {
+    (pos as isize + step).rem_euclid(len as isize) as usize
+}
+
 /// A git diff tab's key: `diff:<base|working|commit:hash>:<path>`.
 pub(crate) fn diff_key(base: Option<&str>, file: &str) -> String {
     format!("diff:{}:{file}", base.unwrap_or("working"))
@@ -213,6 +218,19 @@ impl ForestRanger {
         // Restoring grabbed focus for each chat's composer; give it back.
         window.focus(&self.focus, cx);
         self.persist_tabs(cx);
+    }
+
+    /// The next (`step` 1) or previous (-1) tab in the focused pane, in the order
+    /// shown, wrapping around.
+    pub(crate) fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+        let Some(tabs) = self.tabs_mut() else { return };
+        let Some(active) = tabs.active.and_then(|i| tabs.open.get(i)).map(|t| t.key(cx)) else { return };
+        let order = tabs.layout.group_of(&active).map(|g| g.tabs.clone()).unwrap_or_else(|| tabs.keys(cx));
+        let Some(pos) = order.iter().position(|k| *k == active) else { return };
+        let next = &order[next_index(pos, step, order.len())];
+        if let Some(i) = tabs.index(next, cx) {
+            self.activate(i, cx);
+        }
     }
 
     /// Focus the tab with `key` if it's open; true if found.
@@ -877,7 +895,15 @@ impl ForestRanger {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_key, parse_diff_key};
+    use super::{diff_key, next_index, parse_diff_key};
+
+    #[test]
+    fn tab_cycling_wraps() {
+        assert_eq!(next_index(0, 1, 3), 1);
+        assert_eq!(next_index(2, 1, 3), 0);
+        assert_eq!(next_index(0, -1, 3), 2);
+        assert_eq!(next_index(0, 1, 1), 0);
+    }
 
     #[test]
     fn diff_keys() {

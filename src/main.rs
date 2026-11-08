@@ -95,7 +95,7 @@ struct ForestRanger {
 
 actions!(
     forest_ranger,
-    [TogglePanel, GoBack, GoForward, ShowReview, ShowFiles, ShowSearch, CloseTab, NewTerminal, Quit, JumpTo, OpenFile, SaveAll, About, Hide, HideOthers, ShowAll, Minimize, Zoom, CloseWindow]
+    [TogglePanel, GoBack, GoForward, NextTab, PrevTab, ShowReview, ShowFiles, ShowSearch, CloseTab, NewTerminal, Quit, JumpTo, OpenFile, SaveAll, About, Hide, HideOthers, ShowAll, Minimize, Zoom, CloseWindow]
 );
 
 /// A chat's status dot: amber pulsing (needs your answer), accent pulsing
@@ -843,6 +843,8 @@ impl Render for ForestRanger {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &JumpTo, window, cx| this.toggle_palette(false, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.toggle_palette(true, window, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, _, cx| this.cycle_tab(-1, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
                 if let Some(i) = this.tabs_mut().and_then(|t| t.active) {
                     this.close_tab(i, cx);
@@ -1010,6 +1012,14 @@ fn main() {
             KeyBinding::new("cmd-k", JumpTo, None),
             KeyBinding::new("cmd-p", OpenFile, None),
             KeyBinding::new("cmd-w", CloseTab, None),
+            // Next / previous tab (Safari, Terminal, VS Code; ⌃Tab as in browsers).
+            // ⌘⇧] arrives as cmd-shift-] or cmd-} depending on the keyboard.
+            KeyBinding::new("cmd-shift-]", NextTab, None),
+            KeyBinding::new("cmd-}", NextTab, None),
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("cmd-shift-[", PrevTab, None),
+            KeyBinding::new("cmd-{", PrevTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
             KeyBinding::new("ctrl-`", NewTerminal, None),
             // In a terminal these go to the shell, not back/forward.
             KeyBinding::new("ctrl--", NoAction, Some("Terminal")),
