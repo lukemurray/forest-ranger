@@ -401,7 +401,7 @@ impl ForestRanger {
         let command_label = command.as_ref().map(|c| c.0.clone());
         let session = match term::start(cwd, command) {
             Ok(s) => s,
-            Err(e) => return window.push_notification(Notification::error(format!("Couldn't start a terminal: {e}")), cx),
+            Err(e) => return window.push_notification(crate::notify::error(format!("Couldn't start a terminal: {e}")), cx),
         };
         let label = command_label;
         let view = self.term_view(session, None, cx);

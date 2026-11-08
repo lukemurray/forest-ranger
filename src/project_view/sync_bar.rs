@@ -1,7 +1,6 @@
 //! The base-branch sync bar (BranchSyncBar.tsx): how the project's base compares
 //! with origin, Fetch / Update, and its latest commits.
 
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -49,11 +48,11 @@ impl ForestRanger {
                 }
                 match res {
                     Ok(()) => {
-                        window.push_notification(Notification::success(format!("Fetched {}", base.unwrap_or_default())), cx);
+                        window.push_notification(crate::notify::success(format!("Fetched {}", base.unwrap_or_default())), cx);
                         this.load_page(cx);
                         this.load_activity(cx);
                     }
-                    Err(e) => window.push_notification(Notification::error(format!("Fetch failed: {e}")), cx),
+                    Err(e) => window.push_notification(crate::notify::error(format!("Fetch failed: {e}")), cx),
                 }
                 cx.notify();
             });

@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -257,12 +256,18 @@ impl ForestRanger {
         let x = theme::extra(cx);
         let Some(p) = self.page_project() else { return div().into_any_element() };
         let fr = cx.entity();
-        let (review_pid, new_pid) = (p.id.clone(), p.id.clone());
-        let (fr1, fr2) = (fr.clone(), fr.clone());
+        let (review_pid, new_pid, clean_pid) = (p.id.clone(), p.id.clone(), p.id.clone());
+        let (fr1, fr2, fr3) = (fr.clone(), fr.clone(), fr.clone());
+        let has_linked = p.worktrees.iter().any(|w| !w.is_primary);
         let head_actions = div()
             .flex()
             .items_center()
             .gap(px(6.))
+            .when(has_linked, |d| {
+                d.child(page_button("cleanup-worktrees", "fr/trash.svg", "Clean up", false, cx).on_click(move |_, window, cx| {
+                    dialogs::cleanup_worktrees(fr3.clone(), clean_pid.clone(), window, cx)
+                }))
+            })
             .child(page_button("review-branch", "fr/sparkle.svg", "Review", false, cx).on_click(move |_, window, cx| {
                 dialogs::review_branch(fr1.clone(), review_pid.clone(), window, cx)
             }))
@@ -599,6 +604,6 @@ pub(super) fn page_button(id: impl Into<ElementId>, path: &'static str, label: i
 /// Open `path` in the chosen app, or toast why not.
 pub(crate) fn open_or_toast(app: Option<String>, path: &str, kind: &str, window: &mut Window, cx: &mut App) {
     if let Err(e) = settings::try_open_in(app.as_deref(), path, kind) {
-        window.push_notification(Notification::error(format!("Couldn't open the {kind}: {e}")), cx);
+        window.push_notification(crate::notify::error(format!("Couldn't open the {kind}: {e}")), cx);
     }
 }

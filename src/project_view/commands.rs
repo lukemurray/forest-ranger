@@ -6,7 +6,6 @@ use std::path::Path;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -88,7 +87,7 @@ impl ForestRanger {
         let work = cx.background_executor().spawn(async move { run_in_terminal(app.as_deref(), &cwd, &command) });
         cx.spawn_in(window, async move |_, cx| {
             if let Err(e) = work.await {
-                let _ = cx.update(|window, cx| window.push_notification(Notification::error(format!("Couldn't run the command: {e}")), cx));
+                let _ = cx.update(|window, cx| window.push_notification(crate::notify::error(format!("Couldn't run the command: {e}")), cx));
             }
         })
         .detach();
@@ -96,7 +95,7 @@ impl ForestRanger {
 
     pub(crate) fn delete_command(&mut self, project_id: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = data::delete_command(id) {
-            window.push_notification(Notification::error(format!("Couldn't delete the command: {e}")), cx);
+            window.push_notification(crate::notify::error(format!("Couldn't delete the command: {e}")), cx);
         }
         self.reload_commands(project_id);
         cx.notify();

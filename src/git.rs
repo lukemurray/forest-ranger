@@ -567,6 +567,33 @@ fn is_worktree_of(repo: &str, path: &str) -> bool {
         && fs::canonicalize(common_dir).ok().is_some_and(|c| fs::canonicalize(common).is_ok_and(|r| r == c))
 }
 
+/// Why removing a worktree loses nothing, or None if it might: no uncommitted or
+/// untracked files, and HEAD's commits are all on `origin/<branch>` or in the base
+/// (local or origin's). A folder already gone has nothing to lose either. Any git
+/// failure counts as "not safe".
+pub fn safe_to_remove(repo: &str, path: &str) -> Option<String> {
+    if !Path::new(path).exists() {
+        return Some("folder already deleted".into());
+    }
+    let status = git(path, &["status", "--porcelain", "--untracked-files=all"]);
+    if !status.ok || !status.stdout.trim().is_empty() {
+        return None;
+    }
+    // Commits on HEAD that `r` lacks; None if `r` doesn't exist or git fails.
+    let ahead_of = |r: &str| {
+        git_line(path, &["rev-parse", "--verify", "--quiet", r])?;
+        let o = git(path, &["rev-list", "--count", &format!("{r}..HEAD")]);
+        if o.ok { o.stdout.trim().parse::<u32>().ok() } else { None }
+    };
+    if let Some(b) = git_line(path, &["symbolic-ref", "--short", "-q", "HEAD"])
+        && ahead_of(&format!("origin/{b}")) == Some(0)
+    {
+        return Some("pushed to origin".into());
+    }
+    let base = resolve_base(repo, None)?;
+    [base.clone(), format!("origin/{base}")].iter().any(|r| ahead_of(r) == Some(0)).then(|| format!("merged into {base}"))
+}
+
 pub struct WorktreeStatus {
     pub branch: Option<String>,
     pub uncommitted: u32,
@@ -595,6 +622,16 @@ pub fn worktree_status(repo: &str, path: &str) -> WorktreeStatus {
 
 pub fn delete_branch(repo: &str, name: &str, force: bool) -> Result<(), String> {
     run(repo, &["branch", if force { "-D" } else { "-d" }, name], "delete failed")
+}
+
+/// Delete a local branch that cleanup found merged. Contained in `base` (checked
+/// here, by full ref — a tag can share the name): `-D`. Plain `-d` would judge by
+/// the branch's upstream instead, and refuse a merged branch whose remote moved on.
+/// Not contained: `-d`, git's own check (e.g. fully pushed to its upstream).
+pub fn delete_merged_branch(repo: &str, name: &str, base: Option<&str>) -> Result<(), String> {
+    check_branch(name)?;
+    let merged = base.is_some_and(|b| git(repo, &["merge-base", "--is-ancestor", &format!("refs/heads/{name}"), b]).ok);
+    delete_branch(repo, name, merged)
 }
 
 pub fn rename_branch(repo: &str, from: &str, to: &str) -> Result<(), String> {
@@ -859,6 +896,16 @@ mod tests {
         assert!(worktree_remove(&p, &wt, false).is_err());
         worktree_remove(&p, &wt, true).unwrap();
         assert!(!Path::new(&wt).exists());
+        // Cleanup safety: fresh off main is safe; a change or an unshared commit isn't.
+        worktree_add(&p, &wt, "tidy", Some("main")).unwrap();
+        assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("merged into main"));
+        fs::write(Path::new(&wt).join("n.txt"), "n").unwrap();
+        assert_eq!(safe_to_remove(&p, &wt), None);
+        assert!(git(&wt, &["add", "-A"]).ok && git(&wt, &["commit", "-qm", "n"]).ok);
+        assert_eq!(safe_to_remove(&p, &wt), None);
+        worktree_remove(&p, &wt, true).unwrap();
+        assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("folder already deleted"));
+        delete_branch(&p, "tidy", true).unwrap();
         // Folder deleted outside the app: a plain remove just prunes it.
         worktree_add(&p, &wt, "gone", Some("main")).unwrap();
         fs::remove_dir_all(&wt).unwrap();
@@ -866,6 +913,17 @@ mod tests {
         assert!(list_worktrees(&p).iter().all(|w| w.path != wt));
         delete_branch(&p, "gone", true).unwrap();
         assert!(rename_branch(&p, "side", "-f").is_err());
+        // Merged into main, but its upstream has moved on: -d refuses, cleanup deletes.
+        sh(&["branch", "merged", "main"]);
+        sh(&["remote", "add", "origin", &p]);
+        let unrelated = git(&p, &["commit-tree", "HEAD^{tree}", "-m", "rewritten"]).stdout.trim().to_string();
+        sh(&["update-ref", "refs/remotes/origin/merged", &unrelated]);
+        sh(&["config", "branch.merged.remote", "origin"]);
+        sh(&["config", "branch.merged.merge", "refs/heads/merged"]);
+        assert!(delete_branch(&p, "merged", false).is_err(), "-d judges by the upstream");
+        delete_merged_branch(&p, "merged", Some("main")).unwrap();
+        assert!(delete_merged_branch(&p, "feat", Some("main")).is_err(), "feat has commits main lacks");
+        sh(&["remote", "remove", "origin"]);
         rename_branch(&p, "side", "side2").unwrap();
         delete_branch(&p, "side2", false).unwrap();
         assert_eq!(list_branches(&p), vec!["feat", "main"]);

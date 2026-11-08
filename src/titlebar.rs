@@ -203,7 +203,7 @@ impl ForestRanger {
                                 Some(app) => format!("Couldn't open in {}: {e}", settings::app_label(app)),
                                 None => format!("{e} — install one (e.g. VS Code)."),
                             };
-                            window.push_notification(Notification::error(msg), cx);
+                            window.push_notification(crate::notify::error(msg), cx);
                         }
                     }
                 }))

@@ -5,7 +5,6 @@ use std::collections::HashSet;
 
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -104,7 +103,7 @@ impl ForestRanger {
                         this.reload(cx);
                         this.select(id, cx);
                     }
-                    Err(e) => window.push_notification(Notification::error(format!("Couldn't create worktree: {e}")), cx),
+                    Err(e) => window.push_notification(crate::notify::error(format!("Couldn't create worktree: {e}")), cx),
                 }
             });
         })
@@ -126,7 +125,7 @@ impl ForestRanger {
                 match res {
                     Ok(()) => this.load_page(cx),
                     Err(e) if !force && is_unmerged(&e) => this.confirm_force_delete(name, window, cx),
-                    Err(e) => window.push_notification(Notification::error(format!("Couldn't delete branch: {e}")), cx),
+                    Err(e) => window.push_notification(crate::notify::error(format!("Couldn't delete branch: {e}")), cx),
                 }
             });
         })
@@ -152,14 +151,15 @@ impl ForestRanger {
     }
 
     fn confirm_cleanup(&mut self, names: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let base = self.branches_state().and_then(|s| s.base.clone()).unwrap_or_else(|| "the base branch".into());
+        let base_ref = self.branches_state().and_then(|s| s.base.clone());
+        let base = base_ref.clone().unwrap_or_else(|| "the base branch".into());
         let Some((_, repo)) = self.page_repo() else { return };
         let fr = cx.entity();
         let n = names.len();
         // The list of what goes, behind a disclosure (there can be hundreds).
         let shown = std::rc::Rc::new(std::cell::Cell::new(false));
         window.open_alert_dialog(cx, move |alert, _, cx| {
-            let (fr, names, repo) = (fr.clone(), names.clone(), repo.clone());
+            let (fr, names, repo, base_ref) = (fr.clone(), names.clone(), repo.clone(), base_ref.clone());
             let (muted, mono, open) = (cx.theme().colors.muted_foreground, cx.theme().mono_font_family.clone(), shown.get());
             let toggle = shown.clone();
             let list = div()
@@ -196,16 +196,23 @@ impl ForestRanger {
                 .ok_variant(ButtonVariant::Danger)
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
-                    let (names, repo) = (names.clone(), repo.clone());
-                    // Sequential: `git branch -d` is fast and avoids index-lock contention.
-                    let work = cx.background_executor().spawn(async move { names.iter().filter(|b| git::delete_branch(&repo, b, false).is_ok()).count() });
+                    let (names, repo, base) = (names.clone(), repo.clone(), base_ref.clone());
+                    // Sequential: deleting is fast and avoids ref-lock contention.
+                    let work = cx.background_executor().spawn(async move {
+                        let errors: Vec<String> = names.iter().filter_map(|b| git::delete_merged_branch(&repo, b, base.as_deref()).err()).collect();
+                        (n - errors.len(), errors.into_iter().next())
+                    });
                     fr.update(cx, |_, cx| {
                         cx.spawn_in(window, async move |this, cx| {
-                            let deleted = work.await;
+                            let (deleted, first_err) = work.await;
                             let _ = this.update_in(cx, |this, window, cx| {
                                 this.load_page(cx);
-                                let skipped = if deleted < n { format!(", {} skipped", n - deleted) } else { String::new() };
-                                window.push_notification(Notification::success(format!("Deleted {deleted} merged branch{}{skipped}", plural(deleted))), cx);
+                                let msg = format!("Deleted {deleted} merged branch{}", plural(deleted));
+                                window.push_notification(match first_err {
+                                    // Say why, so a skip isn't a mystery.
+                                    Some(e) => crate::notify::error(format!("{msg}, {} skipped: {}", n - deleted, e.lines().next().unwrap_or_default())),
+                                    None => crate::notify::success(msg),
+                                }, cx);
                             });
                         })
                         .detach();

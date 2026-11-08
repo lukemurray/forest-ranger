@@ -4,6 +4,37 @@
 
 use std::sync::OnceLock;
 
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::*;
+use gpui_kit::*;
+
+/// In-app toasts. gpui-kit's own pins its icon 18px from the top, which sits low
+/// next to our text; here the icon and message share one centred row.
+fn toast(kind: u8, msg: impl Into<SharedString>) -> Notification {
+    let msg = msg.into();
+    Notification::new().content(move |_, _, cx| {
+        let t = cx.theme();
+        let (icon, color) = match kind {
+            0 => (IconName::CircleCheck, t.success),
+            1 => (IconName::CircleX, t.danger),
+            _ => (IconName::Info, t.info),
+        };
+        h_flex().items_center().gap_2().child(Icon::new(icon).text_color(color)).child(div().text_sm().child(msg.clone())).into_any_element()
+    })
+}
+
+pub fn success(msg: impl Into<SharedString>) -> Notification {
+    toast(0, msg)
+}
+
+pub fn error(msg: impl Into<SharedString>) -> Notification {
+    toast(1, msg)
+}
+
+pub fn info(msg: impl Into<SharedString>) -> Notification {
+    toast(2, msg)
+}
+
 type Target = (String, String);
 
 fn channel() -> &'static (async_channel::Sender<Target>, async_channel::Receiver<Target>) {

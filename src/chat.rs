@@ -18,7 +18,6 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::*;
@@ -887,7 +886,7 @@ impl ChatView {
                 self.steers.insert(tag, out);
             }
             _ => {
-                window.push_notification(Notification::info("This agent can't take messages mid-turn — stopped it and sent yours instead."), cx);
+                window.push_notification(crate::notify::info("This agent can't take messages mid-turn — stopped it and sent yours instead."), cx);
                 self.queue.insert(0, out);
                 self.cancel_turn(cx);
             }

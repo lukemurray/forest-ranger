@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::settings::{self, Settings};
+use crate::chat::Attention;
 use crate::{ForestRanger, data, git, theme};
 
 /// Open `view` as a dialog, focusing `focus` once on open.
@@ -378,6 +379,210 @@ impl Render for RemoveWorktree {
                     .danger()
                     .label(if self.busy { "Removing…" } else { "Remove worktree" })
                     .disabled(blocked || self.busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))),
+            ))
+    }
+}
+
+// --- Clean up worktrees -------------------------------------------------------
+
+/// A worktree the cleanup can remove without losing anything.
+struct Removable {
+    path: String,
+    label: String,
+    branch: Option<String>,
+    /// Why it's safe ("pushed to origin", "merged into main", …) and when last used.
+    note: String,
+    checked: bool,
+}
+
+struct CleanupWorktrees {
+    fr: WeakEntity<ForestRanger>,
+    project_id: String,
+    repo: String,
+    /// None while checking.
+    rows: Option<Vec<Removable>>,
+    /// Worktrees looked at but kept (changes, unshared commits, locked, a running chat).
+    kept: usize,
+    delete_branches: bool,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// Remove the project's worktrees that have nothing to lose (see `git::safe_to_remove`):
+/// listed with checkboxes, all ticked.
+pub fn cleanup_worktrees(fr: Entity<ForestRanger>, project_id: String, window: &mut Window, cx: &mut App) {
+    // Deferred: reads ForestRanger, and the caller may be its own click handler.
+    window.defer(cx, move |window, cx| cleanup_worktrees_now(fr, project_id, window, cx));
+}
+
+fn cleanup_worktrees_now(fr: Entity<ForestRanger>, project_id: String, window: &mut Window, cx: &mut App) {
+    let f = fr.read(cx);
+    let Some(p) = project_of(f, &project_id) else { return };
+    let repo = p.path.clone();
+    // A chat working or waiting for you there: leave it alone.
+    let busy = |id: &str| matches!(f.worktree_attention(id, cx), Attention::Working | Attention::NeedsAnswer);
+    let linked: Vec<_> = p.worktrees.iter().filter(|w| !w.is_primary).collect();
+    let candidates: Vec<_> =
+        linked.iter().filter(|w| !busy(&w.id)).map(|w| (w.path.clone(), w.label().0, w.branch.clone(), w.activity)).collect();
+    let total = linked.len();
+    let view = cx.new(|cx: &mut Context<CleanupWorktrees>| {
+        let r = repo.clone();
+        let work = cx.background_executor().spawn(async move {
+            let locked: Vec<String> = git::list_worktrees(&r).into_iter().filter(|e| e.locked).map(|e| e.path).collect();
+            candidates
+                .into_iter()
+                .filter(|c| !locked.contains(&c.0))
+                .filter_map(|(path, label, branch, activity)| {
+                    let why = git::safe_to_remove(&r, &path)?;
+                    let note = if activity > 0 { format!("{why} · {}", data::relative_time(activity)) } else { why };
+                    Some(Removable { path, label, branch, note, checked: true })
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let rows = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.kept = total.saturating_sub(rows.len());
+                this.rows = Some(rows);
+                cx.notify();
+            });
+        })
+        .detach();
+        CleanupWorktrees { fr: fr.downgrade(), project_id, repo, rows: None, kept: 0, delete_branches: false, busy: false, error: None }
+    });
+    show("Clean up worktrees", view, None, window, cx);
+}
+
+impl CleanupWorktrees {
+    fn chosen(&self) -> Vec<&Removable> {
+        self.rows.iter().flatten().filter(|r| r.checked).collect()
+    }
+
+    fn remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen: Vec<(String, Option<String>)> = self.chosen().into_iter().map(|r| (r.path.clone(), r.branch.clone())).collect();
+        if self.busy || chosen.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        let (pid, repo, delete_branches) = (self.project_id.clone(), self.repo.clone(), self.delete_branches);
+        let work = cx.background_executor().spawn(async move {
+            let base = git::resolve_base(&repo, None);
+            let mut removed = 0;
+            for (path, branch) in &chosen {
+                // Never forced: if anything changed since the check, git refuses and it stays.
+                if git::worktree_remove(&repo, path, false).is_err() {
+                    continue;
+                }
+                removed += 1;
+                // Only if merged into the base or fully pushed, and never the base itself.
+                if let Some(b) = branch.as_ref().filter(|b| delete_branches && Some(*b) != base.as_ref()) {
+                    let _ = git::delete_merged_branch(&repo, b, base.as_deref());
+                }
+            }
+            data::sync_worktrees(&pid, &repo).map(|()| (removed, chosen.len() - removed))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let res = work.await;
+            let _ = this.update_in(cx, |this, window, cx| match res {
+                Err(e) => {
+                    this.busy = false;
+                    this.error = Some(e);
+                    cx.notify();
+                }
+                Ok((removed, failed)) => {
+                    window.close_dialog(cx);
+                    if let Some(fr) = this.fr.upgrade() {
+                        fr.update(cx, |fr, cx| fr.reload(cx));
+                    }
+                    let failed = if failed > 0 { format!(", {failed} kept (changed since the check)") } else { String::new() };
+                    window.push_notification(crate::notify::success(format!("Removed {removed} worktree{}{failed}", if removed == 1 { "" } else { "s" })), cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+impl Render for CleanupWorktrees {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let x = theme::extra(cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let n = self.chosen().len();
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let body = match &self.rows {
+            None => div().text_size(px(12.5)).text_color(x.faint).child("Checking worktrees…").into_any_element(),
+            Some(rows) if rows.is_empty() => {
+                div().text_size(px(12.5)).text_color(x.faint).child("Nothing to clean up — every worktree has changes or commits that aren't anywhere else.").into_any_element()
+            }
+            Some(rows) => div()
+                .id("cleanup-rows")
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .max_h(px(320.))
+                .overflow_y_scroll()
+                .children(rows.iter().enumerate().map(|(i, r)| {
+                    let title = match &r.branch {
+                        Some(b) if *b != r.label => format!("{}  ({b})", r.label),
+                        _ => r.label.clone(),
+                    };
+                    // The whole row toggles; the checkbox is just its indicator (no handler
+                    // of its own, so a click on it isn't counted twice).
+                    div()
+                        .id(("cleanup-row", i))
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(r) = this.rows.as_mut().and_then(|rs| rs.get_mut(i)) {
+                                r.checked = !r.checked;
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Checkbox::new(("cleanup", i)).checked(r.checked))
+                                .child(div().min_w_0().font_family(mono.clone()).text_size(px(13.)).truncate().child(title)),
+                        )
+                        // Indented under the name: checkbox (16px) + gap (8px).
+                        .child(div().pl(px(24.)).text_size(px(12.)).text_color(x.faint).truncate().child(format!("{} · {}", r.note, data::tilde_path(&r.path))))
+                }))
+                .into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_size(px(12.5)).text_color(cx.theme().colors.muted_foreground).child(
+                "Worktrees with no uncommitted files and whose commits are all on origin or in the base branch. Removing one deletes its folder (ignored files like .env or node_modules included).",
+            ))
+            .child(body)
+            .when(self.kept > 0, |d| {
+                d.child(div().text_size(px(12.)).text_color(x.faint).child(format!(
+                    "{} other worktree{} kept: uncommitted or unshared work, locked, or a chat running.",
+                    self.kept,
+                    plural(self.kept)
+                )))
+            })
+            .when(self.rows.as_ref().is_some_and(|r| !r.is_empty()), |d| {
+                d.child(Checkbox::new("cleanup-branches").label("Also delete their local branches (safe delete; the base branch is kept)").checked(self.delete_branches).on_click(cx.listener(|this, v: &bool, _, cx| {
+                    this.delete_branches = *v;
+                    cx.notify();
+                })))
+            })
+            .child(error_line(self.error.clone(), cx))
+            .child(actions(
+                Button::new("cleanup-remove")
+                    .danger()
+                    .label(if self.busy { "Removing…".to_string() } else { format!("Remove {n} worktree{}", plural(n)) })
+                    .disabled(n == 0 || self.busy)
                     .on_click(cx.listener(|this, _, window, cx| this.remove(window, cx))),
             ))
     }
