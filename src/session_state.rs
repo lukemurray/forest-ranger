@@ -57,6 +57,10 @@ pub struct SessionState {
     pub panel_width: f32,
     /// What a worktree not visited yet starts with: the last panel state used.
     pub last_panel: Panel,
+    /// The sidebar's expanded projects, and where you were (a worktree id or
+    /// `project:<id>`), restored on the next launch.
+    pub expanded: Vec<String>,
+    pub location: Option<String>,
     /// Diff tabs' last-used toggles; new diff tabs open the same way.
     pub diff_unified: bool,
     pub diff_full: bool,
@@ -120,6 +124,8 @@ impl SessionState {
             sidebar_width: clamp(v["sidebarWidth"].as_f64(), SIDEBAR_WIDTH),
             panel_width: clamp(v["panelWidth"].as_f64(), PANEL_WIDTH),
             last_panel: panel_of(&v["lastPanel"]).unwrap_or_default(),
+            expanded: strings(&v["expanded"]),
+            location: v["location"].as_str().map(str::to_string),
             diff_unified: v["diffUnified"].as_bool().unwrap_or(false),
             diff_full: v["diffFull"].as_bool().unwrap_or(false),
             save_pending: false,
@@ -149,6 +155,8 @@ impl SessionState {
             "sidebarWidth": self.sidebar_width.round(),
             "panelWidth": self.panel_width.round(),
             "lastPanel": panel_json(&self.last_panel),
+            "expanded": self.expanded,
+            "location": self.location,
             "diffUnified": self.diff_unified,
             "diffFull": self.diff_full,
         })
@@ -270,8 +278,10 @@ mod tests {
         let mut s = SessionState::from_json(&json!(null));
         assert!(!s.diff_unified && !s.diff_full);
         (s.diff_unified, s.diff_full) = (true, true);
+        (s.expanded, s.location) = (vec!["p1".into()], Some("project:p1".into()));
         let back = SessionState::from_json(&s.to_json());
         assert!(back.diff_unified && back.diff_full);
+        assert_eq!((back.expanded, back.location.as_deref()), (vec!["p1".to_string()], Some("project:p1")));
     }
 
     #[test]

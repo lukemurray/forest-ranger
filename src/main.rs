@@ -183,7 +183,7 @@ impl ForestRanger {
             }
         })
         .detach();
-        let this = Self {
+        let mut this = Self {
             projects,
             error,
             selected: None,
@@ -218,6 +218,7 @@ impl ForestRanger {
         };
         this.load_activity(cx);
         this.sync_all(cx);
+        this.restore_place(cx);
         dev::bench(window, cx);
         this
     }
@@ -364,6 +365,34 @@ impl ForestRanger {
     }
 
     /// Where you are, as a history entry.
+    /// Reopen the sidebar as it was last run: expanded projects, and the worktree or
+    /// project page you were on — skipping any that have gone since.
+    fn restore_place(&mut self, cx: &mut Context<Self>) {
+        let s = SessionState::get(cx);
+        let (expanded, location) = (s.expanded.clone(), s.location.clone());
+        let project = |id: &str| self.projects.iter().any(|p| p.id == id);
+        self.expanded = expanded.into_iter().filter(|id| project(id)).collect();
+        let live = location.filter(|loc| match loc.strip_prefix("project:") {
+            Some(pid) => project(pid),
+            None => self.projects.iter().flat_map(|p| &p.worktrees).any(|w| w.id == *loc),
+        });
+        if let Some(loc) = live {
+            self.goto(loc, cx);
+        }
+    }
+
+    /// Save the sidebar's expanded projects and location when they change. Called from
+    /// render, which every change goes through; a no-op when nothing moved.
+    fn save_place(&self, cx: &mut Context<Self>) {
+        let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
+        expanded.sort();
+        let location = self.location();
+        let s = SessionState::get(cx);
+        if s.expanded != expanded || s.location != location {
+            SessionState::update(cx, |s| (s.expanded, s.location) = (expanded, location));
+        }
+    }
+
     fn location(&self) -> Option<String> {
         self.selected.clone().or_else(|| self.project_view.as_ref().map(|v| format!("project:{}", v.id)))
     }
@@ -774,6 +803,7 @@ impl ForestRanger {
 
 impl Render for ForestRanger {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.save_place(cx);
         let pulsing = self.chats().any(|(_, c)| matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer));
         self.ticker.keep(pulsing, cx);
         // Nothing focused (e.g. the focused tab was closed): take focus back so the
