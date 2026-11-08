@@ -1681,7 +1681,10 @@ impl ForestRanger {
             let target = (wt.to_string(), format!("chat:{}", c.session_id()));
             let label = c.title();
             match now {
-                Attention::NeedsAnswer => notify::post("Permission needed", &format!("{label} is waiting for your answer."), target),
+                Attention::NeedsAnswer => {
+                    let title = if c.open_asks().0 > 0 { "Permission needed" } else { "Input needed" };
+                    notify::post(title, &format!("{label} is waiting for your answer."), target)
+                }
                 Attention::Unread => notify::post("Chat finished", &format!("{label} finished its turn."), target),
                 _ => {}
             }
@@ -1697,10 +1700,9 @@ impl ForestRanger {
         }))
     }
 
-    /// Dock badge: chats waiting on an answer.
-    // ponytail: counts chats, not requests; a chat with two open prompts counts once.
+    /// Dock badge: open permission prompts and elicitation forms across chats.
     fn update_badge(&self, cx: &App) {
-        notify::set_badge(self.chats().filter(|(_, c)| c.read(cx).attention() == Attention::NeedsAnswer).count());
+        notify::set_badge(self.chats().map(|(_, c)| { let (p, e) = c.read(cx).open_asks(); p + e }).sum());
     }
 
     /// The most urgent attention across a worktree's open chats.

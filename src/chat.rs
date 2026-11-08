@@ -181,10 +181,16 @@ impl Rows {
         Change::Appended
     }
 
-    /// A permission prompt or elicitation is waiting on you.
+    /// Open (permission prompts, elicitation forms) waiting on you.
+    fn open_asks(&self) -> (usize, usize) {
+        (
+            self.perms.values().filter(|&&ix| matches!(self.rows.get(ix), Some(Row::Permission { answer: None, .. }))).count(),
+            self.elicits.values().filter(|&&ix| matches!(self.rows.get(ix), Some(Row::Elicitation(e)) if !e.done)).count(),
+        )
+    }
+
     fn pending_ask(&self) -> bool {
-        self.perms.values().any(|&ix| matches!(self.rows.get(ix), Some(Row::Permission { answer: None, .. })))
-            || self.elicits.values().any(|&ix| matches!(self.rows.get(ix), Some(Row::Elicitation(e)) if !e.done))
+        self.open_asks() != (0, 0)
     }
 }
 
@@ -480,6 +486,11 @@ impl ChatView {
         self.log.write_meta();
         cx.emit(ChatEvent::TitleChanged);
         cx.notify();
+    }
+
+    /// Open (permission prompts, elicitation forms); none without a running agent.
+    pub fn open_asks(&self) -> (usize, usize) {
+        if self.agent.is_some() { self.rows.open_asks() } else { (0, 0) }
     }
 
     pub fn attention(&self) -> Attention {
