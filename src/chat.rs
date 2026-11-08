@@ -544,6 +544,14 @@ impl ChatView {
         }
     }
 
+    /// `FR_BENCH`: look like a running turn (activity, pulsing dots) with no agent.
+    pub(crate) fn bench_working(&mut self, cx: &mut Context<Self>) {
+        self.status = Status::Working;
+        self.start_activity(cx);
+        self.sync_attention(cx);
+        cx.notify();
+    }
+
     fn sync_attention(&mut self, cx: &mut Context<Self>) {
         let now = self.attention();
         if now != self.attention {

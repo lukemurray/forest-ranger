@@ -108,3 +108,45 @@ pub(crate) fn smoke_close(cx: &mut App) {
     })
     .detach();
 }
+
+/// `FR_BENCH=1` (or `=idle`: same scene, not working): open the most recently used worktree that has a saved chat tab and
+/// make that chat look like it's working (no agent runs) — a repeatable scene for
+/// measuring CPU and memory while a chat works.
+pub(crate) fn bench(window: &mut Window, cx: &mut Context<ForestRanger>) {
+    if std::env::var_os("FR_BENCH").is_none() {
+        return;
+    }
+    cx.spawn_in(window, async move |this, cx| {
+        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+        let _ = this.update(cx, |fr, cx| {
+            let saved = &SessionState::get(cx).worktrees;
+            let wt = fr
+                .projects
+                .iter()
+                .flat_map(|p| &p.worktrees)
+                .filter(|w| saved.get(&w.id).is_some_and(|s| s.tabs.iter().any(|k| k.starts_with("chat:"))))
+                .max_by_key(|w| w.activity)
+                .map(|w| w.id.clone());
+            if let Some(wt) = wt {
+                fr.select(wt, cx);
+            }
+        });
+        // Saved tabs reopen on the next render.
+        cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+        let _ = this.update(cx, |fr, cx| {
+            let chat = fr.tabs.get(fr.selected.as_deref().unwrap_or_default()).and_then(|t| {
+                t.open.iter().find_map(|t| match t {
+                    Tab::Chat(c) => Some(c.clone()),
+                    _ => None,
+                })
+            });
+            let idle = std::env::var("FR_BENCH").is_ok_and(|v| v == "idle");
+            match chat {
+                Some(_) if idle => {}
+                Some(c) => c.update(cx, |c, cx| c.bench_working(cx)),
+                None => eprintln!("FR_BENCH: no chat tab to mark working"),
+            }
+        });
+    })
+    .detach();
+}

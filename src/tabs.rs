@@ -107,6 +107,11 @@ pub(crate) fn parse_diff_key(key: &str) -> Option<(Option<String>, String)> {
     Some(((base != "working").then_some(base), file.to_string()))
 }
 
+/// A cached view's box (it's sized from this, not its contents): fill the pane.
+pub(crate) fn fill() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
 impl ForestRanger {
     /// An empty diff view in the last-used layout (split / unified).
     pub(crate) fn new_diff_state(cx: &mut Context<Self>) -> Entity<DiffState> {
@@ -752,7 +757,9 @@ impl ForestRanger {
         let theme = cx.theme().colors;
         let x = theme::extra(cx);
         match shown.and_then(|i| tabs.open.get(i)) {
-            Some(Tab::Chat(chat)) => chat.clone().into_any_element(),
+            // Cached: the view reuses its last frame unless it notified itself, so a
+            // pulsing dot or the sidebar re-rendering doesn't re-render the chat.
+            Some(Tab::Chat(chat)) => chat.clone().cached(fill()).into_any_element(),
             Some(Tab::Diff { state, full, fixed, .. }) => {
                 let i = shown.unwrap_or(0);
                 let split = state.read(cx).mode() == DiffMode::Split;
@@ -800,8 +807,8 @@ impl ForestRanger {
                     .child(div().flex_1().min_h_0().child(Diff::new(state).size_full()))
                     .into_any_element()
             }
-            Some(Tab::File(f)) => f.clone().into_any_element(),
-            Some(Tab::Term(t)) => t.clone().into_any_element(),
+            Some(Tab::File(f)) => f.clone().cached(fill()).into_any_element(),
+            Some(Tab::Term(t)) => t.clone().cached(fill()).into_any_element(),
             None => div().size_full().into_any_element(),
         }
     }

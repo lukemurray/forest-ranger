@@ -216,6 +216,7 @@ impl ForestRanger {
         };
         this.load_activity(cx);
         this.sync_all(cx);
+        dev::bench(window, cx);
         this
     }
 
@@ -858,7 +859,7 @@ impl Render for ForestRanger {
                                                 .size_range(px(session_state::PANEL_WIDTH.0)..px(session_state::PANEL_WIDTH.2))
                                                 .flex_none()
                                                 .visible(review.is_some())
-                                                .children(review.map(|r| r.into_any_element())),
+                                                .children(review.map(|r| r.cached(tabs::fill()).into_any_element())),
                                         ),
                                 ),
                             ),
@@ -890,13 +891,18 @@ impl Render for ForestRanger {
 
 
 /// Use Forest Ranger's icon in the Dock (assets/icon.png) — an unbundled
-/// `cargo run` binary otherwise shows a generic one.
+/// `cargo run` binary otherwise shows a generic one. Not in the .app: it has
+/// icon.icns, and AppKit keeps a 32 MB rendering of an icon set this way.
 #[cfg(target_os = "macos")]
 fn set_dock_icon() {
     use objc2::{AllocAnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
     static ICON: &[u8] = include_bytes!("../assets/icon.png");
+    let bundled = std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
+    if bundled {
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else { return };
     let data = NSData::with_bytes(ICON);
     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
