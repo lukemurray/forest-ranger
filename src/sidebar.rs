@@ -30,8 +30,8 @@ fn resume_dot(color: Hsla) -> Div {
 }
 
 /// The row's status: the most urgent chat's dot, else a hollow one if a chat is here.
-fn row_dot(attention: crate::chat::Attention, here: bool, id: SharedString, cx: &App) -> Option<AnyElement> {
-    crate::status_dot(attention, id, cx).or_else(|| here.then(|| resume_dot(cx.theme().colors.muted_foreground).into_any_element()))
+fn row_dot(attention: crate::chat::Attention, here: bool, cx: &App) -> Option<AnyElement> {
+    crate::status_dot(attention, cx).or_else(|| here.then(|| resume_dot(cx.theme().colors.muted_foreground).into_any_element()))
 }
 
 impl ForestRanger {
@@ -146,7 +146,6 @@ impl ForestRanger {
         let dot = row_dot(
             self.project_attention(p, cx),
             p.worktrees.iter().any(|w| self.chat_here(&w.id, cx)),
-            SharedString::from(format!("pdot-{}", p.id)),
             cx,
         );
         let pid = p.id.clone();
@@ -324,7 +323,7 @@ impl ForestRanger {
                     .gap_2()
                     .flex_shrink_0()
                     .child(div().text_size(px(11.)).text_color(x.faint).child(data::relative_time(w.activity)))
-                    .children(row_dot(self.worktree_attention(&w.id, cx), self.chat_here(&w.id, cx), SharedString::from(format!("wdot-{}", w.id)), cx)),
+                    .children(row_dot(self.worktree_attention(&w.id, cx), self.chat_here(&w.id, cx), cx)),
             )
             .tooltip(tip(match &note {
                 Some(n) => format!("{label} ({n})\n{}\nDouble-click to set a label", w.path),

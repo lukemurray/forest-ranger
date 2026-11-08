@@ -2,6 +2,7 @@
 //! built on GPUI Kit. The window shell: sidebar, titlebar, tabs, panels, palettes.
 
 mod acp;
+mod anim;
 mod assets;
 mod chat;
 mod codehost;
@@ -82,6 +83,8 @@ struct ForestRanger {
     renaming: Option<(String, Entity<InputState>, Subscription)>,
     /// While a tab drags over a pane body: (group id, where it would land).
     drop_hint: Option<(String, panes::Drop)>,
+    /// Redraws for the pulsing status dots, while a chat is working or waiting.
+    ticker: anim::Ticker,
     /// Subscriptions to tabs' and panels' entities, pruned when those go.
     tab_subs: Vec<(EntityId, Subscription)>,
     /// The running load per diff tab (keyed by its DiffState).
@@ -97,12 +100,10 @@ actions!(
 
 /// A chat's status dot: amber pulsing (needs your answer), accent pulsing
 /// (working), accent bullseye (unread). None when idle.
-pub(crate) fn status_dot(a: Attention, id: impl Into<ElementId>, cx: &App) -> Option<AnyElement> {
+/// The pulses run on the root view's `anim::Ticker` (see `render`).
+pub(crate) fn status_dot(a: Attention, cx: &App) -> Option<AnyElement> {
     let (accent, amber) = (cx.theme().colors.primary, theme::extra(cx).amber);
-    let pulse = |d: Div, ms: u64| {
-        d.with_animation(id.into(), Animation::new(std::time::Duration::from_millis(ms)).repeat().with_easing(pulsating_between(0.45, 1.)), |d, a| d.opacity(a))
-            .into_any_element()
-    };
+    let pulse = |d: Div, ms: u64| d.opacity(anim::pulse(ms, 0.45, 1.)).into_any_element();
     let dot = || div().size(px(8.)).flex_shrink_0().rounded_full();
     Some(match a {
         Attention::NeedsAnswer => pulse(dot().bg(amber), 1200),
@@ -209,6 +210,7 @@ impl ForestRanger {
             attention: HashMap::new(),
             renaming: None,
             drop_hint: None,
+            ticker: Default::default(),
             tab_subs: vec![],
             diff_loads: HashMap::new(),
             _load_chats: Task::ready(()),
@@ -772,6 +774,8 @@ impl ForestRanger {
 
 impl Render for ForestRanger {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pulsing = self.chats().any(|(_, c)| matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer));
+        self.ticker.keep(pulsing, cx);
         // Nothing focused (e.g. the focused tab was closed): take focus back so the
         // window's shortcuts keep working.
         if let Some(id) = self.selected.clone() {

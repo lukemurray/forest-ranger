@@ -622,7 +622,7 @@ impl ForestRanger {
                 let active = shown == Some(i);
                 let preview = tabs.preview.as_ref() == Some(key);
                 let lead: AnyElement = match tab {
-                    Tab::Chat(c) => status_dot(c.read(cx).attention(), ("tab-dot", i), cx)
+                    Tab::Chat(c) => status_dot(c.read(cx).attention(), cx)
                         .unwrap_or_else(|| sidebar::icon("fr/sparkle.svg", 12., theme.primary).into_any_element()),
                     Tab::Diff { .. } => sidebar::icon("fr/git-branch.svg", 12., x.amber).into_any_element(),
                     Tab::File(_) => sidebar::icon("fr/folder.svg", 12., theme.muted_foreground).into_any_element(),

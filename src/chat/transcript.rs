@@ -2,7 +2,7 @@
 //! folded into list items, turns with time dividers and a pinned question, and
 //! the activity / plan strips around it.
 
-use std::{ops::Range, time::Duration};
+use std::ops::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
@@ -375,12 +375,7 @@ impl ChatView {
                     .cursor_pointer()
                     .child(chevron(open, x.faint))
                     .child(if active {
-                        dot.with_animation(
-                            ("strip-pulse", first),
-                            Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.3, 1.)),
-                            |d, a| d.opacity(a),
-                        )
-                        .into_any_element()
+                        dot.opacity(crate::anim::pulse(1400, 0.3, 1.)).into_any_element()
                     } else {
                         dot.into_any_element()
                     })
@@ -704,11 +699,7 @@ impl ChatView {
                 .pb_3()
                 .text_size(px(13.))
                 .text_color(theme.muted_foreground)
-                .child(sidebar::icon("fr/tree.svg", TREE_PX, theme.primary).with_animation(
-                    "activity-tree",
-                    Animation::new(Duration::from_millis(2800)).repeat(),
-                    |s, t| s.with_transformation(tree_sway(t)),
-                ))
+                .child(sidebar::icon("fr/tree.svg", TREE_PX, theme.primary).with_transformation(tree_sway(crate::anim::phase(2800))))
                 .child(label)
                 .into_any_element(),
         )

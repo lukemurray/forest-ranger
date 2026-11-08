@@ -311,6 +311,7 @@ pub struct ChatView {
     menu_row: Option<usize>,
     persist: Option<Task<()>>,
     persist_due: bool,
+    ticker: crate::anim::Ticker,
     /// The list items the scroller shows (rows folded into strips).
     items: Vec<Item>,
     /// Disclosures flipped from their default, by row; strips by their first row.
@@ -454,6 +455,7 @@ impl ChatView {
             menu_row: None,
             persist: None,
             persist_due: false,
+            ticker: Default::default(),
             items,
             open: HashSet::new(),
             open_strips: HashSet::new(),
@@ -1407,6 +1409,8 @@ fn fmt_tokens(n: f64) -> String {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The swaying tree and a running strip's dot (see `anim`).
+        self.ticker.keep(self.status == Status::Working, cx);
         self.ensure_forms(window, cx);
         let this = cx.entity();
         let theme = cx.theme().colors;

@@ -141,6 +141,9 @@ pub(crate) fn bench(window: &mut Window, cx: &mut Context<ForestRanger>) {
                 })
             });
             let idle = std::env::var("FR_BENCH").is_ok_and(|v| v == "idle");
+            if let Some(c) = &chat {
+                eprintln!("FR_BENCH: {} chat {}", if idle { "idle" } else { "working" }, c.read(cx).session_id());
+            }
             match chat {
                 Some(_) if idle => {}
                 Some(c) => c.update(cx, |c, cx| c.bench_working(cx)),
