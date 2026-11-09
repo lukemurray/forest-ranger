@@ -128,6 +128,24 @@ fn merge_prompt(base: &str, branch: &str) -> String {
     )
 }
 
+/// The instruction a "Re-review latest" chat is seeded with: an updated MR/PR checked against its review threads.
+fn rereview_prompt(gitlab: bool, n: u64, branch: &str) -> String {
+    let (noun, sigil, cli) = if gitlab { ("MR", "!", "glab") } else { ("PR", "#", "gh") };
+    format!(
+        "{noun} {sigil}{n} (`{branch}`) has been updated since the last review. Re-review it.
+
+1. Update the branch with `git pull --ff-only` — don't check out `origin/…` or detach HEAD.
+2. Read the existing review comments and threads (resolved and unresolved) with `{cli}`.
+3. Find the commits pushed since those comments and review them against the threads: was each point actually addressed? Any regressions or new issues in the new code?
+4. Report:
+   - Each earlier comment: addressed / partly / not addressed, citing files and lines.
+   - New issues in the latest commits.
+   - Remaining blockers for approval, or say plainly that it's ready to approve.
+
+Don't change any code or post anything — this is a read-only review."
+    )
+}
+
 fn mono(cx: &App) -> SharedString {
     cx.theme().mono_font_family.clone()
 }
@@ -430,6 +448,20 @@ impl ReviewPanel {
                     let t = title.clone();
                     move |window, cx| Tooltip::new(t.clone()).build(window, cx)
                 }));
+                if let (ReqState::Open, Some(branch)) = (state, &self.host_branch) {
+                    let prompt = rereview_prompt(sigil == "!", *n, branch);
+                    row = row.child(
+                        div()
+                            .id("rereview")
+                            .text_size(px(12.5))
+                            .text_color(theme.primary)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child("Re-review latest")
+                            .tooltip(|window, cx| Tooltip::new("Check the new commits against the review comments: anything left blocking approval?").build(window, cx))
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReviewEvent::StartChat(prompt.clone())))),
+                    );
+                }
             }
             None if h.error.is_none() && !h.unsupported => {
                 row = row.child(if self.base.is_some() && self.host_branch.is_some() {
