@@ -56,6 +56,8 @@ run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
 
 ## What's here
 
+Release by release in [CHANGELOG.md](CHANGELOG.md).
+
 - **Sidebar** — projects as a collapsible tree of worktrees (labels, primary sprout,
   detached-origin names, last-activity times, working / unread / needs-answer dots).
   Resizable. Right-click menus (open in editor/terminal, reveal, rename, rename
@@ -69,7 +71,8 @@ run), `chats/<id>.jsonl` + `<id>.meta.json` (chat logs), `gpui-settings.json`,
   meter with Start fresh, ⌘F find, ⋯ Branch from here, plan strip. Open chats keep
   running across worktrees; idle agents stop after 30 min.
 - **Title bar** — back/forward (⌘[ ⌘], ⌃- ⌃=), project / branch, ✦ Chat (▾ for the
-  other agent and past chats), open in editor, ⋯, panel toggle (⌘B).
+  other agent and past chats), open in editor, ▶ run commands, ⋯, and Review / Files /
+  Search buttons that open or close the side panel on that view (⌘B toggles).
 - **Review panel** (⌘1 / ⌘2 / ⌘⇧F) — branch status vs base and tracking, stage /
   commit (⌘↵) / push / update from base, changes as folder trees with keyboard nav
   (`s` stages), commits vs a chosen base, Reattach, Push & open PR/MR, MR/PR + pipeline
