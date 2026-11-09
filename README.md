@@ -21,6 +21,7 @@ library from Ghostty's releases, checksum-verified) into `vendor/` via
 ```sh
 scripts/bundle-macos.sh             # → dist/Forest Ranger.app (release build, ad-hoc signed)
 scripts/bundle-macos.sh --install   # bump the patch version, build, copy to /Applications, commit the bump
+scripts/bundle-macos.sh --install --minor   # …as a minor release instead (0.9.3 → 0.10.0)
 scripts/make-signing-cert.sh        # once per Mac: a local signing identity
 ```
 

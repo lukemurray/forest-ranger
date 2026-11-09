@@ -2,13 +2,32 @@
 # Build the release app bundle: dist/Forest Ranger.app
 #   scripts/bundle-macos.sh            build it
 #   scripts/bundle-macos.sh --install  build, then copy it to /Applications
+#   scripts/bundle-macos.sh --install --minor   …as a minor release (0.9.3 → 0.10.0)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# --install bumps the patch version first (0.9.1 → 0.9.2; the build updates Cargo.lock)
-# and commits the bump once installed.
-if [ "${1:-}" = "--install" ]; then
-  perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.$2.".($3+1)."\""/me' Cargo.toml
+INSTALL=0 MINOR=0
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL=1 ;;
+    --minor) MINOR=1 ;;
+    *) echo "unknown option: $arg (use --install, optionally with --minor)" >&2; exit 1 ;;
+  esac
+done
+if [ "$MINOR" = 1 ] && [ "$INSTALL" = 0 ]; then
+  echo "--minor goes with --install (it picks the version bump)" >&2
+  exit 1
+fi
+
+# --install bumps the version first — patch (0.9.1 → 0.9.2), or with --minor the
+# minor, resetting the patch (0.9.3 → 0.10.0); the build updates Cargo.lock — and
+# commits the bump once installed.
+if [ "$INSTALL" = 1 ]; then
+  if [ "$MINOR" = 1 ]; then
+    perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.".($2+1).".0\""/me' Cargo.toml
+  else
+    perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.$2.".($3+1)."\""/me' Cargo.toml
+  fi
 fi
 
 NAME="Forest Ranger"
@@ -73,7 +92,7 @@ touch "$APP"
 
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
 
-if [ "${1:-}" = "--install" ]; then
+if [ "$INSTALL" = 1 ]; then
   rm -rf "/Applications/$NAME.app"
   cp -R "$APP" /Applications/
   "$LSREGISTER" -f "/Applications/$NAME.app" >/dev/null 2>&1 || true
