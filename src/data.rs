@@ -1,6 +1,7 @@
 //! The Electron app's data: projects/worktrees from its SQLite DB (read here)
 //! and the chat list from its meta sidecars. Chat logs themselves: see log.rs.
 
+use std::collections::HashMap;
 use std::{fs, path::{Path, PathBuf}};
 
 use crate::git;
@@ -192,6 +193,19 @@ pub struct ChatMeta {
 }
 
 /// Saved chats for a worktree, newest first.
+/// Each worktree's latest chat activity (ms), from every chat's sidecar.
+pub fn chat_activity() -> HashMap<String, i64> {
+    let mut by: HashMap<String, i64> = HashMap::new();
+    let metas = fs::read_dir(data_dir().join("chats")).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
+    for m in metas.filter_map(|e| serde_json::from_str::<Value>(&fs::read_to_string(e.path()).ok()?).ok()) {
+        if let (Some(wt), Some(at)) = (m["worktreeId"].as_str(), m["updatedAt"].as_i64()) {
+            let t = by.entry(wt.to_string()).or_default();
+            *t = (*t).max(at);
+        }
+    }
+    by
+}
+
 pub fn chats_for(worktree_id: &str) -> Vec<ChatMeta> {
     let dir = data_dir().join("chats");
     let mut metas: Vec<ChatMeta> = fs::read_dir(&dir)

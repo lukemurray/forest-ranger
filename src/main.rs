@@ -357,7 +357,12 @@ impl ForestRanger {
                     });
                 }
             });
-            out.into_inner().unwrap()
+            // A chat counts as using its worktree, even before any file changes.
+            let chats = data::chat_activity();
+            out.into_inner().unwrap().into_iter().map(|(id, at)| {
+                let chat = chats.get(&id).copied().unwrap_or(0);
+                (id, at.max(chat))
+            }).collect::<Vec<_>>()
         });
         cx.spawn(async move |this, cx| {
             let times: std::collections::HashMap<String, i64> = work.await.into_iter().collect();
@@ -372,6 +377,16 @@ impl ForestRanger {
             });
         })
         .detach();
+    }
+
+    /// Mark a worktree used just now and move it to the top of its project.
+    fn touch_worktree(&mut self, wt: &str) {
+        for p in &mut self.projects {
+            if let Some(w) = p.worktrees.iter_mut().find(|w| w.id == wt) {
+                w.activity = log::now_ms();
+                p.worktrees.sort_by(|a, b| b.activity.cmp(&a.activity));
+            }
+        }
     }
 
     fn worktree(&self) -> Option<&data::Worktree> {
@@ -668,6 +683,11 @@ impl ForestRanger {
         let c = chat.read(cx);
         let now = c.attention();
         let prev = self.attention.insert(chat.entity_id(), now);
+        // An agent starting work makes its worktree the most recent one, now.
+        if now == Attention::Working && prev != Some(now) {
+            self.touch_worktree(wt);
+        }
+        let c = chat.read(cx);
         if !window.is_window_active() && prev != Some(now) {
             let target = (wt.to_string(), format!("chat:{}", c.session_id()));
             let label = c.title();
