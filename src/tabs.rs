@@ -496,6 +496,36 @@ impl ForestRanger {
         self.push_tab(tab, cx);
     }
 
+    /// Close tab `i` of the selected worktree — after asking, if an agent is working
+    /// (or waiting on you) there, or its terminal is running something.
+    pub(crate) fn request_close_tab(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((wt, tab)) = self.selected.clone().and_then(|wt| Some((wt.clone(), self.tabs.get(&wt)?.open.get(i)?))) else { return };
+        let warning = match tab {
+            Tab::Chat(c) if matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer) => {
+                Some(("Stop the agent?", "The agent in this chat is still working. Closing the tab stops it; the chat so far is saved."))
+            }
+            Tab::Term(t) if t.read(cx).busy() => Some(("Stop the running process?", "Something is still running in this terminal. Closing the tab ends it.")),
+            _ => None,
+        };
+        let Some((title, description)) = warning else { return self.close_tab(i, cx) };
+        let key = tab.key(cx);
+        let fr = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (fr, wt, key) = (fr.clone(), wt.clone(), key.clone());
+            alert.title(title).description(description).ok_text("Close").ok_variant(ButtonVariant::Danger).show_cancel(true).on_ok(move |_, _, cx| {
+                // By key and worktree: tabs may have moved while the dialog was up.
+                fr.update(cx, |fr, cx| {
+                    let Some(i) = fr.tabs.get(&wt).and_then(|t| t.index(&key, cx)) else { return };
+                    let shown = fr.selected.replace(wt.clone());
+                    fr.close_tab(i, cx);
+                    fr.selected = shown;
+                    cx.notify();
+                });
+                true
+            })
+        });
+    }
+
     pub(crate) fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(tabs) = self.tabs_mut() else { return };
         if i < tabs.open.len() {
@@ -714,9 +744,9 @@ impl ForestRanger {
                                 .text_color(x.faint)
                                 .hover(|s| s.bg(x.active).text_color(theme.foreground))
                                 .child("×")
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.close_tab(i, cx);
+                                    this.request_close_tab(i, window, cx);
                                 })),
                         )
                         .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {

@@ -225,6 +225,8 @@ struct RemoveWorktree {
     error: Option<String>,
     /// git refused a plain remove (e.g. a locked worktree): offer force even when clean.
     refused: bool,
+    /// "an agent working and a terminal running" there: removing cuts them short.
+    running: Option<String>,
 }
 
 pub fn remove_worktree(fr: Entity<ForestRanger>, project_id: String, wt_id: String, window: &mut Window, cx: &mut App) {
@@ -234,6 +236,7 @@ pub fn remove_worktree(fr: Entity<ForestRanger>, project_id: String, wt_id: Stri
 }
 
 fn remove_worktree_now(fr: Entity<ForestRanger>, project_id: String, wt_id: String, window: &mut Window, cx: &mut App) {
+    let running = fr.read(cx).busy_summary(Some(&wt_id), cx);
     let Some((repo, path, primary_id)) = project_of(fr.read(cx), &project_id).and_then(|p| {
         let w = p.worktrees.iter().find(|w| w.id == wt_id)?;
         Some((p.path.clone(), w.path.clone(), p.worktrees.iter().find(|w| w.is_primary).map(|w| w.id.clone())))
@@ -251,7 +254,7 @@ fn remove_worktree_now(fr: Entity<ForestRanger>, project_id: String, wt_id: Stri
             });
         })
         .detach();
-        RemoveWorktree { fr: fr.downgrade(), project_id, repo, wt_id, path, primary_id, info: None, force: false, delete_branch: false, busy: false, error: None, refused: false }
+        RemoveWorktree { fr: fr.downgrade(), project_id, repo, wt_id, path, primary_id, info: None, force: false, delete_branch: false, busy: false, error: None, refused: false, running }
     });
     show("Remove worktree", view, None, window, cx);
 }
@@ -338,6 +341,9 @@ impl Render for RemoveWorktree {
                     .child(div().text_size(px(12.)).text_color(x.faint).child(data::tilde_path(&self.path))),
             )
             .when(primary, |d| d.child(div().text_size(px(12.5)).text_color(theme.danger).child("This is the primary worktree and can't be removed.")))
+            .when_some(self.running.clone().filter(|_| !primary), |d, r| {
+                d.child(div().text_size(px(12.5)).text_color(x.amber).child(format!("⚠ This worktree has {r}. Removing it stops them.")))
+            })
             .when(self.info.is_none() && !primary, |d| d.child(div().text_size(px(12.5)).text_color(x.faint).child("Checking…")))
             .when_some(self.info.as_ref().filter(|_| !primary), |d, i| {
                 d.child(

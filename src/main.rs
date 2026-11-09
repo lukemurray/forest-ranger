@@ -29,7 +29,7 @@ mod dev;
 
 use std::collections::{HashMap, HashSet};
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -169,6 +169,16 @@ impl ForestRanger {
             }
             SessionState::flush(cx);
             async {}
+        });
+        // The window's close button: same check as ⌘⇧W (the dialog closes it if you agree).
+        let fr = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(fr) = fr.upgrade() else { return true };
+            if fr.read(cx).busy_summary(None, cx).is_none() {
+                return true;
+            }
+            fr.update(cx, |fr, cx| fr.confirm_leave(false, window, cx));
+            false
         });
         // Window focus decides whether a finished turn is unread (re-checked on render).
         let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
@@ -694,6 +704,41 @@ impl ForestRanger {
         chats.min(term)
     }
 
+    /// "2 agents working and a terminal running" in worktree `wt` (or anywhere);
+    /// None when nothing would be cut short.
+    pub(crate) fn busy_summary(&self, wt: Option<&str>, cx: &App) -> Option<String> {
+        let here = |w: &String| wt.is_none_or(|wt| w == wt);
+        let agents = self.chats().filter(|(w, c)| here(w) && matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer)).count();
+        let terms = self.busy_terms(cx).filter(|w| here(w)).count();
+        let part = |n: usize, one: &str, many: &str, verb: &str| match n {
+            0 => None,
+            1 => Some(format!("{one} {verb}")),
+            n => Some(format!("{n} {many} {verb}")),
+        };
+        let parts: Vec<String> = [part(agents, "an agent", "agents", "working"), part(terms, "a terminal", "terminals", "running")].into_iter().flatten().collect();
+        (!parts.is_empty()).then(|| parts.join(" and "))
+    }
+
+    /// Quit (or close the window, which quits): ask first if that would stop an
+    /// agent or a running terminal.
+    fn confirm_leave(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let leave = move |window: &mut Window, cx: &mut App| if quit { cx.quit() } else { window.remove_window() };
+        let Some(busy) = self.busy_summary(None, cx) else { return leave(window, cx) };
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .title(if quit { "Quit Forest Ranger?" } else { "Close the window?" })
+                .description(format!("You have {busy}. {} stops them; chats so far are saved.", if quit { "Quitting" } else { "Closing it quits Forest Ranger and" }))
+                .ok_text(if quit { "Quit" } else { "Close" })
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    // Deferred: not from inside the dialog's own callback.
+                    window.defer(cx, move |window, cx| leave(window, cx));
+                    true
+                })
+        });
+    }
+
     /// The worktree ids of terminals running something (one per busy terminal).
     fn busy_terms<'a>(&'a self, cx: &'a App) -> impl Iterator<Item = &'a String> + 'a {
         self.tabs.iter().flat_map(move |(wt, t)| t.open.iter().filter(move |t| matches!(t, Tab::Term(v) if v.read(cx).busy())).map(move |_| wt))
@@ -852,16 +897,17 @@ impl Render for ForestRanger {
             })
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.confirm_leave(false, window, cx)))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| this.confirm_leave(true, window, cx)))
             .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &JumpTo, window, cx| this.toggle_palette(false, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.toggle_palette(true, window, cx)))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, _, cx| this.cycle_tab(-1, cx)))
-            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if let Some(i) = this.tabs_mut().and_then(|t| t.active) {
-                    this.close_tab(i, cx);
+                    this.request_close_tab(i, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
