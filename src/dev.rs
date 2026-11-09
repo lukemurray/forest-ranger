@@ -13,6 +13,30 @@ pub(crate) fn check() {
         .filter(|(p, w)| data::worktree_id(&p.id, &w.path) != w.id)
         .count();
     println!("worktree ids matching the Electron scheme: {}/{wts}", wts - bad);
+    // Merge requests per project (read-only gh / glab calls), with a timing.
+    for p in &projects {
+        let t = std::time::Instant::now();
+        match crate::reviews::list(&p.id, &p.path) {
+            Ok((host, mrs)) => {
+                let count = |s: crate::reviews::Section| mrs.iter().filter(|m| m.section() == s).count();
+                println!(
+                    "{}: {} {} open — needs you {}, ready {}, yours {}, others {} ({:?})",
+                    p.name,
+                    host.label(),
+                    mrs.len(),
+                    count(crate::reviews::Section::NeedsYou),
+                    count(crate::reviews::Section::Ready),
+                    count(crate::reviews::Section::Mine),
+                    count(crate::reviews::Section::Others),
+                    t.elapsed()
+                );
+                for m in mrs.iter().filter(|m| m.section() == crate::reviews::Section::NeedsYou).take(5) {
+                    println!("    #{} {} — {}", m.number, m.title.chars().take(50).collect::<String>(), m.needs_you().join(", "));
+                }
+            }
+            Err(e) => println!("{}: {e}", p.name),
+        }
+    }
     let mut biggest = (0usize, String::new());
     for w in projects.iter().flat_map(|p| &p.worktrees) {
         for c in data::chats_for(&w.id) {

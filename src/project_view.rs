@@ -17,6 +17,7 @@ use crate::{ForestRanger, data, git, settings, theme};
 
 mod branches;
 pub(crate) mod commands;
+mod requests;
 mod sync_bar;
 
 /// Page.module.css `.page`: max-width 1000px, 32px side padding.
@@ -25,6 +26,7 @@ const PAGE_PX: f32 = 32.;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum PageTab {
+    Requests,
     Worktrees,
     Branches,
     Settings,
@@ -37,6 +39,7 @@ pub(crate) struct ProjectPage {
     entries: HashMap<String, git::WorktreeEntry>,
     sync: sync_bar::SyncState,
     branches: branches::BranchesState,
+    requests: requests::RequestsState,
     prompt: Option<(Entity<TextareaState>, Subscription)>,
 }
 
@@ -57,8 +60,17 @@ impl ForestRanger {
         self.selected = None;
         self.expanded.insert(id.clone());
         self.ensure_commands(&id);
-        self.project_view = Some(ProjectPage { id, tab: PageTab::Worktrees, entries: HashMap::new(), sync: Default::default(), branches: Default::default(), prompt: None });
+        self.project_view = Some(ProjectPage {
+            id,
+            tab: PageTab::Requests,
+            entries: HashMap::new(),
+            sync: Default::default(),
+            branches: Default::default(),
+            requests: Default::default(),
+            prompt: None,
+        });
         self.load_page(cx);
+        self.load_requests(cx);
         cx.notify();
     }
 
@@ -185,9 +197,16 @@ impl ForestRanger {
             return div().p_6().text_color(theme.muted_foreground).child("This project is no longer available.").into_any_element();
         };
         let (pid, repo) = (p.id.clone(), p.path.clone());
+        let (requests_label, needs_you) = self.project_view.as_ref().map(|v| (v.requests.label(), v.requests.needs_you())).unwrap_or(("Merge requests", 0));
         let tab_btn = |id: &'static str, label: &'static str, t: PageTab| {
             let on = tab == t;
+            let badge = (t == PageTab::Requests && needs_you > 0).then(|| {
+                div().px(px(6.)).rounded(px(8.)).bg(theme::extra(cx).amber.opacity(0.18)).text_size(px(11.)).text_color(theme::extra(cx).amber).child(needs_you.to_string())
+            });
             div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
                 .id(id)
                 .px(px(12.))
                 .py(px(9.))
@@ -200,11 +219,15 @@ impl ForestRanger {
                 .text_color(if on { theme.foreground } else { theme.muted_foreground })
                 .hover(|s| s.text_color(theme.foreground))
                 .child(label)
+                .children(badge)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(v) = this.project_view.as_mut() {
                         v.tab = t;
                         if t == PageTab::Branches {
                             this.load_page(cx);
+                        }
+                        if t == PageTab::Requests {
+                            this.load_requests(cx);
                         }
                         cx.notify();
                     }
@@ -217,10 +240,12 @@ impl ForestRanger {
             .flex_shrink_0()
             .border_b_1()
             .border_color(theme.border)
+            .child(tab_btn("tab-requests", requests_label, PageTab::Requests))
             .child(tab_btn("tab-worktrees", "Worktrees", PageTab::Worktrees))
             .child(tab_btn("tab-branches", "Branches", PageTab::Branches))
             .child(tab_btn("tab-settings", "Settings", PageTab::Settings));
         let body = match tab {
+            PageTab::Requests => self.requests_tab(cx),
             PageTab::Worktrees => self.worktrees_tab(window, cx),
             PageTab::Branches => self.branches_tab(window, cx),
             PageTab::Settings => self.settings_tab(&pid, &repo, window, cx),
@@ -269,7 +294,7 @@ impl ForestRanger {
                 }))
             })
             .child(page_button("review-branch", "fr/sparkle.svg", "Review", false, cx).on_click(move |_, window, cx| {
-                dialogs::review_branch(fr1.clone(), review_pid.clone(), window, cx)
+                dialogs::review_branch(fr1.clone(), review_pid.clone(), None, window, cx)
             }))
             .child(page_button("new-worktree", "fr/plus.svg", "New worktree", false, cx).on_click(move |_, window, cx| {
                 dialogs::new_worktree(fr2.clone(), new_pid.clone(), window, cx)

@@ -735,20 +735,24 @@ struct ReviewBranch {
 
 /// Pick a branch to review, then check it out (reusing a worktree already on it)
 /// and start a chat seeded with the review prompt — ReviewDialog + startReview.
-pub fn review_branch(fr: Entity<ForestRanger>, project_id: String, window: &mut Window, cx: &mut App) {
+/// `preselect`: a branch (as `list_branches` names it) to start with, e.g. an MR's.
+pub fn review_branch(fr: Entity<ForestRanger>, project_id: String, preselect: Option<String>, window: &mut Window, cx: &mut App) {
     // Deferred: callers are often ForestRanger's own click handlers, and this reads
     // ForestRanger — reading it mid-update panics.
-    window.defer(cx, move |window, cx| review_branch_now(fr, project_id, window, cx));
+    window.defer(cx, move |window, cx| review_branch_now(fr, project_id, preselect, window, cx));
 }
 
-fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, window: &mut Window, cx: &mut App) {
+fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, preselect: Option<String>, window: &mut Window, cx: &mut App) {
     let Some((repo, parent)) = project_of(fr.read(cx), &project_id).map(|p| (p.path.clone(), data::worktree_parent(p))) else { return };
     // ponytail: quick git calls on the UI thread, as in new_worktree.
     let base = git::resolve_base(&repo, None);
     let branches: Vec<String> = git::list_branches(&repo).into_iter().filter(|b| Some(b) != base.as_ref()).collect();
+    let picked = preselect.and_then(|b| branches.iter().position(|x| *x == b));
+    let auto = picked.map(|i| settings::render_review_prompt(cx, &project_id, &branches[i], base.as_deref())).unwrap_or_default();
     let view = cx.new(|cx| {
-        let branch = cx.new(|cx| SelectState::new(SearchableVec::new(branches), None, window, cx).searchable(true));
-        let prompt = cx.new(|cx| TextareaState::new(window, cx).rows(9).placeholder("Pick a branch to fill the default prompt, or write your own."));
+        let branch = cx.new(|cx| SelectState::new(SearchableVec::new(branches), picked.map(IndexPath::new), window, cx).searchable(true));
+        let first = auto.clone();
+        let prompt = cx.new(|cx| TextareaState::new(window, cx).rows(9).placeholder("Pick a branch to fill the default prompt, or write your own.").default_value(first));
         let sub = cx.subscribe_in(&branch, window, |this: &mut ReviewBranch, _, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
             let SelectEvent::Confirm(Some(b)) = ev else { return };
             if this.prompt.read(cx).value().as_ref() == this.auto {
@@ -758,7 +762,7 @@ fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, window: &mut 
             }
             cx.notify();
         });
-        ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, custom: false, prompt, auto: String::new(), busy: false, error: None, _sub: sub }
+        ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, custom: false, prompt, auto, busy: false, error: None, _sub: sub }
     });
     window.open_dialog(cx, move |d, _, _| {
         d.width(px(520.)).title("Review a branch").child(view.clone())

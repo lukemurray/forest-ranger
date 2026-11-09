@@ -16,6 +16,7 @@ mod palette;
 mod panes;
 mod project_view;
 mod review;
+mod reviews;
 mod session_state;
 mod settings;
 mod sidebar;

@@ -212,7 +212,7 @@ impl ForestRanger {
                     )
                     .child(hover_btn("review", "fr/sparkle.svg", 13.).tooltip(tip("Review a branch")).on_click(cx.listener(move |_, _, window, cx| {
                         cx.stop_propagation();
-                        dialogs::review_branch(cx.entity(), review_pid.clone(), window, cx);
+                        dialogs::review_branch(cx.entity(), review_pid.clone(), None, window, cx);
                     })))
                     .child(hover_btn("new-wt", "fr/plus.svg", 14.).tooltip(tip("New worktree")).on_click(cx.listener(move |_, _, window, cx| {
                         cx.stop_propagation();

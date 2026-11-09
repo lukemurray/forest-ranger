@@ -738,8 +738,10 @@ fn elicit_response(action: &str, content: Option<Value>) -> Value {
     }
 }
 
-fn enum_options(enum_values: &Value, one_of: &Value) -> Vec<Value> {
-    if let Some(o) = one_of.as_array().filter(|a| !a.is_empty()) {
+/// Options from `enum`, or titled `oneOf` / `anyOf` (MCP uses anyOf for titled multi-selects).
+fn enum_options(p: &Value) -> Vec<Value> {
+    let (enum_values, titled) = (&p["enum"], if p["oneOf"].is_array() { &p["oneOf"] } else { &p["anyOf"] });
+    if let Some(o) = titled.as_array().filter(|a| !a.is_empty()) {
         return o.iter().map(|o| json!({ "value": o["const"], "label": o["title"] })).collect();
     }
     enum_values.as_array().into_iter().flatten().map(|v| json!({ "value": v, "label": v })).collect()
@@ -762,8 +764,8 @@ fn normalize_schema(schema: &Value) -> Value {
         }
         let (input, options) = match p["type"].as_str() {
             Some(t @ ("boolean" | "number" | "integer")) => (t, None),
-            Some("array") => ("multiselect", Some(enum_options(&p["items"]["enum"], &p["items"]["oneOf"]))),
-            _ => match enum_options(&p["enum"], &p["oneOf"]) {
+            Some("array") => ("multiselect", Some(enum_options(&p["items"]))),
+            _ => match enum_options(p) {
                 o if o.is_empty() => ("text", None),
                 o => ("select", Some(o)),
             },
@@ -789,6 +791,7 @@ mod tests {
                 "ok": { "type": "boolean", "default": true },
                 "pick": { "type": "string", "oneOf": [{ "const": "a", "title": "A" }] },
                 "tags": { "type": "array", "items": { "enum": ["x", "y"] } },
+                "many": { "type": "array", "items": { "anyOf": [{ "const": "a", "title": "A" }] } },
             },
             "required": ["name"],
         }));
@@ -800,6 +803,7 @@ mod tests {
         assert_eq!(by("pick")["options"], json!([{ "value": "a", "label": "A" }]));
         assert_eq!(by("tags")["input"], "multiselect");
         assert_eq!(by("tags")["options"][1]["value"], "y");
+        assert_eq!(by("many")["options"], json!([{ "value": "a", "label": "A" }]));
     }
 
     #[test]

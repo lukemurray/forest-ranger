@@ -743,6 +743,12 @@ pub fn try_list_worktrees(repo: &str) -> Result<Vec<WorktreeEntry>, String> {
 
 /// Fetch origin (pruned), then best-effort fast-forward the local base: through
 /// its worktree when it's checked out, else via a refspec — TS `fetchProject`.
+/// Fetch one branch from origin (updating `origin/<branch>`), e.g. an MR's before review.
+pub fn fetch_branch(repo: &str, branch: &str) -> Result<(), String> {
+    check_branch(branch)?;
+    run(repo, &["fetch", "origin", branch], "fetch failed")
+}
+
 pub fn fetch_base(repo: &str, base: Option<&str>) -> Result<(), String> {
     run(repo, &["fetch", "origin", "--prune"], "fetch failed")?;
     if let Some(b) = base {

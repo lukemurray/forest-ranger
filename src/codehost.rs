@@ -249,7 +249,7 @@ fn test_cli(p: Provider, host: &str) -> Result<String, String> {
 
 // ---- CLI transport (ghCli / glabApi) ----
 
-fn strip_scheme(h: &str) -> &str {
+pub(crate) fn strip_scheme(h: &str) -> &str {
     let lower = h.to_ascii_lowercase();
     if lower.starts_with("https://") {
         &h[8..]
@@ -261,12 +261,12 @@ fn strip_scheme(h: &str) -> &str {
 }
 
 /// github.ts bareHost: no scheme, no trailing slash, lowercase.
-fn bare_host(h: &str) -> String {
+pub(crate) fn bare_host(h: &str) -> String {
     strip_scheme(h.trim()).trim_end_matches('/').to_lowercase()
 }
 
 /// gitlab.ts siteUrl: scheme-qualified, no trailing slash.
-fn site_url(h: &str) -> String {
+pub(crate) fn site_url(h: &str) -> String {
     let h = h.trim().trim_end_matches('/');
     if h.len() == strip_scheme(h).len() { format!("https://{h}") } else { h.to_string() }
 }
@@ -295,7 +295,7 @@ fn api_with(p: Provider, host: &str, path: &str, fields: &[(&str, &str)]) -> Res
 }
 
 /// Run a CLI with the augmented PATH and a 30s deadline; Err is the one-line reason.
-fn run_cli(cli: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_cli(cli: &str, args: &[&str]) -> Result<String, String> {
     // Dock-launched apps don't get the shell's PATH (gh / glab live in /opt/homebrew/bin).
     let path = format!("{}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", std::env::var("PATH").unwrap_or_default());
     let mut cmd = Command::new(cli);
@@ -414,7 +414,7 @@ fn check_state(s: &str) -> CheckState {
 
 // ---- branch status (the branchIntegrations RPC) ----
 
-fn project_url(p: Provider, host: &str, path: &str) -> String {
+pub(crate) fn project_url(p: Provider, host: &str, path: &str) -> String {
     match p {
         Provider::GitHub => format!("https://{}/{path}", bare_host(host)),
         Provider::GitLab => format!("{}/{path}", site_url(host)),
@@ -480,7 +480,7 @@ fn for_project(over: Option<&str>) -> Vec<(Provider, bool)> {
 
 /// The first enabled integration with a credential whose host matches the repo's
 /// remote: (provider, host, project path, connected via its CLI).
-fn matched(project_id: &str, repo_path: &str) -> Option<(Provider, String, String, bool)> {
+pub(crate) fn matched(project_id: &str, repo_path: &str) -> Option<(Provider, String, String, bool)> {
     let db = db_ro().ok()?;
     let over: Option<String> = db
         .query_row("SELECT integration FROM projects WHERE id = ?1", [project_id], |r| r.get(0))
