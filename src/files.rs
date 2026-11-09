@@ -38,6 +38,14 @@ pub struct FileView {
     _subs: Vec<Subscription>,
 }
 
+/// Fill in grammars the kit links without highlight rules (C# parses but has an
+/// empty query there, so nothing is coloured). Call once, after the kit's init.
+pub fn register_grammars() {
+    use gpui_kit::component::highlighter::{GrammarConfig, LanguageRegistry};
+    let cs = GrammarConfig::new("csharp", tree_sitter_c_sharp::LANGUAGE.into(), vec![], tree_sitter_c_sharp::HIGHLIGHTS_QUERY, "", "");
+    LanguageRegistry::singleton().register("csharp", &cs);
+}
+
 /// Language for highlighting: well-known file names, then aliases, then the extension.
 pub fn language_for(rel: &str) -> String {
     let name = rel.rsplit('/').next().unwrap_or(rel).to_lowercase();
@@ -266,5 +274,24 @@ mod tests {
         }
         assert!(view_state("lru-0").is_none());
         assert_eq!(view_state(&format!("lru-{}", VIEW_STATE_CAP + 4)).map(|s| s.0), Some(VIEW_STATE_CAP as u32 + 4));
+    }
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use gpui_kit::component::Rope;
+    use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
+
+    /// Coloured spans for `code` highlighted as `lang`.
+    fn coloured(lang: &str, code: &str) -> usize {
+        super::register_grammars();
+        let mut h = SyntaxHighlighter::new(lang);
+        h.update(None, &Rope::from(code), None);
+        h.styles(&(0..code.len()), &*HighlightTheme::default_light()).iter().filter(|(_, s)| s.color.is_some()).count()
+    }
+
+    #[test]
+    fn csharp_is_coloured() {
+        assert!(coloured(&super::language_for("A.cs"), "namespace A { public class B { public int C(string d) => 1; } }") > 3);
     }
 }

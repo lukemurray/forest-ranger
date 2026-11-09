@@ -31,6 +31,8 @@ gpui-kit = { version = "0.9.0", features = [
     "tree-sitter-yaml",
 ] }
 libc = "0.2"
+# The kit links C# with no highlight rules; files::register_grammars adds the grammar's own.
+tree-sitter-c-sharp = "0.23"
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = "1.0.154"
 sha1_smol = "1.0.1"

@@ -1040,6 +1040,7 @@ fn main() {
     // Closing the last window quits (macOS apps otherwise linger windowless).
     gpui_kit::application().with_assets(assets::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(|cx| {
         gpui_kit::init(cx);
+        files::register_grammars();
         #[cfg(target_os = "macos")]
         set_dock_icon();
         cx.set_global(settings::Settings::load());

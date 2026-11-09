@@ -3,6 +3,12 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under the version it will ship in.
 
+## 0.13.1 — unreleased
+
+### Fixed
+- C# files had no syntax highlighting (the grammar parsed but had no colour rules);
+  they're coloured again, in the editor and in diffs.
+
 ## 0.13.0 — 2026-11-09
 
 The first changelog entry: everything Forest Ranger does today.
