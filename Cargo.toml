@@ -12,6 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # "tree-sitter-languages" would pull in all 36).
 gpui-kit = { version = "0.9.0", features = [
     "tree-sitter-bash",
+    "tree-sitter-cpp",
     "tree-sitter-csharp",
     "tree-sitter-css",
     "tree-sitter-diff",

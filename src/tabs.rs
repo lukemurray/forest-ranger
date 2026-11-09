@@ -128,7 +128,14 @@ impl ForestRanger {
     /// load per tab: a newer one replaces (cancels) an older, so quick toggles can't
     /// land out of order.
     pub(crate) fn fill_diff(&mut self, state: &Entity<DiffState>, patch: impl FnOnce() -> String + Send + 'static, cx: &mut Context<Self>) {
-        let work = cx.background_executor().spawn(async move { DiffFile::parse(&patch()).unwrap_or_default() });
+        let work = cx.background_executor().spawn(async move {
+            // Highlight as the editor would (e.g. .csproj as XML, .h as C++), not by raw extension.
+            let parsed = DiffFile::parse(&patch()).unwrap_or_default();
+            parsed.into_iter().map(|f| {
+                let lang = files::language_for(f.path());
+                f.with_language(lang)
+            }).collect::<Vec<_>>()
+        });
         let weak = state.downgrade();
         let task = cx.spawn(async move |_, cx| {
             let files = work.await;

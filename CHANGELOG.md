@@ -14,6 +14,8 @@ The first changelog entry: everything Forest Ranger does today.
 - Worktrees ordered by last use — git activity or chat activity, whichever is newer;
   a chat starting work moves its worktree to the top.
 - A terminal running something shows the working dot on its worktree and project.
+- A worktree's state reads in words where its time goes — **working** (pulsing),
+  **ready**, **needs you** — and a finished or waiting one has its name in bold.
 - Each project shows how many open MRs/PRs need you (polled every 3 minutes).
 - Right-click menus (open in editor/terminal, reveal, rename, rename branch, remove
   worktree/project); hover ✦ review / + new worktree / rescan; double-click to rename.
@@ -62,6 +64,10 @@ The first changelog entry: everything Forest Ranger does today.
   quitting with anything busy, and warns when removing a busy worktree.
 - ⌘T / ⌘K jump to a worktree or project; ⌘P open a file. OS notifications and a Dock
   badge when a chat needs you.
+
+### Fixed
+- Syntax highlighting for `.csproj` / `.props` / `.targets` (as XML), C and C++
+  (`.c`, `.h`, `.cpp`, `.hpp`…) and `.mdc`, in the editor and in diffs.
 
 ### Settings
 - Theme, editor, external terminal, default agent and mode, GitHub / GitLab via the

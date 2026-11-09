@@ -288,6 +288,17 @@ impl ForestRanger {
                 .into_any_element();
         }
         let menu = self.worktree_menu(p, w, cx);
+        // The state, in words where the time goes: easier to spot than a dot alone.
+        use crate::chat::Attention;
+        let attention = self.worktree_attention(&w.id, cx);
+        let status = match attention {
+            Attention::Working => div().text_color(theme.primary).opacity(crate::anim::pulse(1400, 0.55, 1.)).child("working"),
+            Attention::Unread => div().text_color(theme.primary).font_weight(FontWeight::SEMIBOLD).child("ready"),
+            Attention::NeedsAnswer => div().text_color(x.amber).font_weight(FontWeight::SEMIBOLD).child("needs you"),
+            Attention::Idle => div().text_color(x.faint).child(data::relative_time(w.activity)),
+        };
+        // Something to look at: the name stands out too, like unread mail.
+        let unseen = matches!(attention, Attention::Unread | Attention::NeedsAnswer);
         let edit = (w.name.clone().or_else(|| w.branch.clone()).unwrap_or_default(), w.branch.clone());
         div()
             .id(SharedString::from(format!("w-{}", w.id)))
@@ -310,7 +321,14 @@ impl ForestRanger {
                     .gap(px(6.))
                     .min_w_0()
                     .when(w.is_primary, |d| d.child(icon("fr/sprout.svg", 14., theme.primary)))
-                    .child(div().min_w_0().truncate().font_family(cx.theme().mono_font_family.clone()).child(label.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .when(unseen, |d| d.font_weight(FontWeight::BOLD).text_color(theme.foreground))
+                            .child(label.clone()),
+                    )
                     // The label wins the space: the bracketed branch gives way first.
                     .when_some(note.clone(), |d, n| {
                         d.child(
@@ -332,8 +350,8 @@ impl ForestRanger {
                     .items_center()
                     .gap_2()
                     .flex_shrink_0()
-                    .child(div().text_size(px(11.)).text_color(x.faint).child(data::relative_time(w.activity)))
-                    .children(row_dot(self.worktree_attention(&w.id, cx), self.chat_here(&w.id, cx), cx)),
+                    .child(status.text_size(px(11.)))
+                    .children(row_dot(attention, self.chat_here(&w.id, cx), cx)),
             )
             .tooltip(tip(match &note {
                 Some(n) => format!("{label} ({n})\n{}\nDouble-click to set a label", w.path),

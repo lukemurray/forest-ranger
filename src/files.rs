@@ -57,8 +57,11 @@ pub fn language_for(rel: &str) -> String {
     match ext {
         "" => "text",
         "vue" => "html",
-        "svg" | "xml" | "plist" => "html",
-        "mdx" => "markdown",
+        // XML: no grammar of its own; HTML's reads it well.
+        "svg" | "xml" | "plist" | "csproj" | "fsproj" | "vbproj" | "props" | "targets" | "resx" | "nuspec" => "html",
+        // C headers too: the C++ grammar covers C.
+        "c" | "h" | "hpp" | "hh" | "hxx" | "cc" | "cxx" | "ino" => "cpp",
+        "mdx" | "mdc" => "markdown",
         "jsonc" | "json5" => "json",
         "tf" | "tfvars" => "hcl",
         "mjs" | "cjs" | "jsx" => "javascript",
@@ -249,6 +252,10 @@ mod tests {
         assert_eq!(language_for("a/b.mdx"), "markdown");
         assert_eq!(language_for("x.tfvars"), "hcl");
         assert_eq!(language_for("x.rs"), "rs");
+        assert_eq!(language_for("App/App.csproj"), "html");
+        assert_eq!(language_for("Directory.Build.props"), "html");
+        assert_eq!(language_for("src/a.h"), "cpp");
+        assert_eq!(language_for("src/a.cpp"), "cpp");
         assert_eq!(language_for("LICENSE"), "text");
     }
 
