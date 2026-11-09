@@ -78,6 +78,11 @@ impl ForestRanger {
     /// Run a project command in the worktree at `root` (`dir` joined on): in a
     /// terminal tab there, or the external terminal when the command asks for it.
     pub(crate) fn run_command(&mut self, cmd: &Command, root: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pid) = self.projects.iter().find(|p| p.worktrees.iter().any(|w| w.path == root)).map(|p| p.id.clone()) {
+            let id = cmd.id.clone();
+            crate::session_state::SessionState::update(cx, |s| _ = s.last_run.insert(pid, id));
+            cx.notify();
+        }
         let cwd = if cmd.dir.is_empty() { root.to_string() } else { Path::new(root).join(&cmd.dir).to_string_lossy().into_owned() };
         let command = cmd.command.clone();
         let wt = self.projects.iter().flat_map(|p| &p.worktrees).find(|w| w.path == root).map(|w| w.id.clone());
@@ -126,19 +131,45 @@ impl ForestRanger {
                 .child(icon("fr/play.svg", 12., x.green))
         };
         let fr = cx.entity();
+        // Past two: a split button — the face reruns the last-used command, the arrow lists them all.
         if commands.len() > COLLAPSE_AT {
+            let last = crate::session_state::SessionState::get(cx).last_run.get(project_id).cloned();
+            let face = commands.iter().find(|c| Some(&c.id) == last.as_ref()).unwrap_or(&commands[0]).clone();
             let root = root.to_string();
+            let (run, run_root, tip) = (face.clone(), root.clone(), face.command.clone());
             return Some(
-                Button::new("run-menu")
-                    .ghost()
-                    .icon(Icon::empty().path("fr/play.svg"))
-                    .label("Run")
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                        commands.iter().fold(menu, |menu, c| {
-                            let (fr, c, root) = (fr.clone(), c.clone(), root.clone());
-                            menu.item(PopupMenuItem::new(c.label.clone()).on_click(move |_, window, cx| fr.update(cx, |fr, cx| fr.run_command(&c, &root, window, cx))))
-                        })
-                    })
+                div()
+                    .flex()
+                    .items_stretch()
+                    .overflow_hidden()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(x.border_strong)
+                    .child(
+                        btn("run-last".into())
+                            .border_0()
+                            .rounded_none()
+                            .child(face.label.clone())
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .on_click(cx.listener(move |this, _, window, cx| this.run_command(&run, &run_root, window, cx))),
+                    )
+                    .child(div().w(px(1.)).bg(x.border_strong))
+                    .child(
+                        Button::new("run-menu")
+                            .tooltip("Run commands")
+                            .ghost()
+                            .compact()
+                            .px(px(6.))
+                            .h_full()
+                            .rounded_none()
+                            .icon(Icon::empty().path("fr/chevron-down.svg"))
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                commands.iter().fold(menu, |menu, c| {
+                                    let (fr, c, root) = (fr.clone(), c.clone(), root.clone());
+                                    menu.item(PopupMenuItem::new(c.label.clone()).on_click(move |_, window, cx| fr.update(cx, |fr, cx| fr.run_command(&c, &root, window, cx))))
+                                })
+                            }),
+                    )
                     .into_any_element(),
             );
         }

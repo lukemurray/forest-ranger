@@ -12,6 +12,8 @@ use super::PageTab;
 use crate::codehost::{CheckState, Provider};
 use crate::reviews::{Merge, Mr, Section};
 use crate::sidebar::{dialogs, icon};
+use std::collections::HashMap;
+
 use crate::{ForestRanger, data, git, theme};
 
 /// How often an open tab re-asks the code host.
@@ -38,13 +40,11 @@ impl RequestsState {
         }
     }
 
-    /// How many need you (the tab's badge).
-    pub fn needs_you(&self) -> usize {
-        match &self.result {
-            Some(Ok((_, mrs))) => mrs.iter().filter(|m| m.section() == Section::NeedsYou).count(),
-            _ => 0,
-        }
-    }
+}
+
+/// How many MRs need you (the tab's and the sidebar's badge).
+fn needs_you(res: &Result<(Provider, Vec<Mr>), String>) -> usize {
+    res.as_ref().map(|(_, mrs)| mrs.iter().filter(|m| m.section() == Section::NeedsYou).count()).unwrap_or(0)
 }
 
 /// An ISO 8601 time as "3h ago".
@@ -53,6 +53,32 @@ fn ago(iso: &str) -> String {
 }
 
 impl ForestRanger {
+    /// Keep every project's "needs you" count fresh for the sidebar, every few
+    /// minutes for as long as the window lives.
+    pub(crate) fn poll_needs_you(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(projects) = this.update(cx, |this, _| this.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect::<Vec<_>>()) else { break };
+                let work = cx.background_executor().spawn(async move {
+                    projects.into_iter().map(|(id, repo)| {
+                        let n = needs_you(&crate::reviews::list(&id, &repo));
+                        (id, n)
+                    }).collect::<HashMap<_, _>>()
+                });
+                let counts = work.await;
+                let alive = this.update(cx, |this, cx| {
+                    this.needs_you = counts;
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(POLL).await;
+            }
+        })
+        .detach();
+    }
+
     fn requests_state(&mut self) -> Option<&mut RequestsState> {
         self.project_view.as_mut().map(|v| &mut v.requests)
     }
@@ -87,6 +113,7 @@ impl ForestRanger {
         cx.spawn(async move |this, cx| {
             let res = work.await;
             let _ = this.update(cx, |this, cx| {
+                this.needs_you.insert(id.clone(), needs_you(&res));
                 if let Some(page) = this.project_view.as_mut().filter(|v| v.id == id) {
                     page.requests.loading = false;
                     page.requests.result = Some(res);

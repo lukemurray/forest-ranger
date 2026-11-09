@@ -585,13 +585,36 @@ pub fn safe_to_remove(repo: &str, path: &str) -> Option<String> {
         let o = git(path, &["rev-list", "--count", &format!("{r}..HEAD")]);
         if o.ok { o.stdout.trim().parse::<u32>().ok() } else { None }
     };
-    if let Some(b) = git_line(path, &["symbolic-ref", "--short", "-q", "HEAD"])
+    let branch = git_line(path, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    if let Some(b) = &branch
         && ahead_of(&format!("origin/{b}")) == Some(0)
     {
         return Some("pushed to origin".into());
     }
+    // A branch that's only ever been created is "in" the base too — but nothing was merged.
+    if branch.is_some_and(|b| never_committed(path, &b)) {
+        return Some("no commits yet".into());
+    }
     let base = resolve_base(repo, None)?;
     [base.clone(), format!("origin/{base}")].iter().any(|r| ahead_of(r) == Some(0)).then(|| format!("merged into {base}"))
+}
+
+/// No uncommitted or untracked files.
+pub fn is_clean(path: &str) -> bool {
+    let o = git(path, &["status", "--porcelain", "--untracked-files=all"]);
+    o.ok && o.stdout.trim().is_empty()
+}
+
+/// Is `commit` (e.g. HEAD) in `sha`'s history? False if either is unknown here.
+pub fn is_ancestor(path: &str, commit: &str, sha: &str) -> bool {
+    git(path, &["merge-base", "--is-ancestor", commit, sha]).ok
+}
+
+/// The branch's reflog has only its creation: nothing was ever committed on it here.
+fn never_committed(path: &str, branch: &str) -> bool {
+    let o = git(path, &["reflog", "show", "--format=%gs", &format!("refs/heads/{branch}")]);
+    let mut entries = lines(&o.stdout).peekable();
+    o.ok && entries.peek().is_some() && entries.all(|e| e.starts_with("branch: Created from"))
 }
 
 pub struct WorktreeStatus {
@@ -904,11 +927,17 @@ mod tests {
         assert!(!Path::new(&wt).exists());
         // Cleanup safety: fresh off main is safe; a change or an unshared commit isn't.
         worktree_add(&p, &wt, "tidy", Some("main")).unwrap();
-        assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("merged into main"));
+        // …but it's "not started", not "merged": that's only once its commits land.
+        assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("no commits yet"));
         fs::write(Path::new(&wt).join("n.txt"), "n").unwrap();
         assert_eq!(safe_to_remove(&p, &wt), None);
         assert!(git(&wt, &["add", "-A"]).ok && git(&wt, &["commit", "-qm", "n"]).ok);
         assert_eq!(safe_to_remove(&p, &wt), None);
+        // Merged: main moves up to include it (then back, for the checks below).
+        let main = git_line(&p, &["rev-parse", "main"]).unwrap();
+        assert!(git(&p, &["update-ref", "refs/heads/main", "refs/heads/tidy"]).ok);
+        assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("merged into main"));
+        assert!(git(&p, &["update-ref", "refs/heads/main", &main]).ok);
         worktree_remove(&p, &wt, true).unwrap();
         assert_eq!(safe_to_remove(&p, &wt).as_deref(), Some("folder already deleted"));
         delete_branch(&p, "tidy", true).unwrap();

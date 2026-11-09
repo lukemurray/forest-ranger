@@ -390,6 +390,23 @@ impl ForestRanger {
         }
     }
 
+    /// The panel's current view (or the saved one before the panel's been built).
+    pub(crate) fn review_view_now(&self, cx: &App) -> review::View {
+        let Some(id) = &self.selected else { return review::View::Review };
+        match self.reviews.get(id) {
+            Some(r) => r.read(cx).view,
+            None => crate::view_of(&SessionState::get(cx).panel(id).view),
+        }
+    }
+
+    /// Titlebar / ⌘1 / ⌘2: open the panel on `view`, or close it if that's what's showing.
+    pub(crate) fn toggle_review_view(&mut self, view: review::View, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_diff && self.review_view_now(cx) == view {
+            return self.toggle_panel(cx);
+        }
+        self.set_review_view(view, window, cx);
+    }
+
     pub(crate) fn set_review_view(&mut self, view: review::View, window: &mut Window, cx: &mut Context<Self>) {
         self.show_diff = true;
         if let Some(r) = self.review(window, cx) {

@@ -391,8 +391,13 @@ struct Removable {
     path: String,
     label: String,
     branch: Option<String>,
-    /// Why it's safe ("pushed to origin", "merged into main", …) and when last used.
+    /// Why it's safe ("!123 merged", "pushed to origin", …) and when last used.
     note: String,
+    /// Finished: its MR/PR merged (HEAD in what was merged) or it's in the base.
+    /// Ticked by default; the rest are merely pushed — likely still in progress.
+    done: bool,
+    /// Merged via the code host (maybe squashed): its branch can go with `-D`.
+    squashed: bool,
     checked: bool,
 }
 
@@ -428,17 +433,43 @@ fn cleanup_worktrees_now(fr: Entity<ForestRanger>, project_id: String, window: &
     let total = linked.len();
     let view = cx.new(|cx: &mut Context<CleanupWorktrees>| {
         let r = repo.clone();
+        let pid = project_id.clone();
         let work = cx.background_executor().spawn(async move {
+            // Learn which origin branches were deleted, and bring the base up to date.
+            let base = git::resolve_base(&r, None);
+            let _ = git::fetch_base(&r, base.as_deref());
+            let branches: Vec<String> = candidates.iter().filter_map(|c| c.2.clone()).collect();
+            // No code host (or it fails): fall back to what git alone can tell.
+            let merged = crate::reviews::merged(&pid, &r, &branches).unwrap_or_default();
+            let sigil = match crate::codehost::matched(&pid, &r) {
+                Some((crate::codehost::Provider::GitLab, ..)) => "!",
+                _ => "#",
+            };
             let locked: Vec<String> = git::list_worktrees(&r).into_iter().filter(|e| e.locked).map(|e| e.path).collect();
-            candidates
+            let mut rows: Vec<Removable> = candidates
                 .into_iter()
                 .filter(|c| !locked.contains(&c.0))
                 .filter_map(|(path, label, branch, activity)| {
-                    let why = git::safe_to_remove(&r, &path)?;
+                    // HEAD is in a merged MR/PR (squash merges included) and nothing's uncommitted.
+                    let mr = branch.as_ref().and_then(|b| merged.get(b)).and_then(|ms| {
+                        let found = ms.iter().find(|(_, sha)| git::is_ancestor(&path, "HEAD", sha));
+                        found.filter(|_| git::is_clean(&path)).map(|(n, _)| *n)
+                    });
+                    let (why, done, squashed) = match mr {
+                        Some(n) => (format!("{sigil}{n} merged"), true, true),
+                        None => {
+                            let why = git::safe_to_remove(&r, &path)?;
+                            // Merged (or its folder's gone); not "pushed" or "no commits yet".
+                            let done = why.starts_with("merged") || why.starts_with("folder");
+                            (why, done, false)
+                        }
+                    };
                     let note = if activity > 0 { format!("{why} · {}", data::relative_time(activity)) } else { why };
-                    Some(Removable { path, label, branch, note, checked: true })
+                    Some(Removable { path, label, branch, note, done, squashed, checked: done })
                 })
-                .collect::<Vec<_>>()
+                .collect();
+            rows.sort_by_key(|r| !r.done);
+            rows
         });
         cx.spawn(async move |this, cx| {
             let rows = work.await;
@@ -460,7 +491,7 @@ impl CleanupWorktrees {
     }
 
     fn remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let chosen: Vec<(String, Option<String>)> = self.chosen().into_iter().map(|r| (r.path.clone(), r.branch.clone())).collect();
+        let chosen: Vec<(String, Option<String>, bool)> = self.chosen().into_iter().map(|r| (r.path.clone(), r.branch.clone(), r.squashed)).collect();
         if self.busy || chosen.is_empty() {
             return;
         }
@@ -470,7 +501,7 @@ impl CleanupWorktrees {
         let work = cx.background_executor().spawn(async move {
             let base = git::resolve_base(&repo, None);
             let mut removed = 0;
-            for (path, branch) in &chosen {
+            for (path, branch, squashed) in &chosen {
                 // Never forced: if anything changed since the check, git refuses and it stays.
                 if git::worktree_remove(&repo, path, false).is_err() {
                     continue;
@@ -478,7 +509,8 @@ impl CleanupWorktrees {
                 removed += 1;
                 // Only if merged into the base or fully pushed, and never the base itself.
                 if let Some(b) = branch.as_ref().filter(|b| delete_branches && Some(*b) != base.as_ref()) {
-                    let _ = git::delete_merged_branch(&repo, b, base.as_deref());
+                    // Squash-merged: not in the base's history, but the host says it landed.
+                    let _ = if *squashed { git::delete_branch(&repo, b, true) } else { git::delete_merged_branch(&repo, b, base.as_deref()) };
                 }
             }
             data::sync_worktrees(&pid, &repo).map(|()| (removed, chosen.len() - removed))
@@ -524,14 +556,19 @@ impl Render for CleanupWorktrees {
                 .gap(px(8.))
                 .max_h(px(320.))
                 .overflow_y_scroll()
-                .children(rows.iter().enumerate().map(|(i, r)| {
+                .children(rows.iter().enumerate().flat_map(|(i, r)| {
+                    // A heading where each group starts (done first, then merely pushed).
+                    let heading = (i == 0 || rows[i - 1].done != r.done).then(|| {
+                        let text = if r.done { "Merged — done with" } else { "Not merged — probably still in progress" };
+                        div().pt(px(if i == 0 { 0. } else { 8. })).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(x.faint).child(text.to_uppercase()).into_any_element()
+                    });
                     let title = match &r.branch {
                         Some(b) if *b != r.label => format!("{}  ({b})", r.label),
                         _ => r.label.clone(),
                     };
                     // The whole row toggles; the checkbox is just its indicator (no handler
                     // of its own, so a click on it isn't counted twice).
-                    div()
+                    let row = div()
                         .id(("cleanup-row", i))
                         .flex()
                         .flex_col()
@@ -552,7 +589,8 @@ impl Render for CleanupWorktrees {
                                 .child(div().min_w_0().font_family(mono.clone()).text_size(px(13.)).truncate().child(title)),
                         )
                         // Indented under the name: checkbox (16px) + gap (8px).
-                        .child(div().pl(px(24.)).text_size(px(12.)).text_color(x.faint).truncate().child(format!("{} · {}", r.note, data::tilde_path(&r.path))))
+                        .child(div().pl(px(24.)).text_size(px(12.)).text_color(x.faint).truncate().child(format!("{} · {}", r.note, data::tilde_path(&r.path))));
+                    heading.into_iter().chain([row.into_any_element()])
                 }))
                 .into_any_element(),
         };
@@ -561,7 +599,7 @@ impl Render for CleanupWorktrees {
             .flex_col()
             .gap_3()
             .child(div().text_size(px(12.5)).text_color(cx.theme().colors.muted_foreground).child(
-                "Worktrees with no uncommitted files and whose commits are all on origin or in the base branch. Removing one deletes its folder (ignored files like .env or node_modules included).",
+                "Worktrees with nothing uncommitted whose work is safe elsewhere: merged (its MR/PR merged, even squashed, or in the base branch) — ticked — or just pushed / not started yet. Removing one deletes its folder (ignored files like .env or node_modules included).",
             ))
             .child(body)
             .when(self.kept > 0, |d| {

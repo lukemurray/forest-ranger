@@ -50,6 +50,8 @@ struct ForestRanger {
     selected: Option<String>,
     /// The project page shown instead of a worktree (then `selected` is None).
     project_view: Option<project_view::ProjectPage>,
+    /// Open MRs/PRs needing you, per project id (the sidebar's and the page tab's badge).
+    needs_you: HashMap<String, usize>,
     /// Run commands per project id, loaded on first use.
     commands: HashMap<String, Vec<data::RunCommand>>,
     /// Expanded project ids in the sidebar tree.
@@ -190,6 +192,7 @@ impl ForestRanger {
             selected: None,
             project_view: None,
             commands: HashMap::new(),
+            needs_you: HashMap::new(),
             expanded: HashSet::new(),
             chats: vec![],
             tabs: Default::default(),
@@ -220,6 +223,7 @@ impl ForestRanger {
         this.load_activity(cx);
         this.sync_all(cx);
         this.restore_place(cx);
+        this.poll_needs_you(cx);
         dev::bench(window, cx);
         this
     }
@@ -494,7 +498,7 @@ impl ForestRanger {
         });
     }
 
-    fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         self.show_diff = !self.show_diff;
         self.save_panel(cx);
         cx.notify();
@@ -683,8 +687,16 @@ impl ForestRanger {
     }
 
     /// The most urgent attention across a worktree's open chats.
+    /// The most pressing of its chats; a terminal running something counts as Working.
     pub(crate) fn worktree_attention(&self, wt: &str, cx: &App) -> Attention {
-        self.chats().filter(|(w, _)| *w == wt).map(|(_, c)| c.read(cx).attention()).min().unwrap_or(Attention::Idle)
+        let chats = self.chats().filter(|(w, _)| *w == wt).map(|(_, c)| c.read(cx).attention()).min().unwrap_or(Attention::Idle);
+        let term = self.busy_terms(cx).any(|w| w == wt).then_some(Attention::Working).unwrap_or(Attention::Idle);
+        chats.min(term)
+    }
+
+    /// The worktree ids of terminals running something (one per busy terminal).
+    fn busy_terms<'a>(&'a self, cx: &'a App) -> impl Iterator<Item = &'a String> + 'a {
+        self.tabs.iter().flat_map(move |(wt, t)| t.open.iter().filter(move |t| matches!(t, Tab::Term(v) if v.read(cx).busy())).map(move |_| wt))
     }
 
     pub(crate) fn project_attention(&self, p: &Project, cx: &App) -> Attention {
@@ -805,7 +817,8 @@ impl ForestRanger {
 impl Render for ForestRanger {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.save_place(cx);
-        let pulsing = self.chats().any(|(_, c)| matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer));
+        let pulsing = self.chats().any(|(_, c)| matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer))
+            || self.busy_terms(cx).next().is_some();
         self.ticker.keep(pulsing, cx);
         // Nothing focused (e.g. the focused tab was closed): take focus back so the
         // window's shortcuts keep working.
@@ -858,8 +871,8 @@ impl Render for ForestRanger {
             }))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
-            .on_action(cx.listener(|this, _: &ShowReview, window, cx| this.set_review_view(review::View::Review, window, cx)))
-            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.set_review_view(review::View::Files, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowReview, window, cx| this.toggle_review_view(review::View::Review, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.toggle_review_view(review::View::Files, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSearch, window, cx| this.set_review_view(review::View::Search, window, cx)))
             .child(
                 h_resizable("shell")

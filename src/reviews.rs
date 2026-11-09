@@ -4,6 +4,8 @@
 //! pipeline). GitHub: `gh pr list --json` (review requests, decision, merge state,
 //! checks; no thread counts — "changes requested" stands in).
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::codehost::{self, CheckState, Provider};
@@ -131,6 +133,61 @@ pub fn list(project_id: &str, repo_path: &str) -> Result<(Provider, Vec<Mr>), St
     };
     mrs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok((p, mrs))
+}
+
+/// Merged MRs/PRs whose source branch is one of `branches`: branch → [(number,
+/// head commit)] (a reused branch name can have several). One query.
+pub fn merged(project_id: &str, repo_path: &str, branches: &[String]) -> Result<HashMap<String, Vec<(u64, String)>>, String> {
+    if branches.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (p, host, path, cli) = codehost::matched(project_id, repo_path).ok_or("no GitHub or GitLab integration for this repo")?;
+    if !cli {
+        return Err(format!("{} isn't connected through {}", p.label(), p.cli()));
+    }
+    let pairs = match p {
+        Provider::GitLab => {
+            let hostname = codehost::strip_scheme(&codehost::site_url(host.as_str())).to_string();
+            // JSON strings are valid GraphQL string literals.
+            let q = format!(
+                "query={{ project(fullPath: {}) {{ mergeRequests(state: merged, sourceBranches: {}, first: 100) {{ nodes {{ iid sourceBranch diffHeadSha }} }} }} }}",
+                Value::from(path.as_str()),
+                Value::from(branches.to_vec()),
+            );
+            let out = codehost::run_cli("glab", &["api", "graphql", "--hostname", &hostname, "-f", &q]).map_err(|e| format!("GitLab via glab: {e}"))?;
+            let v: Value = serde_json::from_str(&out).map_err(|_| "GitLab via glab: unexpected response".to_string())?;
+            if let Some(e) = v["errors"].get(0) {
+                return Err(format!("GitLab: {}", e["message"].as_str().unwrap_or("query failed")));
+            }
+            parse_merged(&v["data"]["project"]["mergeRequests"]["nodes"], "sourceBranch", "diffHeadSha", "iid")
+        }
+        Provider::GitHub => {
+            let hostname = codehost::bare_host(&host);
+            let repo = if hostname == "github.com" { path.clone() } else { format!("{hostname}/{path}") };
+            // ponytail: last 500 merged PRs; older merged worktrees fall back to the git-only check.
+            let out = codehost::run_cli("gh", &["pr", "list", "--repo", &repo, "--state", "merged", "--limit", "500", "--json", "number,headRefName,headRefOid"])
+                .map_err(|e| format!("GitHub via gh: {e}"))?;
+            let v: Value = serde_json::from_str(&out).map_err(|_| "GitHub via gh: unexpected response".to_string())?;
+            parse_merged(&v, "headRefName", "headRefOid", "number")
+        }
+    };
+    let mut by: HashMap<String, Vec<(u64, String)>> = HashMap::new();
+    for (b, n, sha) in pairs.into_iter().filter(|(b, ..)| branches.contains(b)) {
+        by.entry(b).or_default().push((n, sha));
+    }
+    Ok(by)
+}
+
+/// (branch, number, head sha) from either host's list; the number may be a string (GitLab iid).
+fn parse_merged(list: &Value, branch: &str, sha: &str, number: &str) -> Vec<(String, u64, String)> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let n = m[number].as_u64().or_else(|| m[number].as_str()?.parse().ok())?;
+            Some((m[branch].as_str()?.to_string(), n, m[sha].as_str()?.to_string()))
+        })
+        .collect()
 }
 
 const GITLAB_QUERY: &str = "query($path: ID!) {
@@ -322,6 +379,14 @@ mod tests {
         // Their unresolved threads aren't yours to answer.
         assert_eq!(Mr { unresolved: 3, ..theirs.clone() }.section(), Section::Others);
         assert_eq!(Mr { bot: true, ..theirs }.section(), Section::Ready);
+    }
+
+    #[test]
+    fn parses_merged() {
+        let gl = serde_json::json!([{ "iid": "12", "sourceBranch": "fix/a", "diffHeadSha": "abc" }, { "iid": "13", "sourceBranch": null }]);
+        assert_eq!(super::parse_merged(&gl, "sourceBranch", "diffHeadSha", "iid"), [("fix/a".to_string(), 12, "abc".to_string())]);
+        let gh = serde_json::json!([{ "number": 7, "headRefName": "b", "headRefOid": "def" }]);
+        assert_eq!(super::parse_merged(&gh, "headRefName", "headRefOid", "number"), [("b".to_string(), 7, "def".to_string())]);
     }
 
     #[test]

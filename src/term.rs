@@ -271,6 +271,10 @@ pub struct TermChanged;
 /// A run command with `close_on_success` exited 0: its tab can close.
 pub struct TermFinished;
 
+/// The window title a run command's script sets when its command finishes and the
+/// interactive shell takes over (it isn't shown: a run tab is titled by its label).
+const RUN_DONE: &str = "forest-ranger:run-done";
+
 /// A command for a new terminal to run (a project's run command).
 pub struct Run {
     pub label: String,
@@ -299,7 +303,12 @@ pub struct TerminalView {
     /// Where the cursor was last drawn, for the input method's candidate window.
     cursor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     scroll_px: f32,
+    /// Still in a run command's own command (before its interactive shell).
+    run_phase: bool,
+    /// Something other than the idle shell is running (see `TerminalView::busy`).
+    busy: bool,
     _events: Task<()>,
+    _poll: Task<()>,
 }
 
 impl EventEmitter<TermChanged> for TerminalView {}
@@ -347,6 +356,7 @@ pub struct Session {
     rx: async_channel::Receiver<Event>,
     /// A Wakeup is queued and not yet handled: output bursts send just one.
     woken: Arc<std::sync::atomic::AtomicBool>,
+    run_phase: bool,
 }
 
 /// A login shell in `cwd`; with a `Run`, it runs that command first and then
@@ -356,8 +366,11 @@ pub fn start(cwd: &str, run: Option<Run>) -> std::io::Result<Session> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let args = match &run {
         // Braces + newline: the whole command line (`a; b`, a trailing comment) is the test.
-        Some(r) if r.close_on_success => vec!["-l".into(), "-c".into(), format!("{{ {}\n}} && exit 0; exec {shell} -i", r.command)],
-        Some(r) => vec!["-l".into(), "-c".into(), format!("{}; exec {shell} -i", r.command)],
+        // The shell's job control isn't on while the command runs, so it says when it's done.
+        Some(r) if r.close_on_success => {
+            vec!["-l".into(), "-c".into(), format!("{{ {}\n}} && exit 0; printf '\\033]2;{RUN_DONE}\\007'; exec {shell} -i", r.command)]
+        }
+        Some(r) => vec!["-l".into(), "-c".into(), format!("{}\nprintf '\\033]2;{RUN_DONE}\\007'; exec {shell} -i", r.command)],
         None => vec!["-l".to_string()],
     };
     let (cols, rows) = (80, 24);
@@ -423,7 +436,8 @@ pub fn start(cwd: &str, run: Option<Run>) -> std::io::Result<Session> {
         let _ = events.try_send(Event::Exit(code));
     });
     let close_on_success = run.as_ref().is_some_and(|r| r.close_on_success);
-    Ok(Session { label: run.map(|r| r.label), close_on_success, vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx, woken })
+    let run_phase = run.is_some();
+    Ok(Session { label: run.map(|r| r.label), close_on_success, vt, pty: Arc::new(Pty { master, pid, tx: pty_tx }), rx, woken, run_phase })
 }
 
 /// GPUI key name → libghostty key, and the text it types (for letters and symbols).
@@ -508,7 +522,34 @@ impl TerminalView {
             marked: None,
             cursor_bounds: Rc::new(Cell::new(None)),
             scroll_px: 0.,
+            run_phase: s.run_phase,
+            busy: s.run_phase,
             _events: events,
+            // Each second: has a program started or finished? (Tells the sidebar and tab.)
+            _poll: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                    let alive = this.update(cx, |t, cx| t.check_busy(cx));
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            }),
+        }
+    }
+
+    /// A program is running: a run command's own command, or any foreground job
+    /// in the shell (the terminal's foreground process group isn't the shell's).
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    fn check_busy(&mut self, cx: &mut Context<Self>) {
+        let pgrp = unsafe { libc::tcgetpgrp(self.pty.master.as_raw_fd()) };
+        let busy = self.exited.is_none() && (self.run_phase || (pgrp > 0 && pgrp != self.pty.pid));
+        if busy != self.busy {
+            self.busy = busy;
+            cx.emit(TermChanged);
         }
     }
 
@@ -520,6 +561,10 @@ impl TerminalView {
     fn on_event(&mut self, ev: Event, cx: &mut Context<Self>) {
         match ev {
             Event::Wakeup => {}
+            Event::Title(t) if t == RUN_DONE => {
+                self.run_phase = false;
+                self.check_busy(cx);
+            }
             Event::Title(t) => {
                 self.shell_title = Some(t);
                 cx.emit(TermChanged);
@@ -527,6 +572,7 @@ impl TerminalView {
             Event::Clipboard(s) => cx.write_to_clipboard(ClipboardItem::new_string(s)),
             Event::Exit(code) => {
                 self.exited = Some(code);
+                self.check_busy(cx);
                 cx.emit(TermChanged);
                 if self.close_on_success && code == Some(0) {
                     cx.emit(TermFinished);
@@ -1008,7 +1054,8 @@ impl Render for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ctx, Event, Run, Vt, ghostty_key, start};
+    use super::{Ctx, Event, RUN_DONE, Run, Vt, ghostty_key, start};
+    use std::os::fd::AsRawFd as _;
     use crate::ghostty as g;
 
     fn vt() -> Vt {
@@ -1081,5 +1128,29 @@ mod tests {
         };
         assert_eq!(run("true; echo done # trailing comment"), Some(Some(0)));
         assert_eq!(run("false"), None, "a failed command keeps the shell open");
+    }
+
+    /// Busy detection: a run command announces when it's done; a job typed in the
+    /// shell takes the terminal's foreground process group, and gives it back.
+    #[test]
+    fn busy() {
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let s = start(&dir, Some(Run { label: "t".into(), command: "sleep 1".into(), close_on_success: false })).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !matches!(s.rx.recv_blocking(), Ok(Event::Title(t)) if t == RUN_DONE) {
+            assert!(std::time::Instant::now() < deadline, "no run-done marker");
+        }
+        let fg = || unsafe { libc::tcgetpgrp(s.pty.master.as_raw_fd()) };
+        let wait_for = |want_busy: bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while (fg() != s.pty.pid) != want_busy {
+                assert!(std::time::Instant::now() < deadline, "foreground group never became busy={want_busy}");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        wait_for(false);
+        s.pty.tx.send(b"sleep 2\n".to_vec()).unwrap();
+        wait_for(true);
+        wait_for(false);
     }
 }

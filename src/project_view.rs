@@ -197,7 +197,8 @@ impl ForestRanger {
             return div().p_6().text_color(theme.muted_foreground).child("This project is no longer available.").into_any_element();
         };
         let (pid, repo) = (p.id.clone(), p.path.clone());
-        let (requests_label, needs_you) = self.project_view.as_ref().map(|v| (v.requests.label(), v.requests.needs_you())).unwrap_or(("Merge requests", 0));
+        let requests_label = self.project_view.as_ref().map(|v| v.requests.label()).unwrap_or("Merge requests");
+        let needs_you = self.needs_you.get(&pid).copied().unwrap_or(0);
         let tab_btn = |id: &'static str, label: &'static str, t: PageTab| {
             let on = tab == t;
             let badge = (t == PageTab::Requests && needs_you > 0).then(|| {

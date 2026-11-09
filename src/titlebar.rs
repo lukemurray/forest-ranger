@@ -227,11 +227,41 @@ impl ForestRanger {
                             .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, _| settings::reveal(&p)))
                         }),
                 )
-                .child(
-                    self.icon_btn("panel", "fr/panel-right.svg", self.show_diff, cx)
-                        .tooltip(sidebar::tip(if self.show_diff { "Hide review panel (⌘B)" } else { "Show review panel (⌘B)" }))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
-                ),
+                .child(div().w(px(1.)).h(px(20.)).mx(px(2.)).bg(theme.border))
+                // The panel's views as one segmented control: each opens the panel on
+                // it, or closes it if it's showing; the open one is tinted green.
+                .child({
+                    let now = self.show_diff.then(|| self.review_view_now(cx));
+                    let views = [
+                        ("p-review", "fr/git-compare.svg", review::View::Review, "Review  ⌘1"),
+                        ("p-files", "fr/folder-tree.svg", review::View::Files, "Files  ⌘2"),
+                        ("p-search", "icons/search.svg", review::View::Search, "Search  ⌘⇧F"),
+                    ];
+                    div()
+                        .flex()
+                        .items_stretch()
+                        .overflow_hidden()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(x.border_strong)
+                        .children(views.into_iter().enumerate().map(|(i, (id, icon, view, tip))| {
+                            let on = now == Some(view);
+                            div()
+                                .id(id)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px(px(9.))
+                                .py(px(6.))
+                                .cursor_pointer()
+                                .when(i > 0, |d| d.border_l_1().border_color(x.border_strong))
+                                .when(on, |d| d.bg(theme.primary.opacity(0.14)))
+                                .when(!on, |d| d.hover(|s| s.bg(x.hover)))
+                                .child(sidebar::icon(icon, 15., if on { theme.primary } else { theme.muted_foreground }))
+                                .tooltip(sidebar::tip(tip))
+                                .on_click(cx.listener(move |this, _, window, cx| this.toggle_review_view(view, window, cx)))
+                        }))
+                }),
         )
         .into_any_element()
     }

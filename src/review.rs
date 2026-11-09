@@ -676,11 +676,6 @@ impl ReviewPanel {
             .into_any_element()
     }
 
-    fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.view = view;
-        cx.notify();
-    }
-
     /// List every file the first time the Files view shows.
     fn load_files(&mut self, cx: &mut Context<Self>) {
         let path = self.path.clone();
@@ -1124,14 +1119,11 @@ impl ReviewPanel {
         // Summary strip: HEAD, ahead/behind vs base, update, tracking, push, reattach, badges.
         let mut summary = div()
             .flex()
+            .flex_1()
+            .min_w_0()
             .flex_wrap()
             .items_center()
             .gap(px(20.))
-            .pt(px(14.))
-            .pb(px(16.))
-            .mb(px(14.))
-            .border_b_1()
-            .border_color(theme.border)
             .child(self.stat(d.head.as_deref().map(|h| h[..7.min(h.len())].to_string()).unwrap_or("—".into()), "HEAD", cx))
             .child(self.stat(crate::data::relative_time(self.activity), "last change", cx));
         if let (Some(b), true) = (&base, d.ahead > 0 || d.behind > 0) {
@@ -1166,9 +1158,13 @@ impl ReviewPanel {
             summary = summary.child(self.stat(up.clone(), "tracking", cx)).child(self.stat(sync, "vs tracking", cx));
         }
         if can_push {
-            let label = if d.upstream.is_some() { format!("Push ↑{}", d.upstream_ahead) } else { "Push".into() };
+            let label = if d.upstream.is_some() { format!("Push ↑{}", d.upstream_ahead) } else { "Publish".into() };
             let branch = d.branch.clone().unwrap_or_default();
-            summary = summary.child(amber_button("push", label, cx).on_click(cx.listener(move |this, _, _, cx| {
+            let tip = match &d.upstream {
+                Some(up) => format!("Push {} commit{} to {up}", d.upstream_ahead, plural(d.upstream_ahead as usize)),
+                None => format!("Push {branch} to origin and track it (it isn't on the remote yet)"),
+            };
+            summary = summary.child(amber_button("push", label, cx).tooltip(tip).on_click(cx.listener(move |this, _, _, cx| {
                 this.act("Pushing…", format!("Pushed {branch} to origin"), git::push, cx)
             })));
         }
@@ -1190,11 +1186,23 @@ impl ReviewPanel {
                     .when(self.is_primary(), |d| d.child(Self::badge("primary", x.green)))
                     .when(detached, |d| d.child(Self::badge("detached", x.amber)))
                     .when(self.locked, |d| d.child(Self::badge("locked", theme.muted_foreground))),
-            )
-            .child(div().flex_1())
+            );
+        // The stats wrap; refresh stays pinned top-right rather than wrapping onto a row of its own.
+        let summary = div()
+            .flex()
+            .items_start()
+            .gap_2()
+            .pt(px(14.))
+            .pb(px(16.))
+            .mb(px(14.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(summary)
             .child(
                 div()
                     .id("refresh")
+                    .flex_shrink_0()
+                    .tooltip(|window, cx| Tooltip::new("Refresh git status and the MR/PR").build(window, cx))
                     .size(px(26.))
                     .flex()
                     .items_center()
@@ -1370,6 +1378,13 @@ impl ReviewPanel {
             });
         if let Some((commit_box, head, body)) = uncommitted {
             col = col.child(commit_box).child(head).children(body);
+        }
+        // The primary worktree with no base has nothing to compare: just its uncommitted work.
+        if self.is_primary() && base.is_none() {
+            if d.uncommitted.is_empty() {
+                col = col.child(div().px_1().text_size(px(12.5)).text_color(x.faint).child("No uncommitted changes."));
+            }
+            return col.into_any_element();
         }
         col.child(changes_head).children(committed_body).into_any_element()
     }
@@ -1654,28 +1669,10 @@ impl Render for ReviewPanel {
             }
         }
         let theme = cx.theme().colors;
-        let x = theme::extra(cx);
         let body = match self.view {
             View::Review => self.review_view(window, cx),
             View::Files => self.files_view(window, cx),
             View::Search => self.search_view(cx),
-        };
-        let tab = |id: &'static str, label: &'static str, view: View, hint: &'static str, cx: &mut Context<Self>| {
-            let active = self.view == view;
-            div()
-                .id(id)
-                .px(px(12.))
-                .py(px(5.))
-                .rounded(px(6.))
-                .text_size(px(12.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .cursor_pointer()
-                .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                .when(active, |d| d.bg(theme.list_active))
-                .hover(|s| s.bg(x.hover))
-                .child(label)
-                .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
         };
         div()
             .flex()
@@ -1683,18 +1680,6 @@ impl Render for ReviewPanel {
             .size_full()
             .border_l_1()
             .border_color(theme.border)
-            .child(
-                div()
-                    .flex()
-                    .gap(px(2.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(tab("t-review", "Review", View::Review, "⌘1", cx))
-                    .child(tab("t-files", "Files", View::Files, "⌘2", cx))
-                    .child(tab("t-search", "Search", View::Search, "⌘⇧F", cx)),
-            )
             .child(body)
     }
 }

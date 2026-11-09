@@ -64,6 +64,8 @@ pub struct SessionState {
     /// Diff tabs' last-used toggles; new diff tabs open the same way.
     pub diff_unified: bool,
     pub diff_full: bool,
+    /// The run command used last, per project id (the titlebar's ▶ Run face).
+    pub last_run: HashMap<String, String>,
     save_pending: bool,
 }
 
@@ -128,6 +130,10 @@ impl SessionState {
             location: v["location"].as_str().map(str::to_string),
             diff_unified: v["diffUnified"].as_bool().unwrap_or(false),
             diff_full: v["diffFull"].as_bool().unwrap_or(false),
+            last_run: v["lastRun"]
+                .as_object()
+                .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+                .unwrap_or_default(),
             save_pending: false,
         }
     }
@@ -159,6 +165,7 @@ impl SessionState {
             "location": self.location,
             "diffUnified": self.diff_unified,
             "diffFull": self.diff_full,
+            "lastRun": self.last_run,
         })
     }
 
@@ -278,9 +285,11 @@ mod tests {
         let mut s = SessionState::from_json(&json!(null));
         assert!(!s.diff_unified && !s.diff_full);
         (s.diff_unified, s.diff_full) = (true, true);
+        s.last_run.insert("p1".into(), "c1".into());
         (s.expanded, s.location) = (vec!["p1".into()], Some("project:p1".into()));
         let back = SessionState::from_json(&s.to_json());
         assert!(back.diff_unified && back.diff_full);
+        assert_eq!(back.last_run.get("p1").map(String::as_str), Some("c1"));
         assert_eq!((back.expanded, back.location.as_deref()), (vec!["p1".to_string()], Some("project:p1")));
     }
 

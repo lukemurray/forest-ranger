@@ -222,7 +222,17 @@ impl ForestRanger {
                         cx.stop_propagation();
                         this.rescan(scan_pid.clone(), scan_path.clone(), cx);
                     })))
-                    // Hover actions take the row's right edge; the dot steps aside.
+                    // Hover actions take the row's right edge; the badge and dot step aside.
+                    .children(self.needs_you.get(&p.id).filter(|n| **n > 0).map(|n| {
+                        div()
+                            .group_hover("prow", |s| s.invisible())
+                            .px(px(6.))
+                            .rounded(px(8.))
+                            .bg(x.amber.opacity(0.18))
+                            .text_size(px(11.))
+                            .text_color(x.amber)
+                            .child(n.to_string())
+                    }))
                     .children(dot.map(|d| div().group_hover("prow", |s| s.invisible()).child(d)))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_project(pid.clone(), cx)))
                     .context_menu(move |menu, _, _| {
