@@ -51,6 +51,8 @@ pub struct Mr {
     pub merge: Merge,
     /// ISO 8601, newest first in each section.
     pub updated_at: String,
+    /// The head commit (to skip fetching when it's already here).
+    pub head: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -195,7 +197,7 @@ const GITLAB_QUERY: &str = "query($path: ID!) {
   project(fullPath: $path) {
     mergeRequests(state: opened, first: 100, sort: UPDATED_DESC) {
       nodes {
-        iid title webUrl draft sourceBranch updatedAt approved detailedMergeStatus
+        iid title webUrl draft sourceBranch diffHeadSha updatedAt approved detailedMergeStatus
         resolvableDiscussionsCount resolvedDiscussionsCount
         author { username bot }
         headPipeline { status }
@@ -264,13 +266,14 @@ fn parse_gitlab(data: &Value) -> Vec<Mr> {
                 pipeline,
                 merge,
                 updated_at: s(m, "updatedAt"),
+                head: s(m, "diffHeadSha"),
             }
         })
         .collect()
 }
 
 const GITHUB_FIELDS: &str =
-    "number,title,url,author,headRefName,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,reviewRequests,updatedAt";
+    "number,title,url,author,headRefName,headRefOid,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,reviewRequests,updatedAt";
 
 fn github(host: &str, slug: &str) -> Result<Vec<Mr>, String> {
     let hostname = codehost::bare_host(host);
@@ -331,6 +334,7 @@ fn parse_github(prs: &Value, me: &str) -> Vec<Mr> {
                 pipeline,
                 merge,
                 updated_at: s(p, "updatedAt"),
+                head: s(p, "headRefOid"),
             }
         })
         .collect()
@@ -358,6 +362,7 @@ mod tests {
             pipeline: Some(CheckState::Success),
             merge: Merge::Ready,
             updated_at: String::new(),
+            head: String::new(),
         }
     }
 

@@ -764,14 +764,21 @@ pub fn try_list_worktrees(repo: &str) -> Result<Vec<WorktreeEntry>, String> {
     if o.ok { Ok(parse_worktree_list(&o.stdout)) } else { Err(err_text(&o, "git worktree list failed")) }
 }
 
-/// Fetch origin (pruned), then best-effort fast-forward the local base: through
-/// its worktree when it's checked out, else via a refspec — TS `fetchProject`.
-/// Fetch one branch from origin (updating `origin/<branch>`), e.g. an MR's before review.
-pub fn fetch_branch(repo: &str, branch: &str) -> Result<(), String> {
+/// An MR/PR's head as `origin/<branch>`, for review. Fetched by its MR/PR ref
+/// (GitHub `pull/N/head`, GitLab `merge-requests/N/head`), so a fork's branch works
+/// too; skipped when `origin/<branch>` is already at `head` (no network round trip).
+pub fn fetch_review_head(repo: &str, github: bool, number: u64, branch: &str, head: &str) -> Result<(), String> {
     check_branch(branch)?;
-    run(repo, &["fetch", "origin", branch], "fetch failed")
+    let remote = format!("refs/remotes/origin/{branch}");
+    if !head.is_empty() && git_line(repo, &["rev-parse", "--verify", "--quiet", &remote]).as_deref() == Some(head) {
+        return Ok(());
+    }
+    let src = if github { format!("pull/{number}/head") } else { format!("merge-requests/{number}/head") };
+    run(repo, &["fetch", "origin", &format!("+refs/{src}:{remote}")], "fetch failed")
 }
 
+/// Fetch origin (pruned), then best-effort fast-forward the local base: through
+/// its worktree when it's checked out, else via a refspec — TS `fetchProject`.
 pub fn fetch_base(repo: &str, base: Option<&str>) -> Result<(), String> {
     run(repo, &["fetch", "origin", "--prune"], "fetch failed")?;
     if let Some(b) = base {
@@ -958,6 +965,12 @@ mod tests {
         assert!(delete_branch(&p, "merged", false).is_err(), "-d judges by the upstream");
         delete_merged_branch(&p, "merged", Some("main")).unwrap();
         assert!(delete_merged_branch(&p, "feat", Some("main")).is_err(), "feat has commits main lacks");
+        // Review of an MR already here: no fetch (this origin has no pull refs, so one would fail).
+        let main_sha = git_line(&p, &["rev-parse", "main"]).unwrap();
+        sh(&["update-ref", "refs/remotes/origin/pr-branch", &main_sha]);
+        fetch_review_head(&p, true, 7, "pr-branch", &main_sha).unwrap();
+        assert!(fetch_review_head(&p, true, 7, "pr-branch", "0000").is_err(), "a different head is fetched");
+        sh(&["update-ref", "-d", "refs/remotes/origin/pr-branch"]);
         sh(&["remote", "remove", "origin"]);
         rename_branch(&p, "side", "side2").unwrap();
         delete_branch(&p, "side2", false).unwrap();

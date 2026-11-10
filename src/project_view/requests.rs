@@ -129,12 +129,12 @@ impl ForestRanger {
     /// "Review a branch" with it picked.
     fn review_request(&mut self, mr: &Mr, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.page_project() else { return };
-        let (pid, repo, branch, number) = (p.id.clone(), p.path.clone(), mr.branch.clone(), mr.number);
-        if let Some(s) = self.requests_state() {
-            s.fetching = Some(number);
-        }
+        let (pid, repo, branch, number, head) = (p.id.clone(), p.path.clone(), mr.branch.clone(), mr.number, mr.head.clone());
+        let Some(s) = self.requests_state() else { return };
+        let github = matches!(s.result, Some(Ok((Provider::GitHub, _))));
+        s.fetching = Some(number);
         let work = cx.background_executor().spawn(async move {
-            let fetched = git::fetch_branch(&repo, &branch);
+            let fetched = git::fetch_review_head(&repo, github, number, &branch, &head);
             // As list_branches names it: the local branch, else origin's.
             let local = git::list_branches(&repo).contains(&branch);
             (fetched, if local { branch } else { format!("origin/{branch}") })

@@ -22,6 +22,8 @@ under the version it will ship in.
   next launch, each where you last put it; removing the worktree closes its window.
 
 ### Fixed
+- Review on a merge/pull request is instant when its latest commit is already fetched,
+  and works for PRs from forks (it fetched a branch name origin doesn't have).
 - Review a branch: the branch picker has focus when the dialog opens.
 - Plan approvals show the plan as Markdown (scrolling when long) instead of a cut-off
   line of JSON.
