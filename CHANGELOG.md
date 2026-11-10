@@ -3,7 +3,7 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
-## Unreleased
+## 0.16.1 — 2026-11-10
 
 ### Sidebar
 - A running terminal no longer hides a chat's state: the word (working / ready / needs
