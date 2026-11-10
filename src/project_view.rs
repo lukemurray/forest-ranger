@@ -49,6 +49,9 @@ impl ForestRanger {
         if self.project_view.as_ref().is_some_and(|v| v.id == id) {
             return;
         }
+        if self.locked.is_some() {
+            return self.forward_to_main(format!("project:{id}"), cx);
+        }
         if let Some(prev) = self.location() {
             self.back.push(prev);
         }

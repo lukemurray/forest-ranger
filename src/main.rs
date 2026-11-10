@@ -25,6 +25,7 @@ mod theme;
 mod tree;
 mod tabs;
 mod titlebar;
+mod windows;
 mod dev;
 
 use std::collections::{HashMap, HashSet};
@@ -42,8 +43,16 @@ use chat::{Attention, ChatEvent, ChatView};
 use data::{ChatMeta, Project};
 use session_state::{SessionState, initial_bounds, write_window_state};
 use tabs::{Tab, Tabs};
+use windows::Windows;
 
 struct ForestRanger {
+    /// A popped-out window's one worktree (None: the main window, with the sidebar).
+    locked: Option<String>,
+    /// Live chats / terminals handed over from another window, by tab key; they
+    /// take their saved places when the worktree's tabs are restored here.
+    adopted: HashMap<String, Tab>,
+    /// Main window: watching each popped-out window, to redraw its worktree's dots.
+    window_subs: HashMap<String, Subscription>,
     projects: Vec<Project>,
     error: Option<String>,
     /// Selected worktree id.
@@ -145,7 +154,21 @@ fn view_of(name: &str) -> review::View {
 }
 
 impl ForestRanger {
+    /// The main window's shell.
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::build(None, window, cx);
+        this.load_activity(cx);
+        this.sync_all(cx);
+        this.restore_place(cx);
+        this.poll_needs_you(cx);
+        dev::bench(window, cx);
+        dev::smoke_popout(window, cx);
+        this
+    }
+
+    /// A shell for the main window (`locked` None) or a popped-out worktree.
+    fn build(locked: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let main = locked.is_none();
         let (projects, error) = match data::load_projects() {
             Ok(p) => (p, None),
             Err(e) => (vec![], Some(e)),
@@ -155,9 +178,15 @@ impl ForestRanger {
             theme::apply(dark, cx);
             window.refresh();
         });
-        // Remember the window's size and position (debounced while dragging).
+        // Remember the window's size and position: the main window's in
+        // window-state.json (debounced while dragging), a popped-out one's per worktree.
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
-            this.bounds = Some(window.window_bounds().get_bounds());
+            let b = window.window_bounds().get_bounds();
+            if let Some(wt) = this.locked.clone() {
+                let r = [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)].map(f32::round);
+                return SessionState::update(cx, |s| _ = s.popped_bounds.insert(wt, r));
+            }
+            this.bounds = Some(b);
             this.save_bounds = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
                 let _ = this.update(cx, |this, _| this.bounds.map(write_window_state));
@@ -170,11 +199,17 @@ impl ForestRanger {
             SessionState::flush(cx);
             async {}
         });
-        // The window's close button: same check as ⌘⇧W (the dialog closes it if you agree).
+        // The window's close button: the main window quits (asking first if anything's
+        // busy); a popped-out one docks its worktree back into the main window.
         let fr = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             let Some(fr) = fr.upgrade() else { return true };
-            if fr.read(cx).busy_summary(None, cx).is_none() {
+            if !main {
+                fr.update(cx, |fr, cx| fr.dock_back(cx));
+                return true;
+            }
+            if fr.read(cx).busy_summary(None, fr.entity_id(), cx).is_none() {
+                cx.quit();
                 return true;
             }
             fr.update(cx, |fr, cx| fr.confirm_leave(false, window, cx));
@@ -182,21 +217,32 @@ impl ForestRanger {
         });
         // Window focus decides whether a finished turn is unread (re-checked on render).
         let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
-        cx.spawn(async move |this, cx| {
-            let clicks = notify::clicks();
-            while let Ok((wt, key)) = clicks.recv().await {
-                let ok = this.update(cx, |this, cx| {
-                    cx.activate(true);
-                    this.select(wt, cx);
-                    this.focus_tab(&key, cx);
-                });
-                if ok.is_err() {
-                    break;
+        // Notification clicks (the main window takes them; a popped-out worktree's go there).
+        if main {
+            cx.spawn(async move |this, cx| {
+                let clicks = notify::clicks();
+                while let Ok((wt, key)) = clicks.recv().await {
+                    let ok = this.update(cx, |this, cx| {
+                        cx.activate(true);
+                        if let Some((h, fr)) = Windows::popped(cx, &wt) {
+                            let _ = h.update(cx, |_, window, _| window.activate_window());
+                            fr.update(cx, |fr, cx| _ = fr.focus_tab(&key, cx));
+                            return;
+                        }
+                        this.select(wt, cx);
+                        this.focus_tab(&key, cx);
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
                 }
-            }
-        })
-        .detach();
-        let mut this = Self {
+            })
+            .detach();
+        }
+        Self {
+            locked,
+            adopted: HashMap::new(),
+            window_subs: HashMap::new(),
             projects,
             error,
             selected: None,
@@ -228,14 +274,9 @@ impl ForestRanger {
             tab_subs: vec![],
             diff_loads: HashMap::new(),
             _load_chats: Task::ready(()),
-            _subs: vec![appearance, bounds, quit, activation],
-        };
-        this.load_activity(cx);
-        this.sync_all(cx);
-        this.restore_place(cx);
-        this.poll_needs_you(cx);
-        dev::bench(window, cx);
-        this
+            // Window size and app-quit saving are the main window's.
+            _subs: if main { vec![appearance, bounds, quit, activation] } else { vec![appearance, bounds, activation] },
+        }
     }
 
     /// Bring the DB in line with `git worktree list` for every project (new or
@@ -301,6 +342,7 @@ impl ForestRanger {
         let wts: HashSet<String> = self.projects.iter().flat_map(|p| &p.worktrees).map(|w| w.id.clone()).collect();
         let pids: HashSet<String> = self.projects.iter().map(|p| format!("project:{}", p.id)).collect();
         let live = |id: &String| wts.contains(id) || pids.contains(id);
+        self.close_removed_popped(cx);
         self.tabs.retain(|id, _| live(id));
         self.reviews.retain(|id, _| live(id));
         self.restored.retain(|id| live(id));
@@ -310,7 +352,7 @@ impl ForestRanger {
             self.selected = None;
         }
         self.prune();
-        self.update_badge(cx);
+        self.update_badge(cx.entity_id(), cx);
         self.load_activity(cx);
         if self.project_view.is_some() {
             self.load_page(cx);
@@ -437,6 +479,14 @@ impl ForestRanger {
     /// Navigate to a worktree (recorded in back/forward history).
     fn select(&mut self, id: String, cx: &mut Context<Self>) {
         if self.selected.as_ref() == Some(&id) {
+            return;
+        }
+        // A popped-out window stays on its worktree; elsewhere is the main window's job.
+        if self.locked.is_some() {
+            return self.forward_to_main(id, cx);
+        }
+        // In its own window: bring that forward instead.
+        if self.focus_popped(&id, cx) {
             return;
         }
         if let Some(prev) = self.location() {
@@ -639,6 +689,36 @@ impl ForestRanger {
                     cx.notify();
                 }
             }
+            review::ReviewEvent::ContinueChat(prompt) => {
+                // The chat in view, else the one used last here; none: a new one.
+                let chat = this.tabs_mut().and_then(|t| {
+                    let active = t.active.and_then(|i| t.open.get(i)).and_then(|t| match t {
+                        Tab::Chat(c) => Some(c.clone()),
+                        _ => None,
+                    });
+                    active.or_else(|| {
+                        t.mru.iter().find_map(|k| t.open.iter().find_map(|t| match t {
+                            Tab::Chat(c) if format!("chat:{}", c.read(cx).session_id()) == *k => Some(c.clone()),
+                            _ => None,
+                        }))
+                    })
+                });
+                match chat {
+                    Some(chat) => {
+                        let key = format!("chat:{}", chat.read(cx).session_id());
+                        this.focus_tab(&key, cx);
+                        chat.update(cx, |c, cx| c.send_or_queue(prompt.clone(), cx));
+                    }
+                    None => {
+                        let provider = cx.global::<settings::Settings>().provider.clone();
+                        this.new_chat(&provider, window, cx);
+                        if let Some(Tab::Chat(chat)) = this.tabs_mut().and_then(|t| t.open.last()) {
+                            let chat = chat.clone();
+                            chat.update(cx, |c, cx| c.send_text(prompt.clone(), cx));
+                        }
+                    }
+                }
+            }
             review::ReviewEvent::StartChat(prompt) => {
                 let provider = cx.global::<settings::Settings>().provider.clone();
                 this.new_chat(&provider, window, cx);
@@ -690,6 +770,16 @@ impl ForestRanger {
         // An agent starting work makes its worktree the most recent one, now.
         if now == Attention::Working && prev != Some(now) {
             self.touch_worktree(wt);
+            // The sidebar's order is the main window's.
+            if self.locked.is_some() {
+                for other in Windows::others(cx, cx.entity_id()) {
+                    let wt = wt.to_string();
+                    cx.defer(move |cx| other.update(cx, |m, cx| {
+                        m.touch_worktree(&wt);
+                        cx.notify();
+                    }));
+                }
+            }
         }
         let c = chat.read(cx);
         if !window.is_window_active() && prev != Some(now) {
@@ -704,7 +794,7 @@ impl ForestRanger {
                 _ => {}
             }
         }
-        self.update_badge(cx);
+        self.update_badge(cx.entity_id(), cx);
         cx.notify();
     }
 
@@ -716,24 +806,42 @@ impl ForestRanger {
     }
 
     /// Dock badge: open permission prompts and elicitation forms across chats.
-    fn update_badge(&self, cx: &App) {
-        notify::set_badge(self.chats().map(|(_, c)| { let (p, e) = c.read(cx).open_asks(); p + e }).sum());
+    fn update_badge(&self, me: EntityId, cx: &App) {
+        let asks = |fr: &ForestRanger| -> usize { fr.chats().map(|(_, c)| { let (p, e) = c.read(cx).open_asks(); p + e }).sum() };
+        notify::set_badge(asks(self) + Windows::others(cx, me).iter().map(|fr| asks(fr.read(cx))).sum::<usize>());
     }
 
     /// The most urgent attention across a worktree's open chats.
     /// The most pressing of its chats; a terminal running something counts as Working.
     pub(crate) fn worktree_attention(&self, wt: &str, cx: &App) -> Attention {
+        // Popped out: its chats live in that window's shell.
+        if self.locked.as_deref() != Some(wt)
+            && let Some((_, fr)) = Windows::popped(cx, wt)
+        {
+            return fr.read(cx).own_attention(wt, cx);
+        }
+        self.own_attention(wt, cx)
+    }
+
+    fn own_attention(&self, wt: &str, cx: &App) -> Attention {
         let chats = self.chats().filter(|(w, _)| *w == wt).map(|(_, c)| c.read(cx).attention()).min().unwrap_or(Attention::Idle);
         let term = self.busy_terms(cx).any(|w| w == wt).then_some(Attention::Working).unwrap_or(Attention::Idle);
         chats.min(term)
     }
 
-    /// "2 agents working and a terminal running" in worktree `wt` (or anywhere);
-    /// None when nothing would be cut short.
-    pub(crate) fn busy_summary(&self, wt: Option<&str>, cx: &App) -> Option<String> {
+    /// Agents working (or waiting on you) and terminals running, in this window's
+    /// shell, in worktree `wt` (or anywhere).
+    fn own_busy(&self, wt: Option<&str>, cx: &App) -> (usize, usize) {
         let here = |w: &String| wt.is_none_or(|wt| w == wt);
         let agents = self.chats().filter(|(w, c)| here(w) && matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer)).count();
-        let terms = self.busy_terms(cx).filter(|w| here(w)).count();
+        (agents, self.busy_terms(cx).filter(|w| here(w)).count())
+    }
+
+    /// "2 agents working and a terminal running" in worktree `wt` (or anywhere);
+    /// None when nothing would be cut short.
+    pub(crate) fn busy_summary(&self, wt: Option<&str>, me: EntityId, cx: &App) -> Option<String> {
+        // Every window's shell: quitting stops them all, and a worktree may be popped out.
+        let (agents, terms) = Windows::others(cx, me).iter().map(|fr| fr.read(cx).own_busy(wt, cx)).fold(self.own_busy(wt, cx), |a, b| (a.0 + b.0, a.1 + b.1));
         let part = |n: usize, one: &str, many: &str, verb: &str| match n {
             0 => None,
             1 => Some(format!("{one} {verb}")),
@@ -746,8 +854,14 @@ impl ForestRanger {
     /// Quit (or close the window, which quits): ask first if that would stop an
     /// agent or a running terminal.
     fn confirm_leave(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let leave = move |window: &mut Window, cx: &mut App| if quit { cx.quit() } else { window.remove_window() };
-        let Some(busy) = self.busy_summary(None, cx) else { return leave(window, cx) };
+        // A popped-out window just closes: its worktree goes back to the main window, running.
+        if !quit && self.locked.is_some() {
+            self.dock_back(cx);
+            return window.remove_window();
+        }
+        // The main window closing quits, popped-out windows and all.
+        let leave = move |_: &mut Window, cx: &mut App| cx.quit();
+        let Some(busy) = self.busy_summary(None, cx.entity_id(), cx) else { return leave(window, cx) };
         window.open_alert_dialog(cx, move |alert, _, _| {
             alert
                 .title(if quit { "Quit Forest Ranger?" } else { "Close the window?" })
@@ -885,7 +999,10 @@ impl ForestRanger {
 
 impl Render for ForestRanger {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.save_place(cx);
+        // Where you are is the main window's; a popped-out one is always on its worktree.
+        if self.locked.is_none() {
+            self.save_place(cx);
+        }
         let pulsing = self.chats().any(|(_, c)| matches!(c.read(cx).attention(), Attention::Working | Attention::NeedsAnswer))
             || self.busy_terms(cx).next().is_some();
         self.ticker.keep(pulsing, cx);
@@ -953,11 +1070,12 @@ impl Render for ForestRanger {
                     })
                     .child(
                         // flex_none: keep the saved width as the window resizes (the
-                        // centre column takes up the slack).
+                        // centre column takes up the slack). None in a popped-out window.
                         resizable_panel()
                             .size(px(sidebar_w))
                             .size_range(px(session_state::SIDEBAR_WIDTH.0)..px(session_state::SIDEBAR_WIDTH.2))
                             .flex_none()
+                            .visible(self.locked.is_none())
                             .child(sidebar),
                     )
                     .child(
@@ -1128,7 +1246,7 @@ fn main() {
             KeyBinding::new("cmd-shift-w", CloseWindow, None),
         ]);
         let bounds = initial_bounds(cx);
-        gpui_kit::open_window(
+        let opened = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -1146,6 +1264,10 @@ fn main() {
             },
         )
         .expect("failed to open window");
+        let (handle, fr) = opened;
+        Windows::set_main(handle, &fr, cx);
+        // Worktrees that were in their own windows when you quit.
+        fr.update(cx, |fr, cx| fr.reopen_popped(cx));
         cx.activate(true);
         dev::smoke_close(cx);
     });

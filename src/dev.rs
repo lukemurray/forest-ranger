@@ -177,3 +177,90 @@ pub(crate) fn bench(window: &mut Window, cx: &mut Context<ForestRanger>) {
     })
     .detach();
 }
+
+/// `FR_SMOKE_POPOUT=1` (run on a copy of your data): pop the most recent worktree
+/// with a chat tab out into its own window, check the same live chat arrived there,
+/// dock it back, check it came home, then quit. Prints PASS/FAIL lines.
+pub(crate) fn smoke_popout(window: &mut Window, cx: &mut Context<ForestRanger>) {
+    if std::env::var_os("FR_SMOKE_POPOUT").is_none() {
+        return;
+    }
+    let wait = |s| std::time::Duration::from_millis(s);
+    cx.spawn_in(window, async move |this, cx| {
+        cx.background_executor().timer(wait(1000)).await;
+        let _ = this.update(cx, |fr, cx| {
+            let saved = &SessionState::get(cx).worktrees;
+            let wt = fr.projects.iter().flat_map(|p| &p.worktrees)
+                .filter(|w| saved.get(&w.id).is_some_and(|s| s.tabs.iter().any(|k| k.starts_with("chat:"))))
+                .max_by_key(|w| w.activity).map(|w| w.id.clone());
+            match wt {
+                Some(wt) => fr.select(wt, cx),
+                None => eprintln!("FR_SMOKE_POPOUT: FAIL no worktree with a chat tab"),
+            }
+        });
+        cx.background_executor().timer(wait(2000)).await;
+        let Ok(Some((wt, chat))) = this.update(cx, |fr, _| {
+            let wt = fr.selected.clone()?;
+            let chat = fr.tabs.get(&wt)?.open.iter().find_map(|t| match t { Tab::Chat(c) => Some(c.entity_id()), _ => None })?;
+            Some((wt, chat))
+        }) else {
+            eprintln!("FR_SMOKE_POPOUT: FAIL no chat reopened");
+            return;
+        };
+        let _ = this.update(cx, |fr, cx| fr.pop_out(&wt, cx));
+        cx.background_executor().timer(wait(2000)).await;
+        let there = cx.update(|_, cx| {
+            let (_, popped) = crate::windows::Windows::popped(cx, &wt)?;
+            let p = popped.read(cx);
+            Some(p.tabs.get(&wt).is_some_and(|t| t.open.iter().any(|t| matches!(t, Tab::Chat(c) if c.entity_id() == chat))))
+        });
+        let gone_here = this.update(cx, |fr, _| !fr.tabs.contains_key(&wt)).unwrap_or(false);
+        eprintln!("FR_SMOKE_POPOUT: {} same chat entity in the new window, {} gone from main", ok(matches!(there, Ok(Some(true)))), ok(gone_here));
+        // Dock back, as closing the window does.
+        let _ = cx.update(|_, cx| {
+            if let Some((h, popped)) = crate::windows::Windows::popped(cx, &wt) {
+                popped.update(cx, |p, cx| p.dock_back(cx));
+                let _ = h.update(cx, |_, window, _| window.remove_window());
+            }
+        });
+        cx.background_executor().timer(wait(2000)).await;
+        let home = this.update(cx, |fr, _| {
+            fr.selected.as_deref() == Some(wt.as_str())
+                && fr.tabs.get(&wt).is_some_and(|t| t.open.iter().any(|t| matches!(t, Tab::Chat(c) if c.entity_id() == chat)))
+        });
+        eprintln!("FR_SMOKE_POPOUT: {} same chat entity back in main, selected", ok(matches!(home, Ok(true))));
+        // Pop out again and resize it: its bounds are remembered for that worktree.
+        let _ = this.update(cx, |fr, cx| fr.pop_out(&wt, cx));
+        cx.background_executor().timer(wait(2000)).await;
+        let _ = cx.update(|_, cx| {
+            if let Some((h, _)) = crate::windows::Windows::popped(cx, &wt) {
+                let _ = h.update(cx, |_, window, _| window.resize(size(px(901.), px(701.))));
+            }
+        });
+        cx.background_executor().timer(wait(1000)).await;
+        let saved = cx.update(|_, cx| SessionState::get(cx).popped_bounds.get(&wt).copied());
+        eprintln!("FR_SMOKE_POPOUT: {} bounds saved for the worktree: {saved:?}", ok(matches!(saved, Ok(Some([_, _, w, h])) if w == 901. && h == 701.)));
+        // As if the worktree were removed: the main window closes its window.
+        let _ = this.update(cx, |fr, cx| {
+            for p in &mut fr.projects {
+                p.worktrees.retain(|w| w.id != wt);
+            }
+            fr.close_removed_popped(cx);
+        });
+        cx.background_executor().timer(wait(1000)).await;
+        let closed = cx.update(|_, cx| {
+            crate::windows::Windows::popped(cx, &wt).is_none()
+                && cx.windows().len() == 1
+                && !SessionState::get(cx).popped.contains(&wt)
+                && !SessionState::get(cx).popped_bounds.contains_key(&wt)
+        });
+        let not_adopted = this.update(cx, |fr, _| fr.adopted.is_empty()).unwrap_or(false);
+        eprintln!("FR_SMOKE_POPOUT: {} removed worktree's window closed and forgotten, {} nothing docked back", ok(matches!(closed, Ok(true))), ok(not_adopted));
+        let _ = cx.update(|_, cx| cx.quit());
+    })
+    .detach();
+}
+
+fn ok(b: bool) -> &'static str {
+    if b { "PASS" } else { "FAIL" }
+}

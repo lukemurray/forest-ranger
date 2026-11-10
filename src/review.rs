@@ -33,6 +33,9 @@ pub enum ReviewEvent {
     OpenFile { rel: String, line: Option<u32> },
     /// Start a chat seeded with this prompt.
     StartChat(String),
+    /// Send this prompt in the worktree's current chat (queued if it's mid-turn);
+    /// a new chat if there's none.
+    ContinueChat(String),
     /// Something was committed / pushed / updated — the sidebar may need refreshing.
     Changed,
     /// The Files / Commits toggle flipped (persisted per worktree).
@@ -450,16 +453,23 @@ impl ReviewPanel {
                 }));
                 if let (ReqState::Open, Some(branch)) = (state, &self.host_branch) {
                     let prompt = rereview_prompt(sigil == "!", *n, branch);
+                    // A new chat, or the current one (which already knows the MR's history).
+                    let me = cx.entity();
                     row = row.child(
-                        div()
-                            .id("rereview")
-                            .text_size(px(12.5))
-                            .text_color(theme.primary)
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .child("Re-review latest")
-                            .tooltip(|window, cx| Tooltip::new("Check the new commits against the review comments: anything left blocking approval?").build(window, cx))
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReviewEvent::StartChat(prompt.clone())))),
+                        Button::new("rereview")
+                            .small()
+                            .ghost()
+                            .label("Re-review latest ▾")
+                            .tooltip("Check the new commits against the review comments: anything left blocking approval?")
+                            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                                let (m1, m2, p1, p2) = (me.clone(), me.clone(), prompt.clone(), prompt.clone());
+                                menu.item(PopupMenuItem::new("In a new chat").on_click(move |_, _, cx| {
+                                    m1.update(cx, |_, cx| cx.emit(ReviewEvent::StartChat(p1.clone())))
+                                }))
+                                .item(PopupMenuItem::new("Continue in the current chat").on_click(move |_, _, cx| {
+                                    m2.update(cx, |_, cx| cx.emit(ReviewEvent::ContinueChat(p2.clone())))
+                                }))
+                            }),
                     );
                 }
             }

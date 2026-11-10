@@ -340,6 +340,8 @@ pub struct ChatView {
     viewing: Option<std::sync::Arc<Image>>,
     /// A turn finished while you weren't looking.
     unread: bool,
+    /// Marked unread at this agent message: opening the chat again jumps to it.
+    unread_at: Option<String>,
     focused_by_user: bool,
     attention: Attention,
     /// Bumped whenever the agent is replaced, so a stopped one's late events are ignored.
@@ -397,23 +399,15 @@ impl ChatView {
         view
     }
 
-    fn build(log: ChatLog, cwd: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut rows = Rows::default();
-        for e in &log.events {
-            rows.apply(e);
-        }
-        let config = log.last("configOptions").and_then(|e| e["options"].as_array().cloned()).unwrap_or_default();
-        let items = transcript::build_items(&rows.rows);
-        let scroller = cx.new(|cx| MessageScrollerState::new(items.len(), cx));
-        // The pinned question follows the scroll position.
-        let scrolled = cx.observe(&scroller, |_, _, cx| cx.notify());
+    /// The message box and its subscription, in `window`.
+    fn composer(provider: &str, window: &mut Window, cx: &mut Context<Self>) -> (Entity<TextareaState>, Subscription) {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
                 .placeholder(format!(
                     "Message {}…  (Enter to send, paste images)",
-                    if log.provider == "codex" { "Codex" } else { "Claude" }
+                    if provider == "codex" { "Codex" } else { "Claude" }
                 ))
         });
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
@@ -431,6 +425,33 @@ impl ChatView {
             }
             _ => {}
         });
+        (input, sub)
+    }
+
+    /// Moved into another window (a popped-out or docked worktree): rebuild what's
+    /// tied to the old one — the message box (keeping its text) and open forms.
+    pub fn move_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().to_string();
+        let (input, sub) = Self::composer(&self.log.provider, window, cx);
+        input.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.input = input;
+        self._subs[0] = sub;
+        self.forms.clear();
+        self.find = None;
+        cx.notify();
+    }
+
+    fn build(log: ChatLog, cwd: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut rows = Rows::default();
+        for e in &log.events {
+            rows.apply(e);
+        }
+        let config = log.last("configOptions").and_then(|e| e["options"].as_array().cloned()).unwrap_or_default();
+        let items = transcript::build_items(&rows.rows);
+        let scroller = cx.new(|cx| MessageScrollerState::new(items.len(), cx));
+        // The pinned question follows the scroll position.
+        let scrolled = cx.observe(&scroller, |_, _, cx| cx.notify());
+        let (input, sub) = Self::composer(&log.provider, window, cx);
         input.update(cx, |s, cx| s.focus(window, cx));
         let commands = log.last("commands").map(commands_of).unwrap_or_default();
         find::bind(cx);
@@ -483,6 +504,7 @@ impl ChatView {
             activity: None,
             viewing: None,
             unread: false,
+            unread_at: None,
             focused_by_user: true,
             attention: Attention::Idle,
             agent_gen: 0,
@@ -561,7 +583,19 @@ impl ChatView {
         self.focused_by_user = focused;
         if focused {
             self.mark_read(cx);
+            if let Some(mid) = self.unread_at.take() {
+                self.jump_to(&mid, cx);
+            }
         }
+    }
+
+    /// ⋯ → Mark unread on an agent message: the chat shows as ready again (tab and
+    /// sidebar), and coming back to it lands on that message.
+    pub(super) fn mark_unread(&mut self, mid: String, cx: &mut Context<Self>) {
+        self.unread = true;
+        self.unread_at = Some(mid);
+        self.sync_attention(cx);
+        cx.notify();
     }
 
     /// `FR_BENCH`: look like a running turn (activity, pulsing dots) with no agent.
@@ -878,6 +912,16 @@ impl ChatView {
                 cx.notify();
             }
         }
+    }
+
+    /// Send a message now, or queue it for after the running turn (as Enter does).
+    pub fn send_or_queue(&mut self, text: String, cx: &mut Context<Self>) {
+        let out = Outgoing { text, attachments: vec![] };
+        if self.status == Status::Idle || (self.status == Status::Starting && !self.turn_pending()) {
+            return self.send(out, cx);
+        }
+        self.queue.push(out);
+        cx.notify();
     }
 
     /// Send a message as if typed (e.g. a seeded "Agent merge" prompt).

@@ -3,9 +3,26 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under the version it will ship in.
 
-## 0.14.1 — unreleased
+## 0.15.0 — unreleased
+
+### Chats
+- Mark an agent message unread (⋯ → Mark unread): the chat shows as ready again in
+  its tab and the sidebar, and opening it later lands on that message.
+
+### Review panel
+- Re-review latest is a menu: in a new chat, or continue in the current chat (the one
+  in view, else the last one used; queued if it's mid-turn).
+
+### Tabs, terminals and window
+- Pop a worktree out into its own window (titlebar ↗, or right-click → Open in new
+  window): its tabs, splits and side panel without the sidebar. Running chats and
+  terminals move across without restarting. The main window still lists it, greyed,
+  with its working / ready dots; clicking it brings that window forward. Closing the
+  window puts the worktree back in the main one. Popped-out windows reopen on the
+  next launch, each where you last put it; removing the worktree closes its window.
 
 ### Fixed
+- Review a branch: the branch picker has focus when the dialog opens.
 - Plan approvals show the plan as Markdown (scrolling when long) instead of a cut-off
   line of JSON.
 

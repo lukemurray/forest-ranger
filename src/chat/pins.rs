@@ -62,7 +62,7 @@ impl ChatView {
     }
 
     /// Scroll to the pinned message and highlight it for a moment.
-    fn jump_to(&mut self, mid: &str, cx: &mut Context<Self>) {
+    pub(super) fn jump_to(&mut self, mid: &str, cx: &mut Context<Self>) {
         let Some((row, _)) = self.rows.message(mid) else { return };
         let item = self.items.iter().position(|it| match &it.node {
             Node::Row(r) => *r == row,

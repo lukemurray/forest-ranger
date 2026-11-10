@@ -299,6 +299,8 @@ impl ForestRanger {
         };
         // Something to look at: the name stands out too, like unread mail.
         let unseen = matches!(attention, Attention::Unread | Attention::NeedsAnswer);
+        // In its own window: listed, greyed; clicking brings that window forward.
+        let popped = crate::windows::Windows::popped(cx, &w.id).is_some();
         let edit = (w.name.clone().or_else(|| w.branch.clone()).unwrap_or_default(), w.branch.clone());
         div()
             .id(SharedString::from(format!("w-{}", w.id)))
@@ -314,6 +316,7 @@ impl ForestRanger {
             .text_color(theme.muted_foreground)
             .hover(|s| s.bg(x.hover).text_color(theme.foreground))
             .when(active, |d| d.bg(x.active).text_color(theme.foreground))
+            .when(popped, |d| d.opacity(0.55))
             .child(
                 div()
                     .flex()
@@ -350,12 +353,17 @@ impl ForestRanger {
                     .items_center()
                     .gap_2()
                     .flex_shrink_0()
+                    .when(popped, |d| d.child(icon("fr/pop-out.svg", 11., x.faint)))
                     .child(status.text_size(px(11.)))
                     .children(row_dot(attention, self.chat_here(&w.id, cx), cx)),
             )
-            .tooltip(tip(match &note {
-                Some(n) => format!("{label} ({n})\n{}\nDouble-click to set a label", w.path),
-                None => format!("{label}\n{}\nDouble-click to set a label", w.path),
+            .tooltip(tip(if popped {
+                format!("{label} is open in its own window\nClick to bring it to the front")
+            } else {
+                match &note {
+                    Some(n) => format!("{label} ({n})\n{}\nDouble-click to set a label", w.path),
+                    None => format!("{label}\n{}\nDouble-click to set a label", w.path),
+                }
             }))
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 this.select(id.clone(), cx);
@@ -378,12 +386,14 @@ impl ForestRanger {
                 PopupMenuItem::new(label).on_click(move |_, _, cx| settings::open_in(app(cx.global::<Settings>()).as_deref(), &path))
             };
             let reveal = path.clone();
-            let (f1, f2, f3) = (fr.clone(), fr.clone(), fr.clone());
+            let (f1, f2, f3, f4) = (fr.clone(), fr.clone(), fr.clone(), fr.clone());
+            let pop_wid = menu_wid.clone();
             let (wid, wid2, current) = (menu_wid.clone(), menu_wid.clone(), name.clone().or_else(|| branch.clone()).unwrap_or_default());
             let (repo, pid, branch) = (repo.clone(), menu_pid.clone(), branch.clone());
             menu.item(open("Open in editor", |s| s.editor.clone()))
                 .item(open("Open in terminal", |s| s.terminal.clone()))
                 .item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, _, _| settings::reveal(&reveal)))
+                .item(PopupMenuItem::new("Open in new window").on_click(move |_, _, cx| f4.update(cx, |fr, cx| fr.pop_out(&pop_wid, cx))))
                 .separator()
                 .item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| dialogs::rename_worktree(f1.clone(), wid.clone(), current.clone(), window, cx)))
                 .when_some(branch, |m, b| {

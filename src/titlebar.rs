@@ -228,6 +228,15 @@ impl ForestRanger {
                         }),
                 )
                 .child(div().w(px(1.)).h(px(20.)).mx(px(2.)).bg(theme.border))
+                // Pop this worktree out into its own window (not from a popped-out one).
+                .when(self.locked.is_none(), |d| {
+                    let wt = wt.id.clone();
+                    d.child(
+                        self.icon_btn("pop-out", "fr/pop-out.svg", false, cx)
+                            .tooltip(sidebar::tip("Open in its own window"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.pop_out(&wt, cx))),
+                    )
+                })
                 // The panel's views as one segmented control: each opens the panel on
                 // it, or closes it if it's showing; the open one is tinted green.
                 .child({

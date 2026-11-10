@@ -236,7 +236,7 @@ pub fn remove_worktree(fr: Entity<ForestRanger>, project_id: String, wt_id: Stri
 }
 
 fn remove_worktree_now(fr: Entity<ForestRanger>, project_id: String, wt_id: String, window: &mut Window, cx: &mut App) {
-    let running = fr.read(cx).busy_summary(Some(&wt_id), cx);
+    let running = fr.read(cx).busy_summary(Some(&wt_id), fr.entity_id(), cx);
     let Some((repo, path, primary_id)) = project_of(fr.read(cx), &project_id).and_then(|p| {
         let w = p.worktrees.iter().find(|w| w.id == wt_id)?;
         Some((p.path.clone(), w.path.clone(), p.worktrees.iter().find(|w| w.is_primary).map(|w| w.id.clone())))
@@ -808,7 +808,12 @@ fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, preselect: Op
         });
         ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, custom: false, prompt, auto, busy: false, error: None, _sub: sub }
     });
-    window.open_dialog(cx, move |d, _, _| {
+    // The branch picker takes focus on open, so you can type to filter straight away.
+    let (first, picker) = (Cell::new(true), view.read(cx).branch.clone());
+    window.open_dialog(cx, move |d, window, cx| {
+        if first.replace(false) {
+            picker.update(cx, |s, cx| s.focus(window, cx));
+        }
         d.width(px(520.)).title("Review a branch").child(view.clone())
     });
 }

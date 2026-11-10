@@ -66,6 +66,10 @@ pub struct SessionState {
     pub diff_full: bool,
     /// The run command used last, per project id (the titlebar's ▶ Run face).
     pub last_run: HashMap<String, String>,
+    /// Worktrees in their own windows, reopened that way on the next launch.
+    pub popped: Vec<String>,
+    /// Where each worktree's own window was last: [x, y, width, height].
+    pub popped_bounds: HashMap<String, [f32; 4]>,
     save_pending: bool,
 }
 
@@ -134,6 +138,18 @@ impl SessionState {
                 .as_object()
                 .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
                 .unwrap_or_default(),
+            popped: strings(&v["popped"]),
+            popped_bounds: v["poppedBounds"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| {
+                            let n: Vec<f32> = v.as_array()?.iter().filter_map(|n| n.as_f64().map(|n| n as f32)).collect();
+                            Some((k.clone(), <[f32; 4]>::try_from(n).ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             save_pending: false,
         }
     }
@@ -166,6 +182,8 @@ impl SessionState {
             "diffUnified": self.diff_unified,
             "diffFull": self.diff_full,
             "lastRun": self.last_run,
+            "popped": self.popped,
+            "poppedBounds": self.popped_bounds,
         })
     }
 
@@ -264,6 +282,19 @@ pub(crate) fn initial_bounds(cx: &App) -> Bounds<Pixels> {
     Bounds::centered(None, sz, cx)
 }
 
+/// A worktree's own window: where it was last, if that's still on a display; else
+/// centred at a default size.
+pub(crate) fn popped_bounds(cx: &App, wt: &str) -> Bounds<Pixels> {
+    let saved = SessionState::get(cx).popped_bounds.get(wt).copied();
+    if let Some([x, y, w, h]) = saved {
+        let b = Bounds::new(point(px(x), px(y)), size(px(w.max(500.)), px(h.max(400.))));
+        if cx.displays().iter().any(|d| d.bounds().intersects(&b)) {
+            return b;
+        }
+    }
+    Bounds::centered(None, size(px(1100.), px(780.)), cx)
+}
+
 pub(crate) fn write_window_state(b: Bounds<Pixels>) {
     let (o, s) = (b.origin, b.size);
     let v = serde_json::json!({
@@ -286,10 +317,14 @@ mod tests {
         assert!(!s.diff_unified && !s.diff_full);
         (s.diff_unified, s.diff_full) = (true, true);
         s.last_run.insert("p1".into(), "c1".into());
+        s.popped.push("w1".into());
+        s.popped_bounds.insert("w1".into(), [10., 20., 900., 700.]);
         (s.expanded, s.location) = (vec!["p1".into()], Some("project:p1".into()));
         let back = SessionState::from_json(&s.to_json());
         assert!(back.diff_unified && back.diff_full);
         assert_eq!(back.last_run.get("p1").map(String::as_str), Some("c1"));
+        assert_eq!(back.popped, ["w1"]);
+        assert_eq!(back.popped_bounds.get("w1"), Some(&[10., 20., 900., 700.]));
         assert_eq!((back.expanded, back.location.as_deref()), (vec!["p1".to_string()], Some("project:p1")));
     }
 

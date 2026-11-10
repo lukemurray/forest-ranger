@@ -194,7 +194,10 @@ impl ForestRanger {
         let already: Vec<String> = self.tabs.get(id).map(|t| t.open.iter().map(|t| t.key(cx)).collect()).unwrap_or_default();
         let mut restored = vec![];
         for key in saved.tabs.iter().filter(|k| !already.contains(k)) {
-            let tab = if let Some(sid) = key.strip_prefix("chat:") {
+            // Handed over live from another window: it keeps running, just rewired here.
+            let tab = if let Some(live) = self.adopted.remove(key) {
+                self.adopt(id, live, window, cx)
+            } else if let Some(sid) = key.strip_prefix("chat:") {
                 // A chat that never got a message has no log to reopen.
                 if !chats.join(format!("{sid}.jsonl")).exists() {
                     continue;
@@ -475,12 +478,16 @@ impl ForestRanger {
 
     pub(crate) fn term_view(&mut self, session: term::Session, id: Option<String>, cx: &mut Context<Self>) -> Entity<term::TerminalView> {
         let view = cx.new(|cx| term::TerminalView::new(session, id, cx));
-        // ponytail: kept for the app's life like the file-view subs.
-        let sub = cx.subscribe(&view, |_, _, _: &term::TermChanged, cx| cx.notify());
-        self.tab_subs.push((view.entity_id(), sub));
-        let done = cx.subscribe(&view, |this, view, _: &term::TermFinished, cx| this.close_term(&view, cx));
-        self.tab_subs.push((view.entity_id(), done));
+        self.watch_term(&view, cx);
         view
+    }
+
+    /// Redraw on a terminal's title / busy changes; close its tab when it finishes.
+    pub(crate) fn watch_term(&mut self, view: &Entity<term::TerminalView>, cx: &mut Context<Self>) {
+        let sub = cx.subscribe(view, |_, _, _: &term::TermChanged, cx| cx.notify());
+        self.tab_subs.push((view.entity_id(), sub));
+        let done = cx.subscribe(view, |this, view, _: &term::TermFinished, cx| this.close_term(&view, cx));
+        self.tab_subs.push((view.entity_id(), done));
     }
 
     /// Close a terminal's tab, in whichever worktree it's in.
@@ -573,7 +580,7 @@ impl ForestRanger {
         // Closing saves the chat; refresh the list so it's offered again.
         self.load_chats(cx);
         self.prune();
-        self.update_badge(cx);
+        self.update_badge(cx.entity_id(), cx);
         cx.notify();
     }
 

@@ -449,9 +449,12 @@ impl ChatView {
                                     .icon(Icon::empty().path("fr/ellipsis.svg"))
                                     .tooltip("Message actions")
                                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                        let (v1, v2, raw, mid, pin_mid) = (v.clone(), v.clone(), raw.clone(), mid.clone(), mid.clone());
+                                        let (v1, v2, v3, raw, mid, pin_mid, unread_mid) = (v.clone(), v.clone(), v.clone(), raw.clone(), mid.clone(), mid.clone(), mid.clone());
                                         menu.item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
                                             v2.update(cx, |c, cx| c.toggle_pin(pin_mid.clone(), cx))
+                                        }))
+                                        .item(PopupMenuItem::new("Mark unread").on_click(move |_, _, cx| {
+                                            v3.update(cx, |c, cx| c.mark_unread(unread_mid.clone(), cx))
                                         }))
                                         .item(PopupMenuItem::new("Branch from here").on_click(move |_, _, cx| {
                                             v1.update(cx, |c, cx| c.branch_from(mid.clone(), cx))
