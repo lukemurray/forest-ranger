@@ -27,7 +27,8 @@ fi
 
 # --install bumps the version first — patch (0.9.1 → 0.9.2), or with --minor the
 # minor, resetting the patch (0.9.3 → 0.10.0); the build updates Cargo.lock — and
-# commits the bump once installed.
+# commits the bump once installed, with CHANGELOG.md's "## Unreleased" heading
+# stamped as this version and today's date.
 if [ "$INSTALL" = 1 ] && [ "$BUMP" = 1 ]; then
   if [ "$MINOR" = 1 ]; then
     perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.".($2+1).".0\""/me' Cargo.toml
@@ -104,6 +105,11 @@ if [ "$INSTALL" = 1 ]; then
   "$LSREGISTER" -f "/Applications/$NAME.app" >/dev/null 2>&1 || true
   echo "Installed /Applications/$NAME.app"
   if [ "$BUMP" = 1 ]; then
-    git commit -q -m "$VERSION" -- Cargo.toml Cargo.lock && echo "Committed $VERSION"
+    # The changelog's "## Unreleased" section becomes this release, dated today.
+    if grep -q '^## Unreleased$' CHANGELOG.md; then
+      perl -pi -e 's/^## Unreleased$/## '"$VERSION"' — '"$(date +%F)"'/' CHANGELOG.md
+      echo "Stamped CHANGELOG.md: $VERSION"
+    fi
+    git commit -q -m "$VERSION" -- Cargo.toml Cargo.lock CHANGELOG.md && echo "Committed $VERSION"
   fi
 fi

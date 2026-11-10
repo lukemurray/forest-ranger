@@ -4,14 +4,13 @@ Rust desktop app on GPUI Kit (crate at the repo root). See README.md for what it
 
 ## Every change updates the changelog
 
-Add a line to `CHANGELOG.md` for each user-facing change, in the same commit, under the
-version it will ship in (the top heading). Use the existing area groups (Sidebar, Chats,
-Title bar, Review panel, Project page, Tabs/terminals/window, Settings), or **Fixed**
-for bug fixes.
+Add a line to `CHANGELOG.md` for each user-facing change, in the same commit, under
+`## Unreleased` at the top (create that heading if it isn't there). Don't guess a version
+number. Use the existing area groups (Sidebar, Chats, Title bar, Review panel, Project
+page, Tabs/terminals/window, Settings), or **Fixed** for bug fixes.
 
-`scripts/bundle-macos.sh --install` bumps the patch version in `Cargo.toml`
-(`--install --minor` the minor). If the top heading is already released — `Cargo.toml`
-has reached it — start a new heading for the next version.
+Releasing is `scripts/bundle-macos.sh --install` (patch bump) or `--install --minor`: it
+renames `## Unreleased` to `## <version> — <date>` and commits it with the bump.
 
 ## Build and check
 

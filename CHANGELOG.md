@@ -1,9 +1,15 @@
 # Changelog
 
 What changes in each release of Forest Ranger. Newest first; every change adds a line
-under the version it will ship in.
+under `## Unreleased`, which the install script stamps with the version and date.
 
-## 0.15.0 — unreleased
+## 0.16.0 — 2026-11-10
+
+### Fixed
+- Review on a merge/pull request is instant when its latest commit is already fetched,
+  and works for PRs from forks (it fetched a branch name origin doesn't have).
+
+## 0.15.0 — 2026-11-10
 
 ### Chats
 - Mark an agent message unread (⋯ → Mark unread): the chat shows as ready again in
@@ -22,9 +28,11 @@ under the version it will ship in.
   next launch, each where you last put it; removing the worktree closes its window.
 
 ### Fixed
-- Review on a merge/pull request is instant when its latest commit is already fetched,
-  and works for PRs from forks (it fetched a branch name origin doesn't have).
 - Review a branch: the branch picker has focus when the dialog opens.
+
+## 0.14.1 — 2026-11-10
+
+### Fixed
 - Plan approvals show the plan as Markdown (scrolling when long) instead of a cut-off
   line of JSON.
 
