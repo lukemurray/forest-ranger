@@ -3,7 +3,7 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
-## Unreleased
+## 0.17.0 — 2026-11-11
 
 ### Sidebar
 - One signal per source: a worktree's word and dot are always its agent's (working /
