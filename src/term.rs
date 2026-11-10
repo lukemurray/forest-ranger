@@ -271,6 +271,13 @@ pub struct TermChanged;
 /// A run command with `close_on_success` exited 0: its tab can close.
 pub struct TermFinished;
 
+/// Something that ran for a while (`LONG_RUN` or more) just finished: the shell
+/// can report it ("ready") if you weren't looking.
+pub struct TermDone;
+
+/// Shorter runs (an `ls`, a quick `git status`) don't count as finishing something.
+const LONG_RUN: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The window title a run command's script sets when its command finishes and the
 /// interactive shell takes over (it isn't shown: a run tab is titled by its label).
 const RUN_DONE: &str = "forest-ranger:run-done";
@@ -307,12 +314,19 @@ pub struct TerminalView {
     run_phase: bool,
     /// Something other than the idle shell is running (see `TerminalView::busy`).
     busy: bool,
+    /// When the current run started, and what it was called while running (a shell's
+    /// title often changes back once the command ends).
+    busy_since: Option<std::time::Instant>,
+    busy_title: String,
+    /// A long run finished while you weren't looking: (what, when). Cleared on view.
+    done: Option<(String, std::time::Instant)>,
     _events: Task<()>,
     _poll: Task<()>,
 }
 
 impl EventEmitter<TermChanged> for TerminalView {}
 impl EventEmitter<TermFinished> for TerminalView {}
+impl EventEmitter<TermDone> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -523,6 +537,9 @@ impl TerminalView {
             cursor_bounds: Rc::new(Cell::new(None)),
             scroll_px: 0.,
             run_phase: s.run_phase,
+            busy_since: s.run_phase.then(std::time::Instant::now),
+            busy_title: String::new(),
+            done: None,
             busy: s.run_phase,
             _events: events,
             // Each second: has a program started or finished? (Tells the sidebar and tab.)
@@ -547,9 +564,41 @@ impl TerminalView {
     fn check_busy(&mut self, cx: &mut Context<Self>) {
         let pgrp = unsafe { libc::tcgetpgrp(self.pty.master.as_raw_fd()) };
         let busy = self.exited.is_none() && (self.run_phase || (pgrp > 0 && pgrp != self.pty.pid));
-        if busy != self.busy {
-            self.busy = busy;
+        if busy == self.busy {
+            if busy {
+                self.busy_title = self.title();
+            }
+            return;
+        }
+        self.busy = busy;
+        if busy {
+            self.busy_since = Some(std::time::Instant::now());
+            self.busy_title = self.title();
+            self.done = None;
+        } else if self.busy_since.take().is_some_and(|t| t.elapsed() >= LONG_RUN) {
+            cx.emit(TermDone);
+        }
+        cx.emit(TermChanged);
+    }
+
+    /// A long run that finished unseen: (what ran, when it finished).
+    pub fn done(&self) -> Option<&(String, std::time::Instant)> {
+        self.done.as_ref()
+    }
+
+    /// The shell saw `TermDone` while you weren't looking at this terminal.
+    pub fn mark_done(&mut self, cx: &mut Context<Self>) {
+        let what = if self.busy_title.is_empty() { self.title() } else { self.busy_title.clone() };
+        self.done = Some((what, std::time::Instant::now()));
+        cx.emit(TermChanged);
+        cx.notify();
+    }
+
+    /// Looked at: no longer "finished, unseen".
+    pub fn mark_seen(&mut self, cx: &mut Context<Self>) {
+        if self.done.take().is_some() {
             cx.emit(TermChanged);
+            cx.notify();
         }
     }
 

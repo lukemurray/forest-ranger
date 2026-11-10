@@ -291,18 +291,30 @@ impl ForestRanger {
         let menu = self.worktree_menu(p, w, cx);
         // The state, in words where the time goes: easier to spot than a dot alone.
         use crate::chat::Attention;
-        // The words are the chats' state; a running terminal gets its own icon, so
-        // "ready" still shows while a dev server runs.
-        let (chats, term) = self.worktree_state(&w.id, cx);
-        let attention = self.worktree_attention(&w.id, cx);
+        // One signal per source: the word and the dot are the agent's; a running
+        // terminal is only ever its (pulsing) icon.
+        let (attention, terms) = self.worktree_state(&w.id, cx);
         let pulse = || crate::anim::pulse(1400, 0.55, 1.);
-        let status = match chats {
+        let status = match attention {
             Attention::Working => div().text_color(theme.primary).opacity(pulse()).child("working"),
             Attention::Unread => div().text_color(theme.primary).font_weight(FontWeight::SEMIBOLD).child("ready"),
             Attention::NeedsAnswer => div().text_color(x.amber).font_weight(FontWeight::SEMIBOLD).child("needs you"),
-            Attention::Idle if term => div().text_color(theme.primary).opacity(pulse()).child("running"),
             Attention::Idle => div().text_color(x.faint).child(data::relative_time(w.activity)),
         };
+        // Running: the icon pulses. A long run finished unseen: still, with a green dot.
+        let running = !terms.running.is_empty();
+        let term_icon = (running || !terms.done.is_empty()).then(|| {
+            let mut lines: Vec<String> = terms.running.iter().map(|t| format!("Running: {t}")).collect();
+            lines.extend(terms.done.iter().map(|(what, at)| format!("Finished: {what} · {}", data::relative_time(crate::log::now_ms() - at.elapsed().as_millis() as i64))));
+            div()
+                .id(SharedString::from(format!("term-{}", w.id)))
+                .relative()
+                .flex()
+                .when(running, |d| d.opacity(pulse()))
+                .child(icon("fr/terminal.svg", 12., if running { theme.primary } else { theme.muted_foreground }))
+                .when(!running, |d| d.child(div().absolute().top(px(-2.)).right(px(-3.)).size(px(6.)).rounded_full().bg(theme.primary)))
+                .tooltip(tip(lines.join("\n")))
+        });
         // Something to look at: the name stands out too, like unread mail.
         let unseen = matches!(attention, Attention::Unread | Attention::NeedsAnswer);
         // In its own window: listed, greyed; clicking brings that window forward.
@@ -360,9 +372,8 @@ impl ForestRanger {
                     .gap_2()
                     .flex_shrink_0()
                     .when(popped, |d| d.child(icon("fr/pop-out.svg", 11., x.faint)))
-                    // A terminal running something (alongside whatever the chats say).
-                    .when(term && chats != Attention::Idle, |d| d.child(icon("fr/terminal.svg", 11., theme.primary)))
                     .child(status.text_size(px(11.)))
+                    .children(term_icon)
                     .children(row_dot(attention, self.chat_here(&w.id, cx), cx)),
             )
             .tooltip(tip(if popped {

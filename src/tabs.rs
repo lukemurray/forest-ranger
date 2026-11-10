@@ -488,6 +488,28 @@ impl ForestRanger {
         self.tab_subs.push((view.entity_id(), sub));
         let done = cx.subscribe(view, |this, view, _: &term::TermFinished, cx| this.close_term(&view, cx));
         self.tab_subs.push((view.entity_id(), done));
+        let long = cx.subscribe(view, |this, view, _: &term::TermDone, cx| this.term_done(&view, cx));
+        self.tab_subs.push((view.entity_id(), long));
+    }
+
+    /// A long run finished. Not in view: mark it finished-unseen (sidebar + tab),
+    /// and with the app in the background, notify if you've turned that on.
+    fn term_done(&mut self, view: &Entity<term::TerminalView>, cx: &mut Context<Self>) {
+        let Some(wt) = self.tabs.iter().find(|(_, t)| t.open.iter().any(|t| matches!(t, Tab::Term(v) if v == view))).map(|(w, _)| w.clone()) else { return };
+        let shown = self.selected.as_deref() == Some(&wt)
+            && self.tabs.get(&wt).and_then(|t| t.active.and_then(|i| t.open.get(i))).is_some_and(|t| matches!(t, Tab::Term(v) if v == view));
+        if shown && self.window_active {
+            return;
+        }
+        view.update(cx, |t, cx| t.mark_done(cx));
+        if !self.window_active && cx.global::<settings::Settings>().notify_ready {
+            let (what, key) = {
+                let t = view.read(cx);
+                (t.done().map(|d| d.0.clone()).unwrap_or_else(|| t.title()), format!("term:{}", t.id))
+            };
+            notify::post("Terminal finished", &what, (wt, key));
+        }
+        cx.notify();
     }
 
     /// Close a terminal's tab, in whichever worktree it's in.
@@ -713,7 +735,14 @@ impl ForestRanger {
                         .unwrap_or_else(|| sidebar::icon("fr/sparkle.svg", 12., theme.primary).into_any_element()),
                     Tab::Diff { .. } => sidebar::icon("fr/git-branch.svg", 12., x.amber).into_any_element(),
                     Tab::File(_) => sidebar::icon("fr/folder.svg", 12., theme.muted_foreground).into_any_element(),
-                    Tab::Term(_) => sidebar::icon("fr/terminal.svg", 12., theme.muted_foreground).into_any_element(),
+                    // Finished unseen: a green dot on the icon, as on the sidebar row.
+                    Tab::Term(t) => div()
+                        .relative()
+                        .child(sidebar::icon("fr/terminal.svg", 12., theme.muted_foreground))
+                        .when(t.read(cx).done().is_some(), |d| {
+                            d.child(div().absolute().top(px(-2.)).right(px(-3.)).size(px(6.)).rounded_full().bg(theme.primary))
+                        })
+                        .into_any_element(),
                     Tab::Note(_) => sidebar::icon("fr/pin.svg", 12., theme.primary).into_any_element(),
                 };
                 let title = self.tab_title(tab, cx);

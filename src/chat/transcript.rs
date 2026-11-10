@@ -197,6 +197,31 @@ fn clock_time(ms: i64) -> String {
     local(ms).format("%b %-d, %Y, %-I:%M:%S %p").to_string()
 }
 
+/// A message's time, shown only while you hover the message (`group`): short, faint,
+/// beside the message rather than over it; hovering the time itself gives the full stamp.
+/// The agent reply's right-hand column: time ("9:44 AM") + pin + ⋯.
+const ACTIONS_W: f32 = 104.;
+
+fn hover_time(id: (&'static str, usize), group: &'static str, ts: i64, cx: &App) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .px_1()
+        .text_size(px(11.))
+        .text_color(theme::extra(cx).faint)
+        .opacity(0.)
+        .group_hover(group, |s| s.opacity(1.))
+        .child(short_time(ts))
+        .tooltip(move |w, cx| Tooltip::new(clock_time(ts)).build(w, cx))
+}
+
+/// "2:41 PM" today, else "Nov 6" (the hover label's room is small).
+fn short_time(ms: i64) -> String {
+    let t = local(ms);
+    let today = t.date_naive() == chrono::Local::now().date_naive();
+    t.format(if today { "%-I:%M %p" } else { "%b %-d" }).to_string()
+}
+
 /// "2:41 PM" today, else "Thu, Nov 6 · 2:41 PM".
 fn time_divider(ms: i64) -> String {
     let t = local(ms);
@@ -409,7 +434,16 @@ impl ChatView {
                 .items_end()
                 .gap_1()
                 .when(*steered, |d| d.child(div().pr_1().text_xs().text_color(x.faint).child("steered in")))
-                .child(self.user_bubble(ix, text, attachments, *ts, false, view, cx))
+                .child(
+                    // The time shows beside the bubble while you hover it, never over it.
+                    div()
+                        .group("user-row")
+                        .flex()
+                        .items_end()
+                        .gap_1()
+                        .when_some(*ts, |d, ts| d.child(hover_time(("user-time", ix), "user-row", ts, cx).pb_1()))
+                        .child(self.user_bubble(ix, text, attachments, false, view, cx)),
+                )
                 .into_any_element(),
             Row::Assistant { text, message_id, ts } => {
                 let (v, raw) = (view.clone(), text.clone());
@@ -419,18 +453,27 @@ impl ChatView {
                     .group("assistant")
                     .relative()
                     .rounded(px(6.))
+                    // A right-hand column of its own for the time and actions, so
+                    // they never print over the text.
+                    .pr(px(ACTIONS_W))
                     // Just jumped to from the pins strip.
                     .when(self.flash == Some(ix), |d| d.bg(theme.primary.opacity(0.1)))
                     .child(markdown(("md", ix), text))
-                    .when_some(*ts, |d, ts| d.tooltip(move |w, cx| Tooltip::new(clock_time(ts)).build(w, cx)))
+                    // No tooltip over the text (it covered what you were reading): the
+                    // time sits with the hover actions, top-right.
+                    .when(message_id.is_none(), |d| {
+                        d.when_some(*ts, |d, ts| d.child(div().absolute().top_0().right_0().child(hover_time(("msg-time", ix), "assistant", ts, cx))))
+                    })
                     .when_some(message_id.clone(), |d, mid| {
                         let (pv, pmid) = (v.clone(), mid.clone());
                         d.child(
                             div()
                                 .absolute()
-                                .top(px(-6.))
+                                .top(px(-2.))
                                 .right_0()
                                 .flex()
+                                .items_center()
+                                .when_some(*ts, |d, ts| d.child(hover_time(("msg-time", ix), "assistant", ts, cx)))
                                 // A pinned message keeps its pin showing; the rest appear on hover.
                                 .child(
                                     div().when(!pinned, |d| d.opacity(0.).group_hover("assistant", |s| s.opacity(1.))).child(
@@ -607,13 +650,11 @@ impl ChatView {
 
     /// A sent message: linkified, with its attachments, clamped when long.
     /// `pinned` is the copy shown as the turn's sticky header (always clamped).
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn user_bubble(
         &self,
         ix: usize,
         text: &str,
         attachments: &[(String, bool)],
-        ts: Option<i64>,
         pinned: bool,
         view: &Entity<ChatView>,
         cx: &App,
@@ -636,7 +677,6 @@ impl ChatView {
             .rounded_lg()
             .bg(theme.list_active)
             .when(found, |d| d.border_1().border_color(x.amber))
-            .when_some(ts.filter(|_| !pinned), |d, ts| d.tooltip(move |w, cx| Tooltip::new(clock_time(ts)).build(w, cx)))
             .when(!attachments.is_empty(), |d| {
                 d.child(div().flex().flex_wrap().gap_1p5().children(attachments.iter().map(|(name, image)| {
                     div()
@@ -706,7 +746,7 @@ impl ChatView {
                 .bg(theme.background)
                 .border_b_1()
                 .border_color(theme.border)
-                .child(self.user_bubble(r, text, attachments, None, true, view, cx).cursor_pointer().on_click(move |_, _, cx| {
+                .child(self.user_bubble(r, text, attachments, true, view, cx).cursor_pointer().on_click(move |_, _, cx| {
                     v.update(cx, |c, cx| {
                         c.scroller.update(cx, |s, cx| {
                             s.scroll_to_item(h, cx);

@@ -27,6 +27,9 @@ pub struct Settings {
     pub default_mode_by_provider: HashMap<String, String>,
     /// Review prompt template per project id; absent = DEFAULT_REVIEW_PROMPT.
     pub review_prompt_by_project: HashMap<String, String>,
+    /// Desktop notifications when something's ready (a chat or a long terminal run
+    /// finished) while the app isn't in front. Off by default; "needs you" always notifies.
+    pub notify_ready: bool,
 }
 
 impl Global for Settings {}
@@ -48,6 +51,7 @@ impl Settings {
             provider: s("provider").unwrap_or_else(|| "claude".into()),
             default_mode_by_provider: str_map(&v["defaultModeByProvider"]),
             review_prompt_by_project: str_map(&v["reviewPromptByProject"]),
+            notify_ready: v["notifyReady"].as_bool().unwrap_or(false),
         }
     }
 
@@ -59,6 +63,7 @@ impl Settings {
             "provider": self.provider,
             "defaultModeByProvider": self.default_mode_by_provider,
             "reviewPromptByProject": self.review_prompt_by_project,
+            "notifyReady": self.notify_ready,
         });
         if let Err(e) = crate::data::write_atomic(&file(), v.to_string()) {
             eprintln!("couldn't save settings: {e}");
@@ -551,7 +556,14 @@ impl Render for SettingsView {
                         })
                     })
                     .collect();
-                vec![self.group("Theme", opts, cx)]
+                let notify = [(false, "Off"), (true, "On — a chat or a long terminal run finished while you were elsewhere")]
+                    .into_iter()
+                    .map(|(on, label)| {
+                        let id = if on { "notify-on" } else { "notify-off" };
+                        self.option(id, label, s.notify_ready == on, cx, move |_, cx| Settings::update(cx, |s| s.notify_ready = on))
+                    })
+                    .collect();
+                vec![self.group("Theme", opts, cx), self.group("Desktop notifications when something's ready", notify, cx)]
             }
             Section::Apps => {
                 let apps = detect_apps();

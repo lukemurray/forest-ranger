@@ -45,9 +45,19 @@ use session_state::{SessionState, initial_bounds, write_window_state};
 use tabs::{Tab, Tabs};
 use windows::Windows;
 
+/// A worktree's terminals, for its sidebar row: running (by title), and long runs
+/// that finished unseen (what, when).
+#[derive(Default)]
+pub(crate) struct TermState {
+    pub running: Vec<String>,
+    pub done: Vec<(String, std::time::Instant)>,
+}
+
 struct ForestRanger {
     /// A popped-out window's one worktree (None: the main window, with the sidebar).
     locked: Option<String>,
+    /// The window is in front (render keeps it current): finishes seen here don't notify.
+    window_active: bool,
     /// Live chats / terminals handed over from another window, by tab key; they
     /// take their saved places when the worktree's tabs are restored here.
     adopted: HashMap<String, Tab>,
@@ -241,6 +251,7 @@ impl ForestRanger {
         }
         Self {
             locked,
+            window_active: true,
             adopted: HashMap::new(),
             window_subs: HashMap::new(),
             projects,
@@ -790,7 +801,9 @@ impl ForestRanger {
                     let title = if c.open_asks().0 > 0 { "Permission needed" } else { "Input needed" };
                     notify::post(title, &format!("{label} is waiting for your answer."), target)
                 }
-                Attention::Unread => notify::post("Chat finished", &format!("{label} finished its turn."), target),
+                Attention::Unread if cx.global::<settings::Settings>().notify_ready => {
+                    notify::post("Chat finished", &format!("{label} finished its turn."), target)
+                }
                 _ => {}
             }
         }
@@ -811,17 +824,15 @@ impl ForestRanger {
         notify::set_badge(asks(self) + Windows::others(cx, me).iter().map(|fr| asks(fr.read(cx))).sum::<usize>());
     }
 
-    /// A worktree's dot: its chats' state first (a finished chat stays "ready" even
-    /// with a terminal running); a running terminal shows as Working only when the
-    /// chats have nothing to say.
+    /// A worktree's dot and word: its chats' state only. Running terminals are shown
+    /// apart (their own icon), so "working" always means an agent.
     pub(crate) fn worktree_attention(&self, wt: &str, cx: &App) -> Attention {
-        let (chats, term) = self.worktree_state(wt, cx);
-        if chats == Attention::Idle && term { Attention::Working } else { chats }
+        self.worktree_state(wt, cx).0
     }
 
-    /// (the most pressing of its chats, a terminal running something) — from the
-    /// window the worktree is in (its own, if popped out).
-    pub(crate) fn worktree_state(&self, wt: &str, cx: &App) -> (Attention, bool) {
+    /// (the most pressing of its chats, its terminals) — from the window the worktree
+    /// is in (its own, if popped out).
+    pub(crate) fn worktree_state(&self, wt: &str, cx: &App) -> (Attention, TermState) {
         if self.locked.as_deref() != Some(wt)
             && let Some((_, fr)) = Windows::popped(cx, wt)
         {
@@ -830,9 +841,19 @@ impl ForestRanger {
         self.own_state(wt, cx)
     }
 
-    fn own_state(&self, wt: &str, cx: &App) -> (Attention, bool) {
+    fn own_state(&self, wt: &str, cx: &App) -> (Attention, TermState) {
         let chats = self.chats().filter(|(w, _)| *w == wt).map(|(_, c)| c.read(cx).attention()).min().unwrap_or(Attention::Idle);
-        (chats, self.busy_terms(cx).any(|w| w == wt))
+        let mut terms = TermState::default();
+        for t in self.tabs.get(wt).into_iter().flat_map(|t| &t.open) {
+            let Tab::Term(v) = t else { continue };
+            let v = v.read(cx);
+            if v.busy() {
+                terms.running.push(v.title());
+            } else if let Some((what, at)) = v.done() {
+                terms.done.push((what.clone(), *at));
+            }
+        }
+        (chats, terms)
     }
 
     /// Agents working (or waiting on you) and terminals running, in this window's
@@ -900,6 +921,13 @@ impl ForestRanger {
 
     /// Tell chats whether you're looking at them: the visible tab of a focused window.
     fn sync_focus(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.window_active = window.is_window_active();
+        // A terminal in view: its "finished" has been seen.
+        if let Some(Tab::Term(t)) = window.is_window_active().then(|| self.selected.as_ref().and_then(|id| self.tabs.get(id)).and_then(|t| t.active.and_then(|i| t.open.get(i)))).flatten()
+            && t.read(cx).done().is_some()
+        {
+            t.update(cx, |t, cx| t.mark_seen(cx));
+        }
         let visible = window
             .is_window_active()
             .then(|| self.selected.as_ref().and_then(|id| self.tabs.get(id)).and_then(|t| t.active.and_then(|i| t.open.get(i))))

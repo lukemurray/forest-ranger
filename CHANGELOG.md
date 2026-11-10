@@ -3,6 +3,28 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Sidebar
+- One signal per source: a worktree's word and dot are always its agent's (working /
+  ready / needs you, else the time), and a running terminal is only ever its own
+  pulsing terminal icon (hover for what's running). No more "running" that could be
+  either.
+- A terminal command that ran 10s or more and finished while you weren't looking
+  shows as finished: the terminal icon (on the row and its tab) gets a green dot until
+  you open that terminal. Hover says what finished and when.
+
+### Chats
+- A message's time no longer pops up over the text you're reading: it shows faintly
+  beside the message while you hover it (with the agent's actions, or next to your
+  bubble); hover the time for the full date.
+
+### Settings
+- Desktop notifications when something's ready — a chat finished, or a long terminal
+  run finished — while the app isn't in front; clicking one goes to that chat or
+  terminal. Off by default (Settings → General). "Needs you" notifications (a
+  permission or question waiting) are always on.
+
 ## 0.16.1 — 2026-11-10
 
 ### Sidebar
