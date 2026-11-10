@@ -3,6 +3,12 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under the version it will ship in.
 
+## 0.14.1 — unreleased
+
+### Fixed
+- Plan approvals show the plan as Markdown (scrolling when long) instead of a cut-off
+  line of JSON.
+
 ## 0.14.0 — 2026-11-10
 
 ### Chats

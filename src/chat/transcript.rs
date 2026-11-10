@@ -556,15 +556,31 @@ impl ChatView {
                 .rounded_md()
                 .border_1()
                 .border_color(x.amber)
-                .child(div().flex().gap_1().text_sm().child("Allow").child(div().font_weight(FontWeight::SEMIBOLD).child(title.clone())).child("?"))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .whitespace_normal()
-                        .child(describe_input(input)),
-                )
+                .map(|d| match input["plan"].as_str() {
+                    // Plan mode's "approve this plan": the plan itself, as Markdown, in
+                    // a box that scrolls rather than as a truncated line of JSON.
+                    Some(plan) => d.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Approve this plan?")).child(
+                        div()
+                            .id(("plan-md", ix))
+                            .max_h(px(480.))
+                            .overflow_y_scroll()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(markdown(("plan-text", ix), plan)),
+                    ),
+                    None => d.child(div().flex().gap_1().text_sm().child("Allow").child(div().font_weight(FontWeight::SEMIBOLD).child(title.clone())).child("?")).child(
+                        div()
+                            .text_size(px(12.))
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_color(theme.muted_foreground)
+                            .whitespace_normal()
+                            .child(describe_input(input)),
+                    ),
+                })
                 .child(match answer {
                     Some(a) => div().text_sm().text_color(theme.muted_foreground).child(format!("→ {a}")),
                     None => div().flex().flex_wrap().gap_2().children(options.iter().enumerate().map(|(i, (oid, label, kind))| {
