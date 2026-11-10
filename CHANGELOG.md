@@ -5,6 +5,11 @@ under the version it will ship in.
 
 ## 0.14.0 — 2026-11-10
 
+### Chats
+- Pin an agent message (the pin on hover, or ⋯ → Pin) to keep it in a strip at the
+  top of the chat while it goes on: read it in full there, Jump to it, Open beside
+  (a read-only tab split next to the chat), or Unpin. Pins are saved with the chat.
+
 ### Fixed
 - C# files had no syntax highlighting (the grammar parsed but had no colour rules);
   they're coloured again, in the editor and in diffs.

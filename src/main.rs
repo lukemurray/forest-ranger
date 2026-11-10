@@ -672,6 +672,10 @@ impl ForestRanger {
                 cx.notify();
             }
             ChatEvent::StatusChanged => this.chat_status(&wt, chat, window, cx),
+            ChatEvent::OpenNote { key, title, text } => {
+                let beside = format!("chat:{}", chat.read(cx).session_id());
+                this.open_note(&wt, key, title, text, &beside, cx)
+            }
         });
         self.tab_subs.push((chat.entity_id(), sub));
         Tab::Chat(chat)

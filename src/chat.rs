@@ -7,7 +7,10 @@ mod agent_diff;
 mod elicitation;
 mod find;
 mod fresh;
+mod pins;
 mod transcript;
+
+pub(crate) use pins::{NoteView, pin_title, pinned_text};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -41,6 +44,8 @@ pub enum ChatEvent {
     Branched { log_id: String },
     /// `attention()` changed.
     StatusChanged,
+    /// "Open beside" on a pinned message: show it in a read-only tab next to the chat.
+    OpenNote { key: String, title: String, text: String },
     TitleChanged,
 }
 
@@ -80,6 +85,8 @@ struct Rows {
     elicits: HashMap<String, usize>,
     /// The latest plan: (content, status).
     plan: Vec<(String, String)>,
+    /// Pinned agent messages' ids, newest first.
+    pins: Vec<String>,
 }
 
 impl Rows {
@@ -168,6 +175,10 @@ impl Rows {
                     .flatten()
                     .map(|p| (p["content"].as_str().unwrap_or_default().to_string(), p["status"].as_str().unwrap_or_default().to_string()))
                     .collect();
+                Change::None
+            }
+            "pin" => {
+                self.apply_pin(&s("messageId"), e["on"] != false);
                 Change::None
             }
             "error" => self.push(Row::Info(format!("Error: {}", s("message")))),
@@ -318,6 +329,10 @@ pub struct ChatView {
     open: HashSet<usize>,
     open_strips: HashSet<usize>,
     plan_open: bool,
+    /// The pins strip is expanded; the message highlighted after "Jump to".
+    pins_open: bool,
+    flash: Option<usize>,
+    flash_task: Option<Task<()>>,
     forest_word: &'static str,
     recent_words: Vec<&'static str>,
     activity: Option<Task<()>>,
@@ -460,6 +475,9 @@ impl ChatView {
             open: HashSet::new(),
             open_strips: HashSet::new(),
             plan_open: false,
+            pins_open: false,
+            flash: None,
+            flash_task: None,
             forest_word: transcript::FOREST_WORDS[0],
             recent_words: vec![],
             activity: None,
@@ -1433,6 +1451,7 @@ impl Render for ChatView {
         let activity = self.render_activity(cx);
         let plan = self.render_plan(cx);
         let find_bar = self.render_find_bar(cx);
+        let pins = self.render_pins(cx);
         let banner = self.render_fresh_banner(cx);
 
         // Send / Stop / Queue ▾ — as the Electron composer.
@@ -1501,6 +1520,7 @@ impl Render for ChatView {
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(theme.list_active))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.add_paths(paths.paths(), cx)))
             .children(find_bar)
+            .children(pins)
             .child(
                 div()
                     .relative()

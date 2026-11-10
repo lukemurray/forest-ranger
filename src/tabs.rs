@@ -10,6 +10,8 @@ pub(crate) enum Tab {
     Diff { key: String, title: String, state: Entity<DiffState>, root: String, file: String, base: Option<String>, full: bool, fixed: bool },
     File(Entity<files::FileView>),
     Term(Entity<term::TerminalView>),
+    /// A pinned chat message opened beside its chat (read-only).
+    Note(Entity<chat::NoteView>),
 }
 
 impl Tab {
@@ -19,6 +21,7 @@ impl Tab {
             Tab::Diff { state, .. } => state.entity_id(),
             Tab::File(f) => f.entity_id(),
             Tab::Term(t) => t.entity_id(),
+            Tab::Note(n) => n.entity_id(),
         }
     }
 
@@ -28,6 +31,7 @@ impl Tab {
             Tab::Diff { key, .. } => key.clone(),
             Tab::File(f) => format!("file:{}", f.read(cx).rel),
             Tab::Term(t) => format!("term:{}", t.read(cx).id),
+            Tab::Note(n) => n.read(cx).key.clone(),
         }
     }
 }
@@ -205,6 +209,10 @@ impl ForestRanger {
                 // Its shell ended with the app: a fresh one in the worktree.
                 let Ok(session) = term::start(&path, None) else { continue };
                 Tab::Term(self.term_view(session, Some(tid.into()), cx))
+            } else if let Some((sid, mid)) = key.strip_prefix("note:").and_then(|k| k.split_once(':')) {
+                // Re-read from its chat's log; gone if the message is.
+                let Some(text) = chat::pinned_text(sid, mid) else { continue };
+                Tab::Note(cx.new(|_| chat::NoteView::new(key.clone(), chat::pin_title(&text), text)))
             } else {
                 continue;
             };
@@ -699,6 +707,7 @@ impl ForestRanger {
                     Tab::Diff { .. } => sidebar::icon("fr/git-branch.svg", 12., x.amber).into_any_element(),
                     Tab::File(_) => sidebar::icon("fr/folder.svg", 12., theme.muted_foreground).into_any_element(),
                     Tab::Term(_) => sidebar::icon("fr/terminal.svg", 12., theme.muted_foreground).into_any_element(),
+                    Tab::Note(_) => sidebar::icon("fr/pin.svg", 12., theme.primary).into_any_element(),
                 };
                 let title = self.tab_title(tab, cx);
                 let editing = self.renaming.as_ref().filter(|r| r.0 == *key).map(|r| r.1.clone());
@@ -881,6 +890,7 @@ impl ForestRanger {
             }
             Some(Tab::File(f)) => f.clone().cached(fill()).into_any_element(),
             Some(Tab::Term(t)) => t.clone().cached(fill()).into_any_element(),
+            Some(Tab::Note(n)) => n.clone().cached(fill()).into_any_element(),
             None => div().size_full().into_any_element(),
         }
     }
@@ -895,6 +905,20 @@ impl ForestRanger {
     }
 
     /// Drop a tab on a group's body: split it off that edge (centre: move it in).
+    /// A pinned message as a read-only tab, split off to the right of its chat
+    /// (or focused, if it's already open).
+    pub(crate) fn open_note(&mut self, wt: &str, key: &str, title: &str, text: &str, beside: &str, cx: &mut Context<Self>) {
+        if self.selected.as_deref() != Some(wt) || self.focus_tab(key, cx) {
+            return;
+        }
+        let view = cx.new(|_| chat::NoteView::new(key.to_string(), title.to_string(), text.to_string()));
+        self.push_tab(Tab::Note(view), cx);
+        let group = self.tabs_mut().and_then(|t| t.layout.group_of(beside).map(|g| g.id.clone()));
+        if let Some(g) = group {
+            self.split_tab(key, &g, panes::Drop::Right, cx);
+        }
+    }
+
     pub(crate) fn split_tab(&mut self, key: &str, group: &str, side: panes::Drop, cx: &mut Context<Self>) {
         let Some(tabs) = self.tabs_mut() else { return };
         tabs.layout = std::mem::take(&mut tabs.layout).split_off(key, group, side);
@@ -930,6 +954,7 @@ impl ForestRanger {
             Tab::Diff { title, .. } => title.clone(),
             Tab::File(f) => f.read(cx).title(),
             Tab::Term(t) => t.read(cx).title(),
+            Tab::Note(n) => n.read(cx).title.clone(),
         };
         self.selected
             .as_deref()

@@ -280,7 +280,7 @@ fn plain_markdown(text: &str) -> String {
     out
 }
 
-fn markdown(id: impl Into<ElementId>, text: &str) -> TextView {
+pub(super) fn markdown(id: impl Into<ElementId>, text: &str) -> TextView {
     TextView::markdown(id, strip_rules(text)).code_block_actions(|cb, _, _| {
         Clipboard::new(("copy-code", cb.span.as_ref().map_or(0, |s| s.start))).tooltip("Copy").value(cb.code())
     })
@@ -413,30 +413,54 @@ impl ChatView {
                 .into_any_element(),
             Row::Assistant { text, message_id, ts } => {
                 let (v, raw) = (view.clone(), text.clone());
+                let pinned = message_id.as_deref().is_some_and(|m| self.is_pinned(m));
                 div()
                     .id(("assistant", ix))
                     .group("assistant")
                     .relative()
+                    .rounded(px(6.))
+                    // Just jumped to from the pins strip.
+                    .when(self.flash == Some(ix), |d| d.bg(theme.primary.opacity(0.1)))
                     .child(markdown(("md", ix), text))
                     .when_some(*ts, |d, ts| d.tooltip(move |w, cx| Tooltip::new(clock_time(ts)).build(w, cx)))
                     .when_some(message_id.clone(), |d, mid| {
+                        let (pv, pmid) = (v.clone(), mid.clone());
                         d.child(
-                            div().absolute().top(px(-6.)).right_0().opacity(0.).group_hover("assistant", |s| s.opacity(1.)).child(
+                            div()
+                                .absolute()
+                                .top(px(-6.))
+                                .right_0()
+                                .flex()
+                                // A pinned message keeps its pin showing; the rest appear on hover.
+                                .child(
+                                    div().when(!pinned, |d| d.opacity(0.).group_hover("assistant", |s| s.opacity(1.))).child(
+                                        Button::new(("msg-pin", ix))
+                                            .small()
+                                            .ghost()
+                                            .icon(Icon::empty().path("fr/pin.svg").when(pinned, |i| i.text_color(theme.primary)))
+                                            .tooltip(if pinned { "Unpin" } else { "Pin — keep it at the top while the chat goes on" })
+                                            .on_click(move |_, _, cx| pv.update(cx, |c, cx| c.toggle_pin(pmid.clone(), cx))),
+                                    ),
+                                )
+                                .child(div().opacity(0.).group_hover("assistant", |s| s.opacity(1.)).child(
                                 Button::new(("msg-menu", ix))
                                     .small()
                                     .ghost()
                                     .icon(Icon::empty().path("fr/ellipsis.svg"))
                                     .tooltip("Message actions")
                                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                        let (v1, raw, mid) = (v.clone(), raw.clone(), mid.clone());
-                                        menu.item(PopupMenuItem::new("Branch from here").on_click(move |_, _, cx| {
+                                        let (v1, v2, raw, mid, pin_mid) = (v.clone(), v.clone(), raw.clone(), mid.clone(), mid.clone());
+                                        menu.item(PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" }).on_click(move |_, _, cx| {
+                                            v2.update(cx, |c, cx| c.toggle_pin(pin_mid.clone(), cx))
+                                        }))
+                                        .item(PopupMenuItem::new("Branch from here").on_click(move |_, _, cx| {
                                             v1.update(cx, |c, cx| c.branch_from(mid.clone(), cx))
                                         }))
                                         .item(PopupMenuItem::new("Copy text").on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()))
                                         }))
                                     }),
-                            ),
+                            )),
                         )
                     })
                     .into_any_element()
