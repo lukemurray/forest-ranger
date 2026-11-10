@@ -3,17 +3,23 @@
 #   scripts/bundle-macos.sh            build it
 #   scripts/bundle-macos.sh --install  build, then copy it to /Applications
 #   scripts/bundle-macos.sh --install --minor   …as a minor release (0.9.3 → 0.10.0)
+#   scripts/bundle-macos.sh --install --no-bump …keeping the current version (a rebuild)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-INSTALL=0 MINOR=0
+INSTALL=0 MINOR=0 BUMP=1
 for arg in "$@"; do
   case "$arg" in
     --install) INSTALL=1 ;;
     --minor) MINOR=1 ;;
-    *) echo "unknown option: $arg (use --install, optionally with --minor)" >&2; exit 1 ;;
+    --no-bump) BUMP=0 ;;
+    *) echo "unknown option: $arg (use --install, optionally with --minor or --no-bump)" >&2; exit 1 ;;
   esac
 done
+if [ "$MINOR" = 1 ] && [ "$BUMP" = 0 ]; then
+  echo "--minor and --no-bump contradict each other" >&2
+  exit 1
+fi
 if [ "$MINOR" = 1 ] && [ "$INSTALL" = 0 ]; then
   echo "--minor goes with --install (it picks the version bump)" >&2
   exit 1
@@ -22,7 +28,7 @@ fi
 # --install bumps the version first — patch (0.9.1 → 0.9.2), or with --minor the
 # minor, resetting the patch (0.9.3 → 0.10.0); the build updates Cargo.lock — and
 # commits the bump once installed.
-if [ "$INSTALL" = 1 ]; then
+if [ "$INSTALL" = 1 ] && [ "$BUMP" = 1 ]; then
   if [ "$MINOR" = 1 ]; then
     perl -0pi -e 's/^version = "(\d+)\.(\d+)\.(\d+)"/"version = \"$1.".($2+1).".0\""/me' Cargo.toml
   else
@@ -97,5 +103,7 @@ if [ "$INSTALL" = 1 ]; then
   cp -R "$APP" /Applications/
   "$LSREGISTER" -f "/Applications/$NAME.app" >/dev/null 2>&1 || true
   echo "Installed /Applications/$NAME.app"
-  git commit -q -m "$VERSION" -- Cargo.toml Cargo.lock && echo "Committed $VERSION"
+  if [ "$BUMP" = 1 ]; then
+    git commit -q -m "$VERSION" -- Cargo.toml Cargo.lock && echo "Committed $VERSION"
+  fi
 fi
