@@ -811,22 +811,28 @@ impl ForestRanger {
         notify::set_badge(asks(self) + Windows::others(cx, me).iter().map(|fr| asks(fr.read(cx))).sum::<usize>());
     }
 
-    /// The most urgent attention across a worktree's open chats.
-    /// The most pressing of its chats; a terminal running something counts as Working.
+    /// A worktree's dot: its chats' state first (a finished chat stays "ready" even
+    /// with a terminal running); a running terminal shows as Working only when the
+    /// chats have nothing to say.
     pub(crate) fn worktree_attention(&self, wt: &str, cx: &App) -> Attention {
-        // Popped out: its chats live in that window's shell.
+        let (chats, term) = self.worktree_state(wt, cx);
+        if chats == Attention::Idle && term { Attention::Working } else { chats }
+    }
+
+    /// (the most pressing of its chats, a terminal running something) — from the
+    /// window the worktree is in (its own, if popped out).
+    pub(crate) fn worktree_state(&self, wt: &str, cx: &App) -> (Attention, bool) {
         if self.locked.as_deref() != Some(wt)
             && let Some((_, fr)) = Windows::popped(cx, wt)
         {
-            return fr.read(cx).own_attention(wt, cx);
+            return fr.read(cx).own_state(wt, cx);
         }
-        self.own_attention(wt, cx)
+        self.own_state(wt, cx)
     }
 
-    fn own_attention(&self, wt: &str, cx: &App) -> Attention {
+    fn own_state(&self, wt: &str, cx: &App) -> (Attention, bool) {
         let chats = self.chats().filter(|(w, _)| *w == wt).map(|(_, c)| c.read(cx).attention()).min().unwrap_or(Attention::Idle);
-        let term = self.busy_terms(cx).any(|w| w == wt).then_some(Attention::Working).unwrap_or(Attention::Idle);
-        chats.min(term)
+        (chats, self.busy_terms(cx).any(|w| w == wt))
     }
 
     /// Agents working (or waiting on you) and terminals running, in this window's

@@ -3,6 +3,18 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Sidebar
+- A running terminal no longer hides a chat's state: the word (working / ready / needs
+  you) is always the chat's, with a terminal icon beside it while one runs; with no
+  chat to report, the row says **running**.
+
+### Project page
+- Branch pickers are type-to-search boxes — in Review a branch (focused when it opens)
+  and New worktree's base branch: type (or ↓) for matching branches, paste an exact
+  name to pick it, ↑ / ↓ and Enter to pick, Enter again to start / create.
+
 ## 0.16.0 — 2026-11-10
 
 ### Fixed

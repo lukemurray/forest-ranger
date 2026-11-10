@@ -6,15 +6,13 @@ use std::cell::Cell;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::settings::{self, Settings};
-use crate::chat::Attention;
 use crate::{ForestRanger, data, git, theme};
+use super::branch_picker::{BranchPicker, BranchPickerEvent};
 
 /// Open `view` as a dialog, focusing `focus` once on open.
 pub(crate) fn show<V: Render>(title: &'static str, view: Entity<V>, focus: Option<Entity<InputState>>, window: &mut Window, cx: &mut App) {
@@ -69,13 +67,14 @@ struct NewWorktree {
     repo: String,
     default_parent: String,
     name: Entity<InputState>,
-    base: Entity<SelectState<SearchableVec<String>>>,
+    /// Type-to-search; empty means the current HEAD.
+    base: Entity<BranchPicker>,
     location: Entity<InputState>,
     start_chat: bool,
     open_editor: bool,
     busy: bool,
     error: Option<String>,
-    _sub: Subscription,
+    _subs: [Subscription; 2],
 }
 
 pub fn new_worktree(fr: Entity<ForestRanger>, project_id: String, window: &mut Window, cx: &mut App) {
@@ -89,15 +88,18 @@ fn new_worktree_now(fr: Entity<ForestRanger>, project_id: String, window: &mut W
     // ponytail: three quick git calls on the UI thread; move to the background if large repos stall.
     let branches = git::list_branches(&repo);
     let base = git::resolve_base(&repo, None);
-    let sel = base.as_ref().and_then(|b| branches.iter().position(|x| x == b)).map(IndexPath::new);
     let view = cx.new(|cx| {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("auto-generated if blank"));
         let location = cx.new(|cx| InputState::new(window, cx).placeholder("~/path/to/worktrees").default_value(data::tilde_path(&default_parent)));
-        let base = cx.new(|cx| SelectState::new(SearchableVec::new(branches), sel, window, cx).searchable(true));
+        let base = cx.new(|cx| BranchPicker::new(branches, base, "current HEAD — type to search branches", window, cx));
         let sub = cx.subscribe_in(&name, window, |this: &mut NewWorktree, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 this.create(window, cx);
             }
+        });
+        let base_sub = cx.subscribe_in(&base, window, |this: &mut NewWorktree, _, ev: &BranchPickerEvent, window, cx| match ev {
+            BranchPickerEvent::Submit => this.create(window, cx),
+            BranchPickerEvent::Picked(_) => cx.notify(),
         });
         NewWorktree {
             fr: fr.downgrade(),
@@ -111,7 +113,7 @@ fn new_worktree_now(fr: Entity<ForestRanger>, project_id: String, window: &mut W
             open_editor: false,
             busy: false,
             error: None,
-            _sub: sub,
+            _subs: [sub, base_sub],
         }
     });
     let focus = view.read(cx).name.clone();
@@ -126,7 +128,14 @@ impl NewWorktree {
         self.busy = true;
         self.error = None;
         let name = self.name.read(cx).value().to_string();
-        let base = self.base.read(cx).selected_value().cloned();
+        // Something typed that isn't a branch: don't quietly fall back to HEAD.
+        let picker = self.base.read(cx);
+        let base = picker.picked(cx);
+        if base.is_none() && !picker.text(cx).is_empty() {
+            self.busy = false;
+            self.error = Some(format!("No branch named \"{}\" — pick one from the list, or clear it to use the current HEAD.", picker.text(cx)));
+            return cx.notify();
+        }
         let location = self.location.read(cx).value().trim().to_string();
         let (pid, repo, fallback) = (self.project_id.clone(), self.repo.clone(), self.default_parent.clone());
         let work = cx.background_executor().spawn(async move {
@@ -181,7 +190,7 @@ impl Render for NewWorktree {
             .flex_col()
             .gap_3()
             .child(field("Branch name (optional)", Input::new(&self.name).font_family(mono.clone()), cx))
-            .child(field("Base branch", Select::new(&self.base).placeholder("current HEAD").search_placeholder("Filter branches…"), cx))
+            .child(field("Base branch", self.base.clone(), cx))
             .child(field("Location", Input::new(&self.location).font_family(mono), cx))
             .child(
                 Checkbox::new("start-chat")
@@ -432,7 +441,7 @@ fn cleanup_worktrees_now(fr: Entity<ForestRanger>, project_id: String, window: &
     let Some(p) = project_of(f, &project_id) else { return };
     let repo = p.path.clone();
     // A chat working or waiting for you there: leave it alone.
-    let busy = |id: &str| matches!(f.worktree_attention(id, cx), Attention::Working | Attention::NeedsAnswer);
+    let busy = |id: &str| f.busy_summary(Some(id), fr.entity_id(), cx).is_some();
     let linked: Vec<_> = p.worktrees.iter().filter(|w| !w.is_primary).collect();
     let candidates: Vec<_> =
         linked.iter().filter(|w| !busy(&w.id)).map(|w| (w.path.clone(), w.label().0, w.branch.clone(), w.activity)).collect();
@@ -767,7 +776,8 @@ struct ReviewBranch {
     repo: String,
     parent: String,
     base: Option<String>,
-    branch: Entity<SelectState<SearchableVec<String>>>,
+    /// The branch to review (type-to-search; focused on open).
+    branch: Entity<BranchPicker>,
     custom: bool,
     prompt: Entity<TextareaState>,
     /// The prompt last filled in for the picked branch; once the text differs, it's yours.
@@ -791,36 +801,44 @@ fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, preselect: Op
     // ponytail: quick git calls on the UI thread, as in new_worktree.
     let base = git::resolve_base(&repo, None);
     let branches: Vec<String> = git::list_branches(&repo).into_iter().filter(|b| Some(b) != base.as_ref()).collect();
-    let picked = preselect.and_then(|b| branches.iter().position(|x| *x == b));
-    let auto = picked.map(|i| settings::render_review_prompt(cx, &project_id, &branches[i], base.as_deref())).unwrap_or_default();
+    let picked = preselect.filter(|b| branches.contains(b));
+    let auto = picked.as_ref().map(|b| settings::render_review_prompt(cx, &project_id, b, base.as_deref())).unwrap_or_default();
     let view = cx.new(|cx| {
-        let branch = cx.new(|cx| SelectState::new(SearchableVec::new(branches), picked.map(IndexPath::new), window, cx).searchable(true));
+        let branch = cx.new(|cx| BranchPicker::new(branches, picked, "Filter branches, or paste a name…", window, cx));
         let first = auto.clone();
         let prompt = cx.new(|cx| TextareaState::new(window, cx).rows(9).placeholder("Pick a branch to fill the default prompt, or write your own.").default_value(first));
-        let sub = cx.subscribe_in(&branch, window, |this: &mut ReviewBranch, _, ev: &SelectEvent<SearchableVec<String>>, window, cx| {
-            let SelectEvent::Confirm(Some(b)) = ev else { return };
-            if this.prompt.read(cx).value().as_ref() == this.auto {
-                this.auto = settings::render_review_prompt(cx, &this.project_id, b, this.base.as_deref());
-                let auto = this.auto.clone();
-                this.prompt.update(cx, |s, cx| s.set_value(auto, window, cx));
+        let sub = cx.subscribe_in(&branch, window, |this: &mut ReviewBranch, _, ev: &BranchPickerEvent, window, cx| {
+            match ev {
+                BranchPickerEvent::Picked(Some(b)) => this.refill_prompt(b, window, cx),
+                BranchPickerEvent::Picked(None) => {}
+                BranchPickerEvent::Submit => this.start(window, cx),
             }
             cx.notify();
         });
         ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, custom: false, prompt, auto, busy: false, error: None, _sub: sub }
     });
-    // The branch picker takes focus on open, so you can type to filter straight away.
+    // The branch box takes focus on open: type or paste straight away.
     let (first, picker) = (Cell::new(true), view.read(cx).branch.clone());
     window.open_dialog(cx, move |d, window, cx| {
         if first.replace(false) {
-            picker.update(cx, |s, cx| s.focus(window, cx));
+            picker.update(cx, |p, cx| p.focus(window, cx));
         }
         d.width(px(520.)).title("Review a branch").child(view.clone())
     });
 }
 
 impl ReviewBranch {
+    /// A branch was picked: refill the prompt unless you've edited it.
+    fn refill_prompt(&mut self, b: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt.read(cx).value().as_ref() == self.auto {
+            self.auto = settings::render_review_prompt(cx, &self.project_id, b, self.base.as_deref());
+            let auto = self.auto.clone();
+            self.prompt.update(cx, |s, cx| s.set_value(auto, window, cx));
+        }
+    }
+
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(branch) = self.branch.read(cx).selected_value().cloned() else { return };
+        let Some(branch) = self.branch.read(cx).picked(cx) else { return };
         if self.busy {
             return;
         }
@@ -879,7 +897,7 @@ impl ReviewBranch {
 impl Render for ReviewBranch {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let x = theme::extra(cx);
-        let picked = self.branch.read(cx).selected_value().is_some();
+        let picked = self.branch.read(cx).picked(cx).is_some();
         let hint = format!(
             "Checks the branch out in a worktree (reusing one already on it) and starts a chat to review it{}.",
             self.base.as_ref().map(|b| format!(" against {b}")).unwrap_or_default()
@@ -888,7 +906,7 @@ impl Render for ReviewBranch {
             .flex()
             .flex_col()
             .gap_3()
-            .child(field("Branch to review", Select::new(&self.branch).placeholder("pick a branch").search_placeholder("Filter branches…"), cx))
+            .child(field("Branch to review", self.branch.clone(), cx))
             .child(Checkbox::new("custom-prompt").label("Customize the review prompt").checked(self.custom).on_click(cx.listener(|this, v: &bool, _, cx| {
                 this.custom = *v;
                 cx.notify();

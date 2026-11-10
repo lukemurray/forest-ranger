@@ -12,6 +12,7 @@ use crate::data::{self, Project};
 use crate::settings::{self, Settings};
 use crate::theme;
 
+pub(crate) mod branch_picker;
 pub(crate) mod dialogs;
 
 /// A hover tooltip (the Electron app's `data-tip` / `title`).
@@ -290,11 +291,16 @@ impl ForestRanger {
         let menu = self.worktree_menu(p, w, cx);
         // The state, in words where the time goes: easier to spot than a dot alone.
         use crate::chat::Attention;
+        // The words are the chats' state; a running terminal gets its own icon, so
+        // "ready" still shows while a dev server runs.
+        let (chats, term) = self.worktree_state(&w.id, cx);
         let attention = self.worktree_attention(&w.id, cx);
-        let status = match attention {
-            Attention::Working => div().text_color(theme.primary).opacity(crate::anim::pulse(1400, 0.55, 1.)).child("working"),
+        let pulse = || crate::anim::pulse(1400, 0.55, 1.);
+        let status = match chats {
+            Attention::Working => div().text_color(theme.primary).opacity(pulse()).child("working"),
             Attention::Unread => div().text_color(theme.primary).font_weight(FontWeight::SEMIBOLD).child("ready"),
             Attention::NeedsAnswer => div().text_color(x.amber).font_weight(FontWeight::SEMIBOLD).child("needs you"),
+            Attention::Idle if term => div().text_color(theme.primary).opacity(pulse()).child("running"),
             Attention::Idle => div().text_color(x.faint).child(data::relative_time(w.activity)),
         };
         // Something to look at: the name stands out too, like unread mail.
@@ -354,6 +360,8 @@ impl ForestRanger {
                     .gap_2()
                     .flex_shrink_0()
                     .when(popped, |d| d.child(icon("fr/pop-out.svg", 11., x.faint)))
+                    // A terminal running something (alongside whatever the chats say).
+                    .when(term && chats != Attention::Idle, |d| d.child(icon("fr/terminal.svg", 11., theme.primary)))
                     .child(status.text_size(px(11.)))
                     .children(row_dot(attention, self.chat_here(&w.id, cx), cx)),
             )
