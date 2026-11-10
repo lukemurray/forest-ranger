@@ -78,7 +78,7 @@ Release by release in [CHANGELOG.md](CHANGELOG.md).
 - **Settings** (sidebar footer) — theme, editor, external terminal, default agent and
   mode, GitHub / GitLab via the `gh` / `glab` CLIs.
 
-Not here yet: a notarized/distributable build. Remaining parity notes from the port are in [docs/PARITY.md](docs/PARITY.md).
+Not here yet: a notarized/distributable build.
 
 ## Checks
 
