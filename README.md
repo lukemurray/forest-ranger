@@ -2,8 +2,7 @@
 
 A desktop app for working across many git worktrees with AI coding agents — like
 chat apps that organise work into projects, but centred on your **worktrees**.
-Rust, built on [GPUI Kit](https://gpui-kit.com). (It replaced an earlier Electron
-version; that code is in git history.)
+Rust, built on [GPUI Kit](https://gpui-kit.com).
 
 ## Run
 
@@ -15,22 +14,6 @@ Needs a recent stable Rust (`rust-toolchain.toml` pins `stable`; GPUI needs ≥ 
 The first build also fetches libghostty-vt 1.0 (the terminal emulator, a prebuilt static
 library from Ghostty's releases, checksum-verified) into `vendor/` via
 `scripts/fetch-libghostty.sh`.
-
-### Release app
-
-```sh
-scripts/bundle-macos.sh             # → dist/Forest Ranger.app (release build, ad-hoc signed)
-scripts/bundle-macos.sh --install   # bump the patch version, build, copy to /Applications, commit the bump
-scripts/bundle-macos.sh --install --minor   # …as a minor release instead (0.9.3 → 0.10.0)
-scripts/bundle-macos.sh --install --no-bump # rebuild and install, keeping the version
-scripts/make-signing-cert.sh        # once per Mac: a local signing identity
-```
-
-With the local signing identity, macOS keeps the app's privacy permissions (Downloads,
-Desktop, Full Disk Access…) across rebuilds; signed ad-hoc, it asks again after each build.
-
-The bundle carries only the agent adapters; it uses the `node`, `claude`, `codex`, `git`,
-`gh` and `glab` on your machine.
 
 ### Agents
 
