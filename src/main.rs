@@ -169,6 +169,7 @@ impl ForestRanger {
         let mut this = Self::build(None, window, cx);
         this.load_activity(cx);
         this.sync_all(cx);
+        this.watch_worktrees(cx);
         this.restore_place(cx);
         this.poll_needs_you(cx);
         dev::bench(window, cx);
@@ -226,7 +227,13 @@ impl ForestRanger {
             false
         });
         // Window focus decides whether a finished turn is unread (re-checked on render).
-        let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        let activation = cx.observe_window_activation(window, move |this, window, cx| {
+            // Back from a terminal or another app: pick up worktrees made meanwhile.
+            if main && window.is_window_active() {
+                this.sync_worktrees(false, cx);
+            }
+            cx.notify()
+        });
         // Notification clicks (the main window takes them; a popped-out worktree's go there).
         if main {
             cx.spawn(async move |this, cx| {
@@ -293,15 +300,40 @@ impl ForestRanger {
     /// Bring the DB in line with `git worktree list` for every project (new or
     /// removed worktrees), then reload the sidebar.
     fn sync_all(&self, cx: &mut Context<Self>) {
+        self.sync_worktrees(true, cx);
+    }
+
+    /// Bring the DB in line with `git worktree list` (worktrees added or removed in a
+    /// terminal, by an agent, …), then reload — always, or (`force` false) only when
+    /// the set of worktrees changed, so the periodic check is cheap.
+    fn sync_worktrees(&self, force: bool, cx: &mut Context<Self>) {
         let projects: Vec<(String, String)> = self.projects.iter().map(|p| (p.id.clone(), p.path.clone())).collect();
+        let known: HashSet<String> = self.projects.iter().flat_map(|p| &p.worktrees).map(|w| w.id.clone()).collect();
         let work = cx.background_executor().spawn(async move {
             for (id, path) in projects {
                 let _ = data::sync_worktrees(&id, &path);
             }
+            let now: HashSet<String> = data::load_projects().map(|ps| ps.iter().flat_map(|p| &p.worktrees).map(|w| w.id.clone()).collect()).unwrap_or_default();
+            now != known
         });
         cx.spawn(async move |this, cx| {
-            work.await;
-            let _ = this.update(cx, |this, cx| this.reload(cx));
+            let changed = work.await;
+            if force || changed {
+                let _ = this.update(cx, |this, cx| this.reload(cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Main window: keep the worktree list current — on coming to the front, and each minute.
+    fn watch_worktrees(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                if this.update(cx, |this, cx| this.sync_worktrees(false, cx)).is_err() {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -1262,6 +1294,9 @@ fn main() {
             KeyBinding::new("ctrl--", NoAction, Some("Terminal")),
             KeyBinding::new("ctrl-=", NoAction, Some("Terminal")),
             KeyBinding::new("ctrl-shift--", NoAction, Some("Terminal")),
+            // Tab completes in the shell, not "next focusable control" (the kit's Root binding).
+            KeyBinding::new("tab", NoAction, Some("Terminal")),
+            KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
             KeyBinding::new("cmd-b", TogglePanel, None),
             KeyBinding::new("cmd-[", GoBack, None),
             KeyBinding::new("cmd-]", GoForward, None),

@@ -778,6 +778,8 @@ struct ReviewBranch {
     base: Option<String>,
     /// The branch to review (type-to-search; focused on open).
     branch: Entity<BranchPicker>,
+    /// Fetching origin in the background so branches pushed since the last fetch show up.
+    fetching: bool,
     custom: bool,
     prompt: Entity<TextareaState>,
     /// The prompt last filled in for the picked branch; once the text differs, it's yours.
@@ -815,7 +817,23 @@ fn review_branch_now(fr: Entity<ForestRanger>, project_id: String, preselect: Op
             }
             cx.notify();
         });
-        ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, custom: false, prompt, auto, busy: false, error: None, _sub: sub }
+        // The list is what's been fetched; fetch origin now and refresh it, so a branch
+        // pushed a minute ago is there too.
+        let (r, b) = (repo.clone(), base.clone());
+        let work = cx.background_executor().spawn(async move {
+            let _ = git::git(&r, &["fetch", "origin", "--prune", "--quiet"]);
+            git::list_branches(&r).into_iter().filter(|x| Some(x) != b.as_ref()).collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this: WeakEntity<ReviewBranch>, cx| {
+            let fresh = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.fetching = false;
+                this.branch.update(cx, |p, cx| p.set_branches(fresh, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+        ReviewBranch { fr: fr.downgrade(), project_id, repo, parent, base, branch, fetching: true, custom: false, prompt, auto, busy: false, error: None, _sub: sub }
     });
     // The branch box takes focus on open: type or paste straight away.
     let (first, picker) = (Cell::new(true), view.read(cx).branch.clone());
@@ -907,6 +925,7 @@ impl Render for ReviewBranch {
             .flex_col()
             .gap_3()
             .child(field("Branch to review", self.branch.clone(), cx))
+            .when(self.fetching, |d| d.child(div().mt(px(-6.)).text_size(px(12.)).text_color(x.faint).child("Checking origin for new branches…")))
             .child(Checkbox::new("custom-prompt").label("Customize the review prompt").checked(self.custom).on_click(cx.listener(|this, v: &bool, _, cx| {
                 this.custom = *v;
                 cx.notify();

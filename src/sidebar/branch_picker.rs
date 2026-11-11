@@ -58,6 +58,14 @@ impl BranchPicker {
         Self { branches, input, cursor: 0, listing: false, last: initial, _sub: sub }
     }
 
+    /// A fresher list (e.g. after fetching origin); what's typed stays, and if it now
+    /// names a branch, that counts as picked.
+    pub fn set_branches(&mut self, branches: Vec<String>, cx: &mut Context<Self>) {
+        self.branches = branches;
+        self.report(cx);
+        cx.notify();
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
@@ -74,12 +82,18 @@ impl BranchPicker {
     }
 
     /// Branches containing the text (any case); all of them while empty or picked.
+    /// Branches containing the text (any case), an exact match first; all while empty.
     fn matches(&self, cx: &App) -> Vec<String> {
         let q = self.text(cx).to_lowercase();
-        if q.is_empty() || self.picked(cx).is_some() {
+        if q.is_empty() {
             return self.branches.clone();
         }
-        self.branches.iter().filter(|b| b.to_lowercase().contains(&q)).cloned().collect()
+        let mut m: Vec<String> = self.branches.iter().filter(|b| b.to_lowercase().contains(&q)).cloned().collect();
+        if let Some(i) = m.iter().position(|b| b.to_lowercase() == q) {
+            let exact = m.remove(i);
+            m.insert(0, exact);
+        }
+        m
     }
 
     fn pick(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -108,10 +122,11 @@ impl Render for BranchPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let x = theme::extra(cx);
         let theme = cx.theme().colors;
-        let picked = self.picked(cx).is_some();
+        let chosen = self.picked(cx);
         let matches = self.matches(cx);
         self.cursor = self.cursor.min(matches.len().saturating_sub(1));
-        let open = self.listing && !picked;
+        // Open while you're typing, even on an exact match — its ✓ row shows it was found.
+        let open = self.listing;
         let list = div()
             .id("branch-list")
             .absolute()
@@ -132,6 +147,7 @@ impl Render for BranchPicker {
             .when(matches.is_empty(), |d| d.child(div().px_2().py_1p5().text_size(px(12.5)).text_color(x.faint).child("No matching branch")))
             .children(matches.iter().enumerate().map(|(i, b)| {
                 let b2 = b.clone();
+                let exact = chosen.as_ref() == Some(b);
                 div()
                     .id(("branch", i))
                     // Rows keep their height: a capped flex column would squash them.
@@ -141,9 +157,14 @@ impl Render for BranchPicker {
                     .text_size(px(13.))
                     .truncate()
                     .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .when(i == self.cursor, |d| d.bg(x.hover))
                     .hover(|s| s.bg(x.hover))
-                    .child(b.clone())
+                    .when(exact, |d| d.text_color(theme.primary).font_weight(FontWeight::SEMIBOLD))
+                    .child(div().min_w_0().truncate().child(b.clone()))
+                    .when(exact, |d| d.child(div().flex_shrink_0().text_size(px(12.)).child("✓")))
                     // On press: the box loses focus (closing the list) before a click would land.
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
