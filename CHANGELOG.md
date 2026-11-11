@@ -3,6 +3,21 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## 0.17.1 — 2026-11-12
+
+### Fixed
+- Worktrees made outside the app (a terminal, an agent's `git worktree add`) show up
+  in the sidebar and ⌘T on their own — checked when the window comes to the front and
+  every minute — instead of only after a rescan or relaunch.
+- Branch pickers keep their list open while you type, with an exact match first and
+  marked ✓ — typing or pasting a full name no longer just closes the list (it looked
+  like nothing matched).
+- Review a branch finds branches pushed since your last fetch: it fetches origin in
+  the background when it opens ("Checking origin for new branches…") and refreshes
+  the list, keeping what you've typed.
+- Tab and ⇧Tab in a terminal go to the shell (completion) instead of moving focus out
+  of the terminal.
+
 ## 0.17.0 — 2026-11-11
 
 ### Sidebar
