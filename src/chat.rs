@@ -317,6 +317,9 @@ pub struct ChatView {
     /// The agent's slash commands (name, description), and the "/prefix" being typed.
     commands: Vec<(String, String)>,
     slash: Option<String>,
+    /// The highlighted command in that menu (↑ / ↓; Tab or Enter completes it).
+    slash_sel: usize,
+    slash_scroll: ScrollHandle,
     /// The ✦ settings menu: open, and which row's choices are showing.
     menu_open: bool,
     menu_row: Option<usize>,
@@ -418,6 +421,9 @@ impl ChatView {
                 // A bare "/prefix" (no space yet) opens the slash-command menu.
                 let slash = value.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)).map(|q| q.to_lowercase());
                 if has != this.has_text || slash != this.slash {
+                    if slash != this.slash {
+                        this.slash_sel = 0;
+                    }
                     this.has_text = has;
                     this.slash = slash;
                     cx.notify();
@@ -455,6 +461,7 @@ impl ChatView {
         input.update(cx, |s, cx| s.focus(window, cx));
         let commands = log.last("commands").map(commands_of).unwrap_or_default();
         find::bind(cx);
+        bind_slash_keys(cx);
         let fresh_banner = fresh::cold(&log.events, now_ms());
         // Cmd-Q may not drop views: write out the log on quit.
         let quit = cx.on_app_quit(|v, _| {
@@ -487,6 +494,8 @@ impl ChatView {
             fresh: false,
             commands,
             slash: None,
+            slash_sel: 0,
+            slash_scroll: ScrollHandle::new(),
             menu_open: false,
             menu_row: None,
             persist: None,
@@ -1295,19 +1304,62 @@ impl ChatView {
     }
 
     /// Slash-command autocomplete: commands starting with what's typed after "/".
+    /// The commands matching the typed "/prefix", best first (see `slash_matches`).
+    fn slash_list(&self) -> Vec<(String, String)> {
+        self.slash.as_deref().map(|q| slash_matches(&self.commands, q)).unwrap_or_default()
+    }
+
+    /// Put "/name " in the composer, cursor after it, menu closed.
+    fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = format!("/{name} ");
+        let end = text.chars().count() as u32;
+        self.input.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+            s.set_cursor_position(gpui_kit::component::input::Position::new(0, end), window, cx);
+        });
+        self.slash = None;
+        self.has_text = true;
+        cx.notify();
+    }
+
+    /// ↑ / ↓ move, Tab or Enter completes, Escape closes — while the menu shows
+    /// (key bindings under "SlashMenu > Input", so they beat the composer's own).
+    fn slash_move(&mut self, down: bool, cx: &mut Context<Self>) {
+        let n = self.slash_list().len();
+        if n == 0 {
+            return;
+        }
+        self.slash_sel = if down { (self.slash_sel + 1).min(n - 1) } else { self.slash_sel.saturating_sub(1) };
+        self.slash_scroll.scroll_to_item(self.slash_sel);
+        cx.notify();
+    }
+
+    fn slash_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.slash_list();
+        if let Some((name, _)) = list.get(self.slash_sel.min(list.len().saturating_sub(1))) {
+            let name = name.clone();
+            self.complete_slash(&name, window, cx);
+        }
+    }
+
     fn slash_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let q = self.slash.as_ref()?;
-        let matches: Vec<_> = self.commands.iter().filter(|(n, _)| n.to_lowercase().starts_with(q.as_str())).take(6).cloned().collect();
+        let matches = self.slash_list();
         if matches.is_empty() {
             return None;
         }
+        let sel = self.slash_sel.min(matches.len() - 1);
         let theme = cx.theme().colors;
         let x = theme::extra(cx);
         let mono = cx.theme().mono_font_family.clone();
         Some(
             div()
+                .id("slash-menu")
                 .flex()
                 .flex_col()
+                .max_h(px(8. * 31.))
+                .overflow_y_scroll()
+                .track_scroll(&self.slash_scroll)
                 .py_1()
                 .rounded(px(8.))
                 .border_1()
@@ -1317,26 +1369,17 @@ impl ChatView {
                     div()
                         .id(("slash", i))
                         .flex()
+                        .flex_shrink_0()
                         .items_center()
                         .gap(px(10.))
                         .px(px(12.))
                         .py(px(6.))
                         .cursor_pointer()
+                        .when(i == sel, |d| d.bg(x.hover))
                         .hover(|s| s.bg(x.hover))
                         .child(div().flex_shrink_0().font_family(mono.clone()).text_size(px(13.)).text_color(theme.primary).child(format!("/{name}")))
                         .child(div().min_w_0().truncate().text_size(px(12.5)).text_color(theme.muted_foreground).child(desc))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let text = format!("/{name} ");
-                            let end = text.chars().count() as u32;
-                            this.input.update(cx, |s, cx| {
-                                s.set_value(text, window, cx);
-                                s.focus(window, cx);
-                                s.set_cursor_position(gpui_kit::component::input::Position::new(0, end), window, cx);
-                            });
-                            this.slash = None;
-                            this.has_text = true;
-                            cx.notify();
-                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| this.complete_slash(&name, window, cx)))
                 }))
                 .into_any_element(),
         )
@@ -1439,6 +1482,49 @@ enum ModeKind {
 /// Permission modes for agents that report no mode option (chatConfig.ts).
 const PERMISSION_MODES: [(&str, &str); 4] =
     [("default", "Default (ask to edit)"), ("acceptEdits", "Accept edits"), ("plan", "Plan mode"), ("bypassPermissions", "Bypass permissions")];
+
+actions!(chat, [SlashUp, SlashDown, SlashPick, SlashClose]);
+
+/// The / menu's keys, over the composer's (bound after the kit's, so they win at the
+/// same depth). Once per run.
+fn bind_slash_keys(cx: &mut App) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    const CTX: &str = "SlashMenu > Input";
+    ONCE.call_once(|| {
+        cx.bind_keys([
+            KeyBinding::new("up", SlashUp, Some(CTX)),
+            KeyBinding::new("down", SlashDown, Some(CTX)),
+            KeyBinding::new("tab", SlashPick, Some(CTX)),
+            KeyBinding::new("enter", SlashPick, Some(CTX)),
+            KeyBinding::new("escape", SlashClose, Some(CTX)),
+        ])
+    });
+}
+
+/// Slash commands for a typed "/q", best first: the exact name, then names starting
+/// with it, then names with a part (after - _ : /) starting with it, then any
+/// containing it. Shorter names first within each, so `/m` offers `mcp` and
+/// `model` before `matplotlib-svg-drawingml`.
+fn slash_matches(commands: &[(String, String)], q: &str) -> Vec<(String, String)> {
+    let q = q.to_lowercase();
+    let rank = |name: &str| -> Option<u8> {
+        let n = name.to_lowercase();
+        if n == q {
+            Some(0)
+        } else if n.starts_with(&q) {
+            Some(1)
+        } else if n.split(['-', '_', ':', '/']).skip(1).any(|part| part.starts_with(&q)) {
+            Some(2)
+        } else if n.contains(&q) {
+            Some(3)
+        } else {
+            None
+        }
+    };
+    let mut hits: Vec<(u8, &(String, String))> = commands.iter().filter_map(|c| Some((rank(&c.0)?, c))).collect();
+    hits.sort_by(|a, b| (a.0, a.1.0.len(), &a.1.0).cmp(&(b.0, b.1.0.len(), &b.1.0)));
+    hits.into_iter().map(|(_, c)| c.clone()).collect()
+}
 
 fn commands_of(e: &Value) -> Vec<(String, String)> {
     e["commands"]
@@ -1683,9 +1769,23 @@ impl Render for ChatView {
                         })))
                     })
                     .child(
-                        Textarea::new(&self.input)
-                            .bg(theme.sidebar)
-                            .on_paste(move |item, _, cx| paste_target.update(cx, |v, cx| v.paste(item, cx))),
+                        div()
+                            // Only while the menu shows matches: the keys are the composer's otherwise.
+                            .when(!self.slash_list().is_empty(), |d| {
+                                d.key_context("SlashMenu")
+                                    .on_action(cx.listener(|this, _: &SlashUp, _, cx| this.slash_move(false, cx)))
+                                    .on_action(cx.listener(|this, _: &SlashDown, _, cx| this.slash_move(true, cx)))
+                                    .on_action(cx.listener(|this, _: &SlashPick, window, cx| this.slash_pick(window, cx)))
+                                    .on_action(cx.listener(|this, _: &SlashClose, _, cx| {
+                                        this.slash = None;
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(
+                                Textarea::new(&self.input)
+                                    .bg(theme.sidebar)
+                                    .on_paste(move |item, _, cx| paste_target.update(cx, |v, cx| v.paste(item, cx))),
+                            ),
                     )
                     .child(
                         div()
@@ -1744,5 +1844,24 @@ impl Render for ChatView {
                         })),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slash_matches;
+
+    #[test]
+    fn slash_ranking() {
+        let cmds: Vec<(String, String)> =
+            ["matplotlib-svg-drawingml", "migration-rehearsal", "mr-review", "mcp", "model", "code-review", "security-review", "compact"]
+                .iter()
+                .map(|n| (n.to_string(), String::new()))
+                .collect();
+        let names = |q: &str| slash_matches(&cmds, q).into_iter().map(|c| c.0).collect::<Vec<_>>();
+        assert_eq!(names("m")[..3], ["mcp", "model", "mr-review"], "prefix matches, shortest first");
+        assert_eq!(names("mcp"), ["mcp"]);
+        assert_eq!(names("review"), ["mr-review", "code-review", "security-review"], "a part starting with it");
+        assert_eq!(names("pact"), ["compact"], "contains, last");
     }
 }

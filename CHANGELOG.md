@@ -3,6 +3,14 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Chats
+- The / menu finds every command the agent offers, not just the first few skills:
+  best matches first (exact, then names starting with what you typed — shortest first,
+  so `/m` offers `/mcp` and `/model` — then parts like `/review` → `mr-review`, then
+  anywhere), a scrolling list, and ↑ / ↓ with Tab or Enter to complete.
+
 ## 0.17.1 — 2026-11-12
 
 ### Fixed
