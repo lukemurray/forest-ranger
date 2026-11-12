@@ -3,7 +3,7 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
-## Unreleased
+## 0.17.4 — 2026-11-12
 
 ### Chats
 - A chat that stops with an error while you're elsewhere — a usage limit, a provider
