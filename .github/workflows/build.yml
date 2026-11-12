@@ -1,0 +1,58 @@
+# Build, test and package Forest Ranger on every push to main and every pull request.
+# macOS only for now: libghostty-vt (the terminal) is fetched prebuilt for macOS, and
+# terminal tabs use Unix PTYs — Linux needs libghostty-vt built from source (Zig),
+# Windows a ConPTY terminal as well.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # libghostty-vt (prebuilt, checksum-verified), keyed on the fetch script.
+      - name: Cache libghostty-vt
+        uses: actions/cache@v4
+        with:
+          path: vendor/ghostty-vt.xcframework
+          key: libghostty-vt-${{ hashFiles('scripts/fetch-libghostty.sh') }}
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agents/package-lock.json
+
+      # Release build + .app bundle (ad-hoc signed: CI has no signing identity).
+      - name: Bundle
+        run: scripts/bundle-macos.sh
+
+      - name: Zip the app
+        run: ditto -c -k --keepParent "dist/Forest Ranger.app" "dist/Forest-Ranger-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Forest-Ranger-macos
+          path: dist/Forest-Ranger-macos.zip
+          if-no-files-found: error
