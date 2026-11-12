@@ -19,7 +19,7 @@ jobs:
     name: macOS
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -27,7 +27,7 @@ jobs:
 
       # libghostty-vt (prebuilt, checksum-verified), keyed on the fetch script.
       - name: Cache libghostty-vt
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/ghostty-vt.xcframework
           key: libghostty-vt-${{ hashFiles('scripts/fetch-libghostty.sh') }}
@@ -38,7 +38,7 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -51,7 +51,7 @@ jobs:
       - name: Zip the app
         run: ditto -c -k --keepParent "dist/Forest Ranger.app" "dist/Forest-Ranger-macos.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Forest-Ranger-macos
           path: dist/Forest-Ranger-macos.zip
