@@ -3,6 +3,15 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Chats
+- A chat that stops with an error while you're elsewhere — a usage limit, a provider
+  failure, the agent exiting — shows as **stopped** (red, name in bold) in the sidebar
+  and a red dot on its tab until you look, and posts a "Chat stopped" notification
+  with the reason. It used to look like it had simply finished.
+- Queue and its ▾ menu (Queue / Steer now) are one joined split button, like ✦ Chat.
+
 ## 0.17.3 — 2026-11-12
 
 ### Fixed

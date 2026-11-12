@@ -299,6 +299,7 @@ impl ForestRanger {
             Attention::Working => div().text_color(theme.primary).opacity(pulse()).child("working"),
             Attention::Unread => div().text_color(theme.primary).font_weight(FontWeight::SEMIBOLD).child("ready"),
             Attention::NeedsAnswer => div().text_color(x.amber).font_weight(FontWeight::SEMIBOLD).child("needs you"),
+            Attention::Stopped => div().text_color(theme.danger).font_weight(FontWeight::SEMIBOLD).child("stopped"),
             Attention::Idle => div().text_color(x.faint).child(data::relative_time(w.activity)),
         };
         // Running: the icon pulses. A long run finished unseen: still, with a green dot.
@@ -316,7 +317,7 @@ impl ForestRanger {
                 .tooltip(tip(lines.join("\n")))
         });
         // Something to look at: the name stands out too, like unread mail.
-        let unseen = matches!(attention, Attention::Unread | Attention::NeedsAnswer);
+        let unseen = matches!(attention, Attention::Unread | Attention::NeedsAnswer | Attention::Stopped);
         // In its own window: listed, greyed; clicking brings that window forward.
         let popped = crate::windows::Windows::popped(cx, &w.id).is_some();
         let edit = (w.name.clone().or_else(|| w.branch.clone()).unwrap_or_default(), w.branch.clone());

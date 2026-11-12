@@ -56,6 +56,9 @@ impl EventEmitter<ChatEvent> for ChatView {}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Attention {
     NeedsAnswer,
+    /// The turn ended in an error you haven't seen (a usage limit, a provider
+    /// failure, the adapter dying): nothing more happens until you act.
+    Stopped,
     Working,
     Unread,
     Idle,
@@ -344,6 +347,8 @@ pub struct ChatView {
     viewing: Option<std::sync::Arc<Image>>,
     /// A turn finished while you weren't looking.
     unread: bool,
+    /// Why the last turn stopped with an error, until you look (see `Attention::Stopped`).
+    stopped: Option<String>,
     /// Marked unread at this agent message: opening the chat again jumps to it.
     unread_at: Option<String>,
     focused_by_user: bool,
@@ -514,6 +519,7 @@ impl ChatView {
             activity: None,
             viewing: None,
             unread: false,
+            stopped: None,
             unread_at: None,
             focused_by_user: true,
             attention: Attention::Idle,
@@ -571,6 +577,8 @@ impl ChatView {
     pub fn attention(&self) -> Attention {
         if self.agent.is_some() && self.rows.pending_ask() {
             Attention::NeedsAnswer
+        } else if self.status == Status::Idle && self.stopped.is_some() {
+            Attention::Stopped
         } else if self.status != Status::Idle {
             Attention::Working
         } else if self.unread {
@@ -580,9 +588,15 @@ impl ChatView {
         }
     }
 
+    /// Why the last turn stopped, while that's unseen.
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.stopped.as_deref()
+    }
+
     pub fn mark_read(&mut self, cx: &mut Context<Self>) {
-        if self.unread {
+        if self.unread || self.stopped.is_some() {
             self.unread = false;
+            self.stopped = None;
             self.sync_attention(cx);
             cx.notify();
         }
@@ -849,6 +863,14 @@ impl ChatView {
             "error" if e["soft"] == true => {}
             "error" => {
                 self.status = Status::Idle;
+                // Not looking: say so (sidebar, tab, a notification) — a usage limit
+                // otherwise just looks like a finished chat.
+                if !self.focused_by_user {
+                    let msg = e["message"].as_str().unwrap_or("The agent stopped with an error.");
+                    let first = msg.lines().next().unwrap_or(msg).trim();
+                    let short: String = first.chars().take(160).collect();
+                    self.stopped = Some(short);
+                }
                 // An error may be the adapter dying ("exited" follows): wait a beat
                 // so the queue drains into a new agent rather than the dead one.
                 self.grace = Some(cx.spawn(async move |this, cx| {
@@ -941,6 +963,7 @@ impl ChatView {
 
     fn send(&mut self, out: Outgoing, cx: &mut Context<Self>) {
         self.fresh_banner = false; // sending is "Continue here"
+        self.stopped = None;
         self.apply(user_event(&out, false), cx);
         self.ensure_agent(cx);
         // Couldn't start (the error row says why): nothing is running.
@@ -1597,21 +1620,28 @@ impl Render for ChatView {
                 .into_any_element()
         } else if working {
             let t = this.clone();
+            // One joined split button (as ✦ Chat): Queue | ▾, a hairline between.
             div()
                 .flex()
+                .items_stretch()
+                .overflow_hidden()
+                .rounded(px(6.))
                 .child(
                     Button::new("queue")
                         .primary()
+                        .rounded_none()
                         .px(px(14.))
                         .label("Queue")
                         .tooltip("Send after this turn finishes (↩)")
                         .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx))),
                 )
+                .child(div().w(px(1.)).bg(theme.primary_foreground.opacity(0.35)))
                 .child(
                     Button::new("send-more")
                         .primary()
+                        .rounded_none()
                         .compact()
-                        .ml(px(1.))
+                        .px(px(6.))
                         .icon(Icon::empty().path("fr/chevron-down.svg"))
                         .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                             let (t1, t2) = (t.clone(), t.clone());

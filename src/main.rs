@@ -129,6 +129,7 @@ pub(crate) fn status_dot(a: Attention, cx: &App) -> Option<AnyElement> {
     let dot = || div().size(px(8.)).flex_shrink_0().rounded_full();
     Some(match a {
         Attention::NeedsAnswer => pulse(dot().bg(amber), 1200),
+        Attention::Stopped => dot().bg(cx.theme().colors.danger).into_any_element(),
         Attention::Working => pulse(dot().bg(accent), 1400),
         Attention::Unread => div()
             .size(px(10.))
@@ -832,6 +833,11 @@ impl ForestRanger {
                 Attention::NeedsAnswer => {
                     let title = if c.open_asks().0 > 0 { "Permission needed" } else { "Input needed" };
                     notify::post(title, &format!("{label} is waiting for your answer."), target)
+                }
+                // Always on, like "needs you": it won't go on until you do something.
+                Attention::Stopped => {
+                    let why = c.stop_reason().unwrap_or("The agent stopped with an error.").to_string();
+                    notify::post("Chat stopped", &format!("{label}: {why}"), target)
                 }
                 Attention::Unread if cx.global::<settings::Settings>().notify_ready => {
                     notify::post("Chat finished", &format!("{label} finished its turn."), target)
