@@ -3,7 +3,7 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
-## Unreleased
+## 0.17.2 — 2026-11-12
 
 ### Fixed
 - Desktop notifications were never shown: the old macOS notification API delivers
