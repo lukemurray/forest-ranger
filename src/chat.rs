@@ -8,6 +8,7 @@ mod elicitation;
 mod find;
 mod fresh;
 mod pins;
+mod scroller;
 mod transcript;
 
 pub(crate) use pins::{NoteView, pin_title, pinned_text};
@@ -22,7 +23,7 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;

@@ -3,6 +3,13 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Fixed
+- Scrolling up a chat no longer jumps a turn or more: messages not yet drawn counted
+  as zero height, so a scroll past the pre-drawn part skipped them. They now count as
+  a typical message until drawn.
+
 ## 0.17.2 — 2026-11-12
 
 ### Fixed
