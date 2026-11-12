@@ -1083,6 +1083,17 @@ impl Render for ForestRanger {
         }
         self.sync_focus(window, cx);
         let review = if self.show_diff { self.review(window, cx) } else { None };
+        // The panel's Files tree follows the active tab's file.
+        if let Some(r) = &review {
+            let rel = self.selected.as_ref().and_then(|id| self.tabs.get(id)).and_then(|t| t.active.and_then(|i| t.open.get(i))).and_then(|t| match t {
+                Tab::File(f) => Some(f.read(cx).rel.clone()),
+                Tab::Diff { file, .. } => Some(file.clone()),
+                _ => None,
+            });
+            if r.read(cx).current_file() != rel.as_deref() {
+                r.update(cx, |r, cx| r.show_current(rel, cx));
+            }
+        }
         let (sidebar_w, panel_w) = {
             let s = SessionState::get(cx);
             (s.sidebar_width, s.panel_width)
@@ -1231,6 +1242,8 @@ fn main() {
         files::register_grammars();
         #[cfg(target_os = "macos")]
         set_dock_icon();
+        // Notification permission + click delegate (bundled app only).
+        notify::init();
         cx.set_global(settings::Settings::load());
         cx.set_global(SessionState::load());
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -1339,5 +1352,6 @@ fn main() {
         fr.update(cx, |fr, cx| fr.reopen_popped(cx));
         cx.activate(true);
         dev::smoke_close(cx);
+        dev::smoke_notify(cx);
     });
 }

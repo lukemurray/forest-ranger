@@ -5,6 +5,16 @@ under `## Unreleased`, which the install script stamps with the version and date
 
 ## Unreleased
 
+### Fixed
+- Desktop notifications were never shown: the old macOS notification API delivers
+  nothing on current macOS. They now use the current one (Forest Ranger asks for
+  permission once), and Settings → General says when macOS has notifications turned
+  off for the app, with a button to System Settings.
+
+### Review panel
+- Files follows the tab you're on: switching to a file or diff tab opens its folders
+  in the tree, scrolls it into view and marks it.
+
 ### Chats
 - The / menu finds every command the agent offers, not just the first few skills:
   best matches first (exact, then names starting with what you typed — shortest first,

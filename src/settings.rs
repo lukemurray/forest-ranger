@@ -563,6 +563,24 @@ impl Render for SettingsView {
                         self.option(id, label, s.notify_ready == on, cx, move |_, cx| Settings::update(cx, |s| s.notify_ready = on))
                     })
                     .collect();
+                let mut notify: Vec<AnyElement> = notify;
+                // macOS blocks us: say so (the setting alone can't fix it) and link there.
+                crate::notify::refresh_status();
+                if crate::notify::status() == 1 {
+                    notify.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .pt_1()
+                            .text_size(px(12.))
+                            .text_color(x.amber)
+                            .child(div().flex_1().child("macOS has notifications turned off for Forest Ranger, so none will show — including \"needs you\"."))
+                            .child(Button::new("open-notify-settings").small().outline().label("Open System Settings").on_click(|_, _, _| crate::notify::open_settings()))
+                            .into_any_element(),
+                    );
+                }
                 vec![self.group("Theme", opts, cx), self.group("Desktop notifications when something's ready", notify, cx)]
             }
             Section::Apps => {

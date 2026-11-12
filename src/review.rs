@@ -100,6 +100,10 @@ pub struct ReviewPanel {
     /// The built tree, for the filter it was built with (rebuilt when either changes).
     tree: Option<(String, crate::tree::Dir)>,
     files_scroll: UniformListScrollHandle,
+    /// The file of the active tab (an open file or a diff), highlighted in Files; and
+    /// one waiting to be scrolled to (its folders opened) when Files next draws.
+    current_file: Option<String>,
+    reveal: Option<String>,
     filter: Entity<InputState>,
     query: Entity<InputState>,
     hits: Option<Vec<Hit>>,
@@ -284,6 +288,8 @@ impl ReviewPanel {
             expanded: Default::default(),
             tree: None,
             files_scroll: UniformListScrollHandle::new(),
+            current_file: None,
+            reveal: None,
             filter,
             query,
             hits: None,
@@ -758,6 +764,29 @@ impl ReviewPanel {
     }
 
     /// A tree's focus handle and focused row, created on first use.
+    /// The active tab now shows `rel` (None: not a file). Files highlights it and,
+    /// the next time it draws, opens its folders and scrolls to it.
+    pub fn current_file(&self) -> Option<&str> {
+        self.current_file.as_deref()
+    }
+
+    pub fn show_current(&mut self, rel: Option<String>, cx: &mut Context<Self>) {
+        if self.current_file == rel {
+            return;
+        }
+        if let Some(r) = &rel {
+            // Every parent path, so a collapsed chain ("src/chat") opens too.
+            let mut at = 0;
+            while let Some(i) = r[at..].find('/') {
+                self.expanded.insert(r[..at + i].to_string());
+                at += i + 1;
+            }
+            self.reveal = Some(r.clone());
+        }
+        self.current_file = rel;
+        cx.notify();
+    }
+
     fn tree_focus(&mut self, key: &str, cx: &mut Context<Self>) -> (FocusHandle, usize) {
         self.trees.entry(key.to_string()).or_insert_with(|| (cx.focus_handle(), 0)).clone()
     }
@@ -1477,6 +1506,14 @@ impl ReviewPanel {
             t.flatten("", 0, &self.expanded, !filter.is_empty(), &mut rows);
         }
         let count = rows.len();
+        // Jump to the active tab's file: select it and bring it to the middle.
+        if let Some(r) = self.reveal.take()
+            && let Some(i) = rows.iter().position(|row| row.path == r)
+        {
+            self.set_sel("files", i);
+            self.files_scroll.scroll_to_item(i, ScrollStrategy::Center);
+        }
+        let current = self.current_file.clone();
         let rows = Rc::new(rows);
         let (handle, sel) = self.tree_focus("files", cx);
         let focused = handle.is_focused(window).then_some(sel.min(count.saturating_sub(1)));
@@ -1527,6 +1564,8 @@ impl ReviewPanel {
                                         .text_size(px(13.))
                                         .cursor_pointer()
                                         .hover(|s| s.bg(x.hover))
+                                        // The active tab's file: a quiet mark even when the tree isn't focused.
+                                        .when(current.as_deref() == Some(r.path.as_str()), |d| d.bg(x.active))
                                         .when(focused == Some(i), |d| d.bg(theme.list_active))
                                         .when(r.ignored, |d| d.opacity(0.55))
                                         .child(div().w(px(14.)).flex_shrink_0().when(is_dir, |d| {

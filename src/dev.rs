@@ -264,3 +264,17 @@ pub(crate) fn smoke_popout(window: &mut Window, cx: &mut Context<ForestRanger>) 
 fn ok(b: bool) -> &'static str {
     if b { "PASS" } else { "FAIL" }
 }
+
+/// `FR_SMOKE_NOTIFY=1` (in the bundled app): post a test notification after 2s.
+pub(crate) fn smoke_notify(cx: &mut App) {
+    if std::env::var_os("FR_SMOKE_NOTIFY").is_none() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+        eprintln!("FR_SMOKE_NOTIFY: macOS permission status {} (1 denied, 2 allowed)", crate::notify::status());
+        crate::notify::post("Forest Ranger", "Test notification — notifications work.", (String::new(), String::new()));
+        eprintln!("FR_SMOKE_NOTIFY: posted");
+    })
+    .detach();
+}

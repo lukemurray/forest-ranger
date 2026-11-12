@@ -58,24 +58,45 @@ fn decode(s: &str) -> Option<Target> {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{post, set_badge};
+pub use mac::{init, open_settings, post, refresh_status, set_badge, status};
 
+#[cfg(not(target_os = "macos"))]
+pub fn init() {}
+#[cfg(not(target_os = "macos"))]
+pub fn status() -> isize {
+    -1
+}
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_status() {}
+#[cfg(not(target_os = "macos"))]
+pub fn open_settings() {}
 #[cfg(not(target_os = "macos"))]
 pub fn post(_title: &str, _body: &str, _target: Target) {}
 #[cfg(not(target_os = "macos"))]
 pub fn set_badge(_count: usize) {}
 
+/// UNUserNotificationCenter (the deprecated NSUserNotificationCenter delivers
+/// nothing on current macOS). It needs a bundled app — a bare `cargo run` binary
+/// has no bundle id and calling it would crash — so there it's a no-op.
 #[cfg(target_os = "macos")]
-#[allow(deprecated)] // NSUserNotification still works; UNUserNotificationCenter needs a signed, entitled bundle
 mod mac {
     use super::{Target, channel, decode, encode};
+    use block2::{Block, RcBlock};
     use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, NSObject, Sel};
     use objc2::{ClassType, class, msg_send, sel};
     use objc2_foundation::NSString;
     use std::ffi::{CStr, c_char};
     use std::sync::OnceLock;
 
+    #[link(name = "UserNotifications", kind = "framework")]
+    unsafe extern "C" {}
+
     const KEY: &str = "forestRangerTarget";
+    /// UNNotificationPresentationOptions: sound | list | banner — show it even when
+    /// we're frontmost by the time it lands.
+    const PRESENT: usize = (1 << 1) | (1 << 3) | (1 << 4);
+    /// UNAuthorizationOptions: badge | sound | alert.
+    const AUTH: usize = 1 | 2 | 4;
 
     unsafe fn rust_str(s: *mut AnyObject) -> Option<String> {
         if s.is_null() {
@@ -85,47 +106,63 @@ mod mac {
         (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
     }
 
-    extern "C-unwind" fn did_activate(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, note: *mut AnyObject) {
+    fn bundled() -> bool {
         unsafe {
-            let info: *mut AnyObject = msg_send![note, userInfo];
-            if info.is_null() {
-                return;
-            }
-            let v: *mut AnyObject = msg_send![info, objectForKey: &*NSString::from_str(KEY)];
-            if let Some(t) = rust_str(v).as_deref().and_then(decode) {
-                let _ = channel().0.try_send(t);
-            }
+            let bundle: *mut AnyObject = msg_send![class!(NSBundle), mainBundle];
+            let id: *mut AnyObject = msg_send![bundle, bundleIdentifier];
+            !id.is_null()
         }
     }
 
-    /// Show it even if we happen to be frontmost by the time it lands.
-    extern "C-unwind" fn should_present(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, _note: *mut AnyObject) -> Bool {
-        Bool::YES
+    /// A click: route it back through `clicks()`.
+    extern "C-unwind" fn did_receive(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, response: *mut AnyObject, done: *mut Block<dyn Fn()>) {
+        unsafe {
+            let note: *mut AnyObject = msg_send![response, notification];
+            let request: *mut AnyObject = msg_send![note, request];
+            let content: *mut AnyObject = msg_send![request, content];
+            let info: *mut AnyObject = msg_send![content, userInfo];
+            if !info.is_null() {
+                let v: *mut AnyObject = msg_send![info, objectForKey: &*NSString::from_str(KEY)];
+                if let Some(t) = rust_str(v).as_deref().and_then(decode) {
+                    let _ = channel().0.try_send(t);
+                }
+            }
+        }
+        if let Some(done) = unsafe { done.as_ref() } {
+            done.call(());
+        }
     }
 
-    /// The user-notification center with our delegate set, or None (an unbundled
-    /// binary may have none — then nothing is posted).
+    extern "C-unwind" fn will_present(_: *mut AnyObject, _: Sel, _center: *mut AnyObject, _note: *mut AnyObject, done: *mut Block<dyn Fn(usize)>) {
+        if let Some(done) = unsafe { done.as_ref() } {
+            done.call((PRESENT,));
+        }
+    }
+
+    /// The notification center with our delegate set; None when not bundled.
     fn center() -> Option<*mut AnyObject> {
         static DELEGATE: OnceLock<usize> = OnceLock::new();
+        if !bundled() {
+            return None;
+        }
         unsafe {
-            let center: *mut AnyObject = msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
+            let center: *mut AnyObject = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
             if center.is_null() {
                 return None;
             }
             DELEGATE.get_or_init(|| {
-                let mut b = ClassBuilder::new(c"ForestRangerNotificationDelegate", NSObject::class()).expect("delegate class");
+                let mut b = ClassBuilder::new(c"ForestRangerUNDelegate", NSObject::class()).expect("delegate class");
                 b.add_method(
-                    sel!(userNotificationCenter:didActivateNotification:),
-                    did_activate as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
+                    sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
+                    did_receive as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut Block<dyn Fn()>),
                 );
                 b.add_method(
-                    sel!(userNotificationCenter:shouldPresentNotification:),
-                    should_present as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject) -> Bool,
+                    sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
+                    will_present as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut Block<dyn Fn(usize)>),
                 );
                 let cls: &AnyClass = b.register();
                 // Never released: the center holds its delegate weakly.
-                let delegate: *mut AnyObject = msg_send![cls, alloc];
-                let delegate: *mut AnyObject = msg_send![delegate, init];
+                let delegate: *mut AnyObject = msg_send![cls, new];
                 let _: () = msg_send![center, setDelegate: delegate];
                 delegate as usize
             });
@@ -133,21 +170,62 @@ mod mac {
         }
     }
 
+    /// At launch: set the delegate (so a click that launched us is caught) and ask
+    /// for permission — macOS asks the user once, then remembers.
+    pub fn init() {
+        let Some(center) = center() else { return };
+        let done = RcBlock::new(|_granted: Bool, _err: *mut AnyObject| refresh_status());
+        unsafe {
+            let _: () = msg_send![center, requestAuthorizationWithOptions: AUTH, completionHandler: &*done];
+        }
+    }
+
     pub fn post(title: &str, body: &str, target: Target) {
         let Some(center) = center() else { return };
         unsafe {
-            let n: *mut AnyObject = msg_send![class!(NSUserNotification), alloc];
-            let n: *mut AnyObject = msg_send![n, init];
-            let _: () = msg_send![n, setTitle: &*NSString::from_str(title)];
-            let _: () = msg_send![n, setInformativeText: &*NSString::from_str(body)];
+            let content: *mut AnyObject = msg_send![class!(UNMutableNotificationContent), new];
+            let _: () = msg_send![content, setTitle: &*NSString::from_str(title)];
+            let _: () = msg_send![content, setBody: &*NSString::from_str(body)];
+            let sound: *mut AnyObject = msg_send![class!(UNNotificationSound), defaultSound];
+            let _: () = msg_send![content, setSound: sound];
             let info: *mut AnyObject = msg_send![
                 class!(NSDictionary),
                 dictionaryWithObject: &*NSString::from_str(&encode(&target)),
                 forKey: &*NSString::from_str(KEY)
             ];
-            let _: () = msg_send![n, setUserInfo: info];
-            let _: () = msg_send![center, deliverNotification: n];
+            let _: () = msg_send![content, setUserInfo: info];
+            let id = NSString::from_str(&uuid::Uuid::new_v4().to_string());
+            let request: *mut AnyObject =
+                msg_send![class!(UNNotificationRequest), requestWithIdentifier: &*id, content: content, trigger: std::ptr::null_mut::<AnyObject>()];
+            let done: Option<&Block<dyn Fn(*mut AnyObject)>> = None;
+            let _: () = msg_send![center, addNotificationRequest: request, withCompletionHandler: done];
+            let _: () = msg_send![content, release];
         }
+    }
+
+    /// macOS's answer for us, refreshed by `refresh_status`: -1 unknown (or not a
+    /// bundled app), 0 not asked yet, 1 denied, 2 allowed, 3 provisional, 4 ephemeral.
+    static STATUS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+
+    pub fn status() -> isize {
+        STATUS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Ask macOS (async) whether we may notify; `status()` has the answer shortly after.
+    pub fn refresh_status() {
+        let Some(center) = center() else { return };
+        let done = RcBlock::new(|settings: *mut AnyObject| {
+            let status: isize = unsafe { msg_send![settings, authorizationStatus] };
+            STATUS.store(status, std::sync::atomic::Ordering::Relaxed);
+        });
+        unsafe {
+            let _: () = msg_send![center, getNotificationSettingsWithCompletionHandler: &*done];
+        }
+    }
+
+    /// System Settings → Notifications → Forest Ranger.
+    pub fn open_settings() {
+        let _ = std::process::Command::new("open").arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=dev.forestranger.app").spawn();
     }
 
     /// The Dock badge: the count, or none at 0.
