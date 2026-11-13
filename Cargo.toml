@@ -10,7 +10,7 @@ base64 = "0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Syntax highlighting only for the languages we work in (each grammar adds size;
 # "tree-sitter-languages" would pull in all 36).
-gpui-kit = { version = "0.9.0", features = [
+gpui-kit = { version = "0.9.1", features = [
     "tree-sitter-bash",
     "tree-sitter-cpp",
     "tree-sitter-csharp",
@@ -31,9 +31,11 @@ gpui-kit = { version = "0.9.0", features = [
     "tree-sitter-yaml",
 ] }
 libc = "0.2"
+# Markdown → HTML for copying replies with their formatting (already in the tree via the kit).
+markdown = "1.0"
 # The kit links C# with no highlight rules; files::register_grammars adds the grammar's own.
 tree-sitter-c-sharp = "0.23"
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 serde_json = "1.0.154"
 sha1_smol = "1.0.1"
 uuid = { version = "1.29.0", features = ["v4"] }

@@ -29,7 +29,9 @@ jobs:
       - name: Cache libghostty-vt
         uses: actions/cache@v6
         with:
-          path: vendor/ghostty-vt.xcframework
+          path: |
+            vendor/ghostty-vt.xcframework
+            vendor/ghostty-vt.version
           key: libghostty-vt-${{ hashFiles('scripts/fetch-libghostty.sh') }}
 
       - name: Build

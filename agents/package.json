@@ -3,7 +3,7 @@
   "private": true,
   "description": "The ACP adapters Forest Ranger runs with Node. They drive the user's installed claude / codex CLIs; install with --omit=optional to skip the agents' own bundled engines.",
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.101.0",
-    "@agentclientprotocol/codex-acp": "2.5.0"
+    "@agentclientprotocol/claude-agent-acp": "0.106.0",
+    "@agentclientprotocol/codex-acp": "2.6.0"
   }
 }

@@ -3,6 +3,24 @@
 What changes in each release of Forest Ranger. Newest first; every change adds a line
 under `## Unreleased`, which the install script stamps with the version and date.
 
+## Unreleased
+
+### Chats
+- Selecting part of an agent reply and copying keeps its formatting: a selection that
+  spans bold, links, code, a table or several paragraphs copies as Markdown (a few
+  plain words still copy as just the words).
+- ⋯ → Copy puts the reply on the clipboard as formatted text too, so Google Docs, Mail
+  and Notes paste real tables and headings; ⋯ → Copy as Markdown gives the raw text.
+
+### Fixed
+- The composer's Queue ▾ button is properly rounded and reads as one button; ✦ Chat,
+  ▶ Run and Queue now share one split-button control, so they match.
+
+### Under the hood
+- Dependencies updated: GPUI Kit 0.9.1 (GPUI 0.3.12), rusqlite 0.42, libghostty-vt
+  1.0.1, the Claude agent adapter 0.106.0 and the Codex adapter 2.6.0, and patch
+  updates across the rest.
+
 ## 0.17.4 — 2026-11-12
 
 ### Chats
