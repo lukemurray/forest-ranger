@@ -130,70 +130,42 @@ impl ForestRanger {
                 .gap(px(6.))
                 // ✦ Chat — split: the face starts a chat, the arrow offers the other
                 // agent and this worktree's past chats.
-                .child(
-                    div()
-                        .flex()
-                        .items_stretch()
-                        .overflow_hidden()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(x.border_strong)
-                        .text_size(px(12.5))
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            div()
-                                .id("chat")
-                                .tooltip(sidebar::tip("New chat"))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .px(px(10.))
-                                .py(px(5.))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(x.hover).text_color(theme.foreground))
-                                .child(sidebar::icon("fr/sparkle.svg", 13., theme.primary))
-                                .child("Chat")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    let p = cx.global::<settings::Settings>().provider.clone();
-                                    this.new_chat(&p, window, cx)
-                                })),
-                        )
-                        .child(div().w(px(1.)).bg(x.border_strong))
-                        .child(
-                            Button::new("chat-more")
-                                .tooltip("Reopen a past chat")
-                                .ghost()
-                                .compact()
-                                .px(px(6.))
-                                .h_full()
-                                .rounded_none()
-                                .icon(Icon::empty().path("fr/chevron-down.svg"))
-                                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                    let other = if provider == "codex" { "claude" } else { "codex" };
-                                    let t = this.clone();
-                                    let menu = menu.item(
-                                        PopupMenuItem::new(format!("New {} chat", if other == "codex" { "Codex" } else { "Claude" }))
-                                            .on_click(move |_, window, cx| t.update(cx, |v, cx| v.new_chat(other, window, cx))),
-                                    );
-                                    if reopenable.is_empty() {
-                                        return menu;
-                                    }
-                                    reopenable.iter().fold(menu.separator().label("Reopen"), |menu, (sid, name, when)| {
-                                        let (t, sid, name, when) = (this.clone(), sid.clone(), SharedString::from(name.clone()), SharedString::from(when.clone()));
-                                        let item = PopupMenuItem::element(move |_, cx| {
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_4()
-                                                .w_full()
-                                                .child(div().flex_1().max_w(px(320.)).truncate().child(name.clone()))
-                                                .child(div().flex_shrink_0().text_xs().text_color(theme::extra(cx).faint).child(when.clone()))
-                                        });
-                                        menu.item(item.on_click(move |_, window, cx| t.update(cx, |v, cx| v.open_saved(&sid, window, cx))))
-                                    })
-                                }),
-                        ),
-                )
+                .child({
+                    let fr = this.clone();
+                    crate::ui::SplitButton::new("chat", "Chat")
+                        .icon("fr/sparkle.svg", theme.primary)
+                        .tooltip("New chat")
+                        .on_click(move |_, window, cx| {
+                            fr.update(cx, |v, cx| {
+                                let p = cx.global::<settings::Settings>().provider.clone();
+                                v.new_chat(&p, window, cx)
+                            })
+                        })
+                        .menu("Reopen a past chat", Anchor::TopRight, move |menu, _, _| {
+                            let other = if provider == "codex" { "claude" } else { "codex" };
+                            let t = this.clone();
+                            let menu = menu.item(
+                                PopupMenuItem::new(format!("New {} chat", if other == "codex" { "Codex" } else { "Claude" }))
+                                    .on_click(move |_, window, cx| t.update(cx, |v, cx| v.new_chat(other, window, cx))),
+                            );
+                            if reopenable.is_empty() {
+                                return menu;
+                            }
+                            reopenable.iter().fold(menu.separator().label("Reopen"), |menu, (sid, name, when)| {
+                                let (t, sid, name, when) = (this.clone(), sid.clone(), SharedString::from(name.clone()), SharedString::from(when.clone()));
+                                let item = PopupMenuItem::element(move |_, cx| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_4()
+                                        .w_full()
+                                        .child(div().flex_1().max_w(px(320.)).truncate().child(name.clone()))
+                                        .child(div().flex_shrink_0().text_xs().text_color(theme::extra(cx).faint).child(when.clone()))
+                                });
+                                menu.item(item.on_click(move |_, window, cx| t.update(cx, |v, cx| v.open_saved(&sid, window, cx))))
+                            })
+                        })
+                })
                 .child(self.icon_btn("editor", "fr/folder.svg", false, cx).tooltip(sidebar::tip("Open in editor")).on_click({
                     let path = path.clone();
                     move |_, window, cx| {

@@ -1619,40 +1619,20 @@ impl Render for ChatView {
                 .on_click(cx.listener(|this, _, window, cx| this.stop(window, cx)))
                 .into_any_element()
         } else if working {
-            let t = this.clone();
-            // One joined split button (as ✦ Chat): Queue | ▾, a hairline between.
-            div()
-                .flex()
-                .items_stretch()
-                .overflow_hidden()
-                .rounded(px(6.))
-                .child(
-                    Button::new("queue")
-                        .primary()
-                        .rounded_none()
-                        .px(px(14.))
-                        .label("Queue")
-                        .tooltip("Send after this turn finishes (↩)")
-                        .on_click(cx.listener(|this, _, window, cx| this.submit(false, window, cx))),
-                )
-                .child(div().w(px(1.)).bg(theme.primary_foreground.opacity(0.35)))
-                .child(
-                    Button::new("send-more")
-                        .primary()
-                        .rounded_none()
-                        .compact()
-                        .px(px(6.))
-                        .icon(Icon::empty().path("fr/chevron-down.svg"))
-                        .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                            let (t1, t2) = (t.clone(), t.clone());
-                            menu.item(PopupMenuItem::new("Queue — send after this turn  ↩").on_click(move |_, window, cx| {
-                                t1.update(cx, |v, cx| v.submit(false, window, cx))
-                            }))
-                            .item(PopupMenuItem::new("Steer now — agent takes it at its next step  ⌘↩").on_click(move |_, window, cx| {
-                                t2.update(cx, |v, cx| v.submit(true, window, cx))
-                            }))
-                        }),
-                )
+            let (t, q) = (this.clone(), this.clone());
+            crate::ui::SplitButton::new("queue", "Queue")
+                .filled()
+                .tooltip("Send after this turn finishes (↩)")
+                .on_click(move |_, window, cx| q.update(cx, |v, cx| v.submit(false, window, cx)))
+                .menu("Queue or steer", Anchor::BottomRight, move |menu, _, _| {
+                    let (t1, t2) = (t.clone(), t.clone());
+                    menu.item(PopupMenuItem::new("Queue — send after this turn  ↩").on_click(move |_, window, cx| {
+                        t1.update(cx, |v, cx| v.submit(false, window, cx))
+                    }))
+                    .item(PopupMenuItem::new("Steer now — agent takes it at its next step  ⌘↩").on_click(move |_, window, cx| {
+                        t2.update(cx, |v, cx| v.submit(true, window, cx))
+                    }))
+                })
                 .into_any_element()
         } else {
             Button::new("send")

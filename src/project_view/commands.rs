@@ -6,7 +6,7 @@ use std::path::Path;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -136,40 +136,18 @@ impl ForestRanger {
             let last = crate::session_state::SessionState::get(cx).last_run.get(project_id).cloned();
             let face = commands.iter().find(|c| Some(&c.id) == last.as_ref()).unwrap_or(&commands[0]).clone();
             let root = root.to_string();
-            let (run, run_root, tip) = (face.clone(), root.clone(), face.command.clone());
+            let (run, run_root, me) = (face.clone(), root.clone(), fr.clone());
             return Some(
-                div()
-                    .flex()
-                    .items_stretch()
-                    .overflow_hidden()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(x.border_strong)
-                    .child(
-                        btn("run-last".into())
-                            .border_0()
-                            .rounded_none()
-                            .child(face.label.clone())
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                            .on_click(cx.listener(move |this, _, window, cx| this.run_command(&run, &run_root, window, cx))),
-                    )
-                    .child(div().w(px(1.)).bg(x.border_strong))
-                    .child(
-                        Button::new("run-menu")
-                            .tooltip("Run commands")
-                            .ghost()
-                            .compact()
-                            .px(px(6.))
-                            .h_full()
-                            .rounded_none()
-                            .icon(Icon::empty().path("fr/chevron-down.svg"))
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                commands.iter().fold(menu, |menu, c| {
-                                    let (fr, c, root) = (fr.clone(), c.clone(), root.clone());
-                                    menu.item(PopupMenuItem::new(c.label.clone()).on_click(move |_, window, cx| fr.update(cx, |fr, cx| fr.run_command(&c, &root, window, cx))))
-                                })
-                            }),
-                    )
+                crate::ui::SplitButton::new("run-last", face.label.clone())
+                    .icon("fr/play.svg", x.green)
+                    .tooltip(face.command.clone())
+                    .on_click(move |_, window, cx| me.update(cx, |fr, cx| fr.run_command(&run, &run_root, window, cx)))
+                    .menu("Run commands", Anchor::TopRight, move |menu, _, _| {
+                        commands.iter().fold(menu, |menu, c| {
+                            let (fr, c, root) = (fr.clone(), c.clone(), root.clone());
+                            menu.item(PopupMenuItem::new(c.label.clone()).on_click(move |_, window, cx| fr.update(cx, |fr, cx| fr.run_command(&c, &root, window, cx))))
+                        })
+                    })
                     .into_any_element(),
             );
         }
