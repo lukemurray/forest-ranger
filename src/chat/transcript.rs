@@ -306,7 +306,9 @@ fn plain_markdown(text: &str) -> String {
 }
 
 pub(super) fn markdown(id: impl Into<ElementId>, text: &str) -> TextView {
-    TextView::markdown(id, strip_rules(text)).code_block_actions(|cb, _, _| {
+    // A selection that spans formatting (bold, a link, a table, several blocks) copies
+    // as Markdown, so pasting keeps it; a few plain words copy as just the words.
+    TextView::markdown(id, strip_rules(text)).selection_format(gpui_kit::component::text::SelectionFormat::SourceAcrossStyles).code_block_actions(|cb, _, _| {
         Clipboard::new(("copy-code", cb.span.as_ref().map_or(0, |s| s.start))).tooltip("Copy").value(cb.code())
     })
 }
@@ -502,7 +504,13 @@ impl ChatView {
                                         .item(PopupMenuItem::new("Branch from here").on_click(move |_, _, cx| {
                                             v1.update(cx, |c, cx| c.branch_from(mid.clone(), cx))
                                         }))
-                                        .item(PopupMenuItem::new("Copy text").on_click(move |_, _, cx| {
+                                        // Rich (tables, headings, code) for Docs / Slack / Mail; the
+                                        // Markdown rides along as the plain text.
+                                        .item(PopupMenuItem::new("Copy").on_click({
+                                            let raw = raw.clone();
+                                            move |_, _, cx| crate::clipboard::copy_rich(&strip_rules(&raw), cx)
+                                        }))
+                                        .item(PopupMenuItem::new("Copy as Markdown").on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()))
                                         }))
                                     }),
